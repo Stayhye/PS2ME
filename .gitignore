@@ -1,7 +1,5 @@
-# External SDK sources (reference only, downloaded separately)
-references/*
-# ...but keep the cross-session project notes
-!references/PROJECT_NOTES.md
+# External SDK sources and internal-only notes — never versioned
+references/
 
 # Build artifacts
 *.o
