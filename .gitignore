@@ -1,0 +1,8 @@
+# External SDK sources (reference only, downloaded separately)
+references/*
+# ...but keep the cross-session project notes
+!references/PROJECT_NOTES.md
+
+# Build artifacts
+*.o
+*.elf
