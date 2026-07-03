@@ -43,11 +43,28 @@ Rules that keep the layers honest:
 
 ```
 ps2/javacall/
-  include/    javacall_platform_defs.h        # required by javacall; PS2 target defs
-  contract/   javacall_logging.cpp, ...        # extern "C" shims (ABI boundary)
-  hal/        Logger.{hpp,cpp}, IOutputSink.hpp # C++ device/service classes
-  platform/   StdoutSink.{hpp,cpp}, ...         # ps2sdk-backed implementations
+  include/    javacall_platform_defs.h          # required by javacall; PS2 target defs
+  contract/   javacall_logging.cpp              # extern "C" shims (ABI boundary):
+              javacall_os.cpp                   #   logging, os, time, memory
+              javacall_time.cpp
+              javacall_memory.cpp
+  hal/        IOutputSink.hpp  Logger.{hpp,cpp} # C++ device/service classes,
+              ICpuCache.hpp    OsCore.{hpp,cpp} #   no ps2sdk here
+              IClock.hpp       SystemClock.{hpp,cpp}
+              ITimerBackend.hpp Timer.hpp TimerService.{hpp,cpp}
+              IHeap.hpp        MemoryManager.{hpp,cpp}
+  platform/   StdoutSink.{hpp,cpp}              # backends implementing the HAL:
+              Ps2CpuCache.{hpp,cpp}             #   ps2sdk (EE-only)
+              Ps2AlarmTimer.{hpp,cpp}           #   ps2sdk (EE-only)
+              PosixClock.{hpp,cpp}              #   portable (host + ps2sdk newlib)
+              PosixTickTimer.{hpp,cpp}          #   host validation backend
+              SystemHeap.{hpp,cpp}              #   portable (host + ps2sdk newlib)
 ```
+
+For each service the HAL defines an interface and the platform layer supplies
+the backend; only one backend per interface is compiled into a given build. The
+tick timer has two: `PosixTickTimer` (setitimer/SIGALRM) for the host validation
+build and `Ps2AlarmTimer` (EE `SetAlarm`) for the PS2 target.
 
 ## Roadmap
 
@@ -65,5 +82,22 @@ AMS beyond basic lifecycle, security.
 
 ## Current status
 
-Scaffold + the first exemplar module (**logging**) that establishes the
-contract→HAL→platform pattern. Remaining modules follow the same shape.
+**Milestone A modules complete and validated:** logging, os, time, memory. Each
+follows the contract→HAL→platform pattern; all compile clean under `-Wall
+-Wextra` with both the host g++ and the ps2sdk `mips64r5900el-ps2-elf` toolchain.
+A host harness exercises the whole extern "C" surface — allocation, the wall/
+monotonic clocks, and the cyclic 30 ms scheduler tick (fire / suspend / resume /
+finalize) — all green.
+
+- **os** — `initialize`/`dispose` lifecycle + `flush_icache` via `ICpuCache`
+  (`Ps2CpuCache` = EE `FlushCache`). Mutex/cond are omitted: the CLDC VM is green-
+  threaded on one OS thread (the reference `win32_x86_cldc` port omits them too).
+- **time** — `SystemClock` (wall + monotonic + sleep + timezone over `IClock`)
+  and `TimerService`, which drives the **cyclic 30 ms tick** that pumps
+  `real_time_tick()` — the heartbeat of the green-thread scheduler
+  (`OS_javacall.cpp::start_ticks`), not optional.
+- **memory** — `MemoryManager` over `IHeap` (`SystemHeap` = newlib malloc); the
+  big VM heap plus malloc/realloc/free, with calloc/strdup composed portably.
+
+Next: the `cldc/build/ps2_mips` target that links the CLDC VM against this port
+with the ps2sdk toolchain, to run Milestone A on PCSX2.
