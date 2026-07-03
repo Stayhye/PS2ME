@@ -1,0 +1,26 @@
+#!/bin/bash
+# mergelib TARGET.a SRC.a - merge every object member of SRC.a into TARGET.a.
+#
+# The phoneME MIDP build calls `mergelib` to fold libcldc_vm.a and the PCSL
+# archives into libjvm.a, but the tool ships nowhere in the phoneME source tree
+# (only the *_post.gmk consumers reference it). This is our implementation: it
+# extracts SRC.a with the EE `ar` (so the member object format matches the MIPS
+# objects already in TARGET.a) and appends them, then refreshes the index.
+#
+# Members are extracted into a private temp dir and appended by explicit path, so
+# same-named members coming from different archives coexist (GNU ar allows
+# duplicate member names; the linker resolves across them).
+set -e
+
+TARGET=${1:?usage: mergelib TARGET.a SRC.a}
+SRC=${2:?usage: mergelib TARGET.a SRC.a}
+AR=${AR:-${GNU_TOOLS_DIR:-/usr/local/ps2dev/ee-crosswrap}/bin/ar}
+
+tmp=$(mktemp -d)
+( cd "$tmp" && "$AR" x "$SRC" )
+# Append in batches; fall back to one-by-one if the glob is too long.
+"$AR" qs "$TARGET" "$tmp"/*.o 2>/dev/null || {
+    for o in "$tmp"/*.o; do "$AR" q "$TARGET" "$o"; done
+    "$AR" s "$TARGET"
+}
+rm -rf "$tmp"
