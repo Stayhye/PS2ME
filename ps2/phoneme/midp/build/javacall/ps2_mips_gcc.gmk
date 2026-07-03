@@ -1,0 +1,53 @@
+#
+# MIDP javacall platform configuration for the PlayStation 2 (Emotion Engine,
+# MIPS r5900, little-endian, 32-bit). Mirrors linux_i386_gcc.gmk but targets the
+# ps2sdk EE toolchain, reached through the same unprefixed $(GNU_TOOLS_DIR)/bin/
+# {gcc,g++,ar} wrappers as the CLDC ps2_mips build (build/common/makefiles/gcc.gmk
+# prepends GNU_TOOLS_BINDIR to the bare tool names).
+#
+# Generates libmidp.a + libjvm.a for MIPS (target `midp`); the final PS2 ELF is
+# linked separately by our EE build, same split as the CLDC ps2_mips target.
+#
+# The MIPS codegen flags (-DMIPS -G0, endianness, no -m32) are inherited from the
+# CLDC dist's cldc_vm.make (JVM_CC_FLAGS/JVM_CPP_FLAGS, pulled in by gcc.gmk); the
+# EE cross gcc itself makes the objects MIPS, so no -march/-m32 is needed here.
+#
+
+# Definition of platform to build on (host tools: romgen/preverify/configurator).
+HOST_PLATFORM		= linux
+HOST_OS			= linux
+HOST_CPU		= i386
+HOST_COMPILER		= gcc
+
+# Definition of platform to run on.
+TARGET_PLATFORM		= javacall
+TARGET_OS		= javacall
+TARGET_CPU		= mips
+TARGET_COMPILER		= gcc
+TARGET_VM		= cldc_vm
+
+# Our PCSL was cross-built into $(PCSL_OUTPUT_DIR)/linux_mips (PCSL_OS=linux,
+# PCSL_CPU=mips), not the default javacall_mips that gcc-jtwi.gmk would assume.
+PCSL_TARGET_DIR		= $(PCSL_OUTPUT_DIR)/linux_mips
+
+# The EE newlib toolchain has no -lpthread/-lm/-lnsl of the Linux flavour that
+# gcc.gmk's default GCC_LIBS pulls in; we link the final ELF ourselves, so keep
+# the MIDP-side system libs empty here (libm comes from the EE link step).
+GCC_LIBS =
+
+# The 2008-era MIDP C sources assume a pre-C23 compiler; the modern EE gcc (15.x)
+# defaults to gnu23 and is stricter. Two flags keep the old code building without
+# patching every file (analogous to the CLDC toolchain patches):
+#   -std=gnu99    : `bool`/`true`/`false` are not keywords (code does
+#                   `typedef int bool`), and mixed declarations are allowed.
+#   -fpermissive  : downgrades C permerrors (implicit function declaration, e.g.
+#                   memcpy without <string.h>; implicit int; lax int/pointer
+#                   conversions) back to warnings.
+EXTRA_CFLAGS += -std=gnu99 -fpermissive
+
+# Platform-specific compiler/linker flags.
+EXTRA_CPPFLAGS +=
+LD_FLAGS +=
+EXTRA_LIBS +=
+
+LIBS += -L$(JAVACALL_LIB_DIR) -ljavacall$(g)$(r)

@@ -72,4 +72,16 @@ grep -q '\.arch \.387' "$PHONEME/cldc/src/vm/cpu/c/AsmStubs_i386.s" || \
 sed -i 's/javacall_result res;/int res;/' \
     "$PHONEME/pcsl/network/stubs/pcsl_network.c"
 
+# 8) MIDP security: `javacall_policy_load.c : policy_files` (midp_permissions/
+#    lib.gmk) makes the make treat the checked-in source javacall_policy_load.c as
+#    a build-dir target to (re)generate, which defeats the `vpath ... reference/
+#    native` lookup -> "javacall_policy_load.c: No such file or directory" at
+#    compile. policy_files only copies the runtime _policy/_function_groups files;
+#    it does not affect the .c. Make it an order-only prerequisite (| policy_files)
+#    so it still runs but the .c is resolved from the source tree. Idempotent.
+grep -q 'javacall_policy_load.c : | policy_files' \
+    "$PHONEME/midp/src/security/midp_permissions/lib.gmk" || \
+  sed -i 's/^javacall_policy_load.c : policy_files/javacall_policy_load.c : | policy_files/' \
+      "$PHONEME/midp/src/security/midp_permissions/lib.gmk"
+
 echo "phoneME patches applied to: $PHONEME"

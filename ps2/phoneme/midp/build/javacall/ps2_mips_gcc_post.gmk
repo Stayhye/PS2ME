@@ -1,0 +1,30 @@
+#
+# MIDP javacall post-processing for the PlayStation 2 (ps2_mips_gcc). Mirrors
+# linux_i386_gcc_post.gmk: builds the two static archives and leaves the final
+# ELF link to our EE build.
+#
+#   libmidp.a  = the MIDP objects + the AMS runMidlet object.
+#   libjvm.a   = libmidp.a  merged with  libcldc_vm.a (our cross-built CLDC VM)
+#                and the six PCSL archives, via `mergelib` (a helper absent from
+#                the phoneME tree; we supply an EE-ar wrapper on PATH).
+#
+# $(g) = _g in debug (empty here); $(r) = release suffix (empty unless
+# USE_CLDC_RELEASE). Our CLDC dist ships libcldc_vm.a (product, no suffix).
+#
+
+midp: $(BINDIR)/libmidp$(g).a $(BINDIR)/libjvm$(g).a
+
+$(BINDIR)/libmidp$(g).a: $(OBJ_FILES) $(AMS_RUNMIDLET_OBJ_FILES)
+	@echo " ... $@" $(LOG)
+	$(A)$(CREATE_LIB) $(AR_OUTPUT)`$(call fixcygpath,$@ $(OBJ_FILES) $(AMS_RUNMIDLET_OBJ_FILES))` $(LOG)
+
+$(BINDIR)/libjvm$(g).a: $(VERIFY_BUILD_ENV) $(DISPLAY_BUILD_ENV) $(BINDIR)/libmidp$(g).a $(CLDC_DIST_DIR)/lib/libcldc_vm$(g)$(r)$(LIB_SUFFIX) $(PCSL_TARGET_DIR)/lib/libpcsl_escfilenames.a $(PCSL_TARGET_DIR)/lib/libpcsl_file.a $(PCSL_TARGET_DIR)/lib/libpcsl_memory.a $(PCSL_TARGET_DIR)/lib/libpcsl_print.a $(PCSL_TARGET_DIR)/lib/libpcsl_string.a $(PCSL_TARGET_DIR)/lib/libpcsl_network.a
+	@echo " ... $@" $(LOG)
+	$(A)cp $(BINDIR)/libmidp$(g).a $@
+	$(A)mergelib $@ $(CLDC_DIST_DIR)/lib/libcldc_vm$(g)$(r)$(LIB_SUFFIX)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_escfilenames.a $(LOG)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_file.a $(LOG)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_memory.a $(LOG)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_print.a $(LOG)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_string.a $(LOG)
+	$(A)mergelib $@ $(PCSL_TARGET_DIR)/lib/libpcsl_network.a $(LOG)

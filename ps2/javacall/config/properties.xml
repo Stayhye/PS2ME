@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE configuration SYSTEM "configuration.dtd">
+<!--
+    JavaCall system-property fragment for the PlayStation 2 port of phoneME
+    Feature MIDP. Placed at $(JAVACALL_OUTPUT_DIR)/properties.xml, where the MIDP
+    build's configurator merges it (midp/build/javacall/Platform.gmk pulls it into
+    SUBSYSTEM_CONFIGURATION_INPUT_FILES). Modeled on
+    javacall/configuration/phoneMEFeature/win32_x86/properties.xml; kept minimal
+    for Milestone B (only the JAM storage reservation).
+-->
+<configuration>
+<properties>
+<!-- INTERNAL PROPERTIES -->
+<!-- Visible from Configuration.getProperty() -->
+  <property Key="system.jam_space"
+		Value="1000000"
+		Scope="internal"
+		Comment="Amount of space to reserve for JAM storage."/>
+</properties>
+</configuration>
