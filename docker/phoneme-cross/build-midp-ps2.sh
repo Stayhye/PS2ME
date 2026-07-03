@@ -107,6 +107,18 @@ if [ $rc -ne 0 ] && [ -f "$MIDP_OUT/generated/jwc_properties.ini" ]; then
     run_make "${@:-midp}"
 fi
 
+# --- 4) Romize an internal MIDlet suite into the MIDP ROM (Milestone B3) -------
+# After the MIDP class library exists, compile+preverify our MIDlet against it,
+# stage it into the romizer input, and re-run the ROM step so ROMImage.cpp picks
+# it up. Launched by class name from the internal suite (see Ps2MidpMain.cpp).
+APP_JAVA=${APP_JAVA:-ps2/vm/apps/HelloCanvas.java}
+if [ -n "$APP_JAVA" ] && [ -f "$APP_JAVA" ]; then
+    echo "+ romizing MIDlet suite: $APP_JAVA"
+    MIDP_OUTPUT_DIR="$MIDP_OUT" CLDC_DIST_DIR="$CLDC_DIST" JDK_DIR="$JDK_DIR" \
+        bash ./docker/phoneme-cross/romize-midlet.sh "$APP_JAVA"
+    run_make "${@:-midp}"
+fi
+
 echo "=================================================================="
 echo " MIDP archives:"
 ls -la "$MIDP_OUT"/bin/mips/*.a 2>/dev/null || echo "  (none yet)"

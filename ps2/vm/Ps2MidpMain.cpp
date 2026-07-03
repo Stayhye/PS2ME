@@ -45,13 +45,18 @@ int main(int /*argc*/, char** /*argv*/) {
     javacall_initialize_configurations();  // load the static property table (MIDP reads it)
 
     // Queue the standard AMS start event. runMidlet treats argv[0] as the program
-    // name; "-1" is the internal suite id; the class is the graphical app manager.
-    // Manager (SVM) is the right AMS entry for a bare boot: its constructor tolerates
-    // a missing "arg-0" (unlike MIDletSuiteLauncher, which requires a numeric suite
-    // id and throws NumberFormatException), so it comes up as an empty suite list.
+    // name; "internal" (== INTERNAL_SUITE_ID) selects the romized internal suite
+    // without touching the suite storage (runMidlet.c); the class is the MIDlet to
+    // run from it.
+    //
+    // Milestone B3.1 -- first light: launch our romized Canvas MIDlet directly,
+    // bypassing the AppManager. This is the smallest surface that exercises the
+    // full loop (paint() -> gxj -> framebuffer, keyPressed() <- pad, animation
+    // thread). B3.2 will switch this back to com.sun.midp.appmanager.Manager and
+    // make the MIDlet appear in the AppManager list instead.
     static char a0[] = "runMidlet";
-    static char a1[] = "-1";
-    static char a2[] = "com.sun.midp.appmanager.Manager";
+    static char a1[] = "internal";
+    static char a2[] = "com.j2meps2.demo.HelloCanvas";
     char* jargv[] = { a0, a1, a2 };
     javanotify_start_java_with_arbitrary_args(3, jargv);
 
