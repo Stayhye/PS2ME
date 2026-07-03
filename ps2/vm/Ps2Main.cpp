@@ -26,6 +26,7 @@ extern "C" {
 #include <pcsl_memory.h>   // pcsl_mem_initialize / pcsl_mem_finalize
 #include <pcsl_print.h>    // pcsl_print_chars (the VM's stdout path under ENABLE_PCSL)
 #include <javacall_logging.h> // javacall_print (our own layer; boot sign-of-life)
+#include <kernel.h>        // ps2sdk EE: SleepThread (halt instead of reboot)
 }
 
 /* -------------------------------------------------------------------------
@@ -65,13 +66,12 @@ int main(int /*argc*/, char** /*argv*/) {
 
     /* No command line on the PS2: assemble a fixed argv. jargv[0] stands in for
      * the program name (skipped, mirroring Main_javacall.cpp's argc--/argv++).
-     * Milestone A boots with "-version": the VM prints its banner through the
-     * same print path and returns, proving the end-to-end pipeline. Once a
-     * HelloWorld is romized into the ROM image, replace "-version" with the
-     * class name. */
+     * We launch "HelloWorld", which is romized into the ROM image (see
+     * docker/phoneme-cross/romize-app.sh), so JVM_Start finds it without any
+     * file I/O. The parse loop stops at the first non-option (the class name). */
     char  a_prog[] = "j2me";
-    char  a_opt[]  = "-version";
-    char* jargv[]  = { a_prog, a_opt };
+    char  a_cls[]  = "HelloWorld";
+    char* jargv[]  = { a_prog, a_cls };
     int   jargc    = 2;
 
     /* Skip the program name, then run the VM option parse loop. */
@@ -96,5 +96,14 @@ end:
 #if ENABLE_PCSL
     pcsl_mem_finalize();
 #endif
-    return code;
+
+    /* The VM has returned. Returning from main() on the PS2 resets the console
+     * and scrolls the log away, so halt here instead: this keeps the EE Console
+     * output on screen for inspection. SleepThread() parks this (only) thread
+     * forever. */
+    javacall_print("j2me-ps2: VM exited; halting (no reboot).\n");
+    for (;;) {
+        SleepThread();
+    }
+    return code; /* not reached */
 }
