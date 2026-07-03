@@ -1,6 +1,7 @@
 // PS2 JavaCall port — HAL layer. EventQueue implementation.
 #include "EventQueue.hpp"
 #include "IEventLock.hpp"
+#include "IPollHook.hpp"
 #include "SystemClock.hpp"
 
 #include <cstring>   // std::memcpy
@@ -74,6 +75,13 @@ javacall_result EventQueue::receive(long timeoutMs, unsigned char* buffer, int m
         (timeoutMs < 0) ? 0 : clock.elapsedMillis() + timeoutMs;
 
     for (;;) {
+        // Feed asynchronous input (controller) into the queue before draining it,
+        // so key events raised here are seen on this very iteration. Runs outside
+        // the lock: onPoll() may call send(), which takes the lock itself.
+        if (pollHook_ != 0) {
+            pollHook_->onPoll();
+        }
+
         bool overflow = false;
         int  got;
         {

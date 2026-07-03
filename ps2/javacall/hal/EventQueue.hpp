@@ -18,6 +18,7 @@ namespace ps2 {
 namespace hal {
 
 class IEventLock;
+class IPollHook;
 
 class EventQueue {
 public:
@@ -30,6 +31,10 @@ public:
 
     /// Install the lock backend. Ownership stays with the caller.
     void setLock(IEventLock* lock) { lock_ = lock; }
+
+    /// Install a hook pumped on every receive() poll cycle (input feeding).
+    /// Ownership stays with the caller.
+    void setPollHook(IPollHook* hook) { pollHook_ = hook; }
 
     /// javacall_event_send: copy @p len bytes into the queue.
     /// @return JAVACALL_OK, or JAVACALL_FAIL if full or oversized.
@@ -44,7 +49,7 @@ public:
                             int* outLen);
 
 private:
-    EventQueue() : lock_(0), head_(0), count_(0) {}
+    EventQueue() : lock_(0), pollHook_(0), head_(0), count_(0) {}
     EventQueue(const EventQueue&);
     EventQueue& operator=(const EventQueue&);
 
@@ -53,6 +58,7 @@ private:
     int pop(unsigned char* buffer, int maxLen, bool* overflow);
 
     IEventLock* lock_;
+    IPollHook*  pollHook_;
     struct Slot {
         unsigned char data[MAX_EVENT_BYTES];
         int           len;

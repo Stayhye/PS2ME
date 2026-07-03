@@ -91,7 +91,7 @@ done
 echo "+ [3/5] libjavacall (contract + hal + platform)"
 JC=/work/ps2/javacall
 JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti \
-    -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include"
+    -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include -I$PS2SDK/ports/include"
 JC_SRCS="
     contract/javacall_logging.cpp
     contract/javacall_os.cpp
@@ -115,14 +115,16 @@ JC_SRCS="
     hal/MidletLifecycle.cpp
     hal/Storage.cpp
     hal/RandomSource.cpp
+    hal/Keypad.cpp
     platform/StdoutSink.cpp
     platform/Ps2CpuCache.cpp
     platform/Ps2AlarmTimer.cpp
-    platform/PosixClock.cpp
+    platform/Ps2Clock.cpp
     platform/SystemHeap.cpp
     platform/GsDisplay.cpp
     platform/Ps2Framebuffer.cpp
     platform/NullEventLock.cpp
+    platform/Ps2Pad.cpp
 "
 JC_OBJS=""
 for src in $JC_SRCS; do
@@ -141,7 +143,7 @@ $EE_CXX $MAIN_FLAGS -c /work/ps2/vm/Ps2MidpMain.cpp -o "$OUT/Ps2MidpMain.o"
 echo "+ [5/5] link j2me-midp.elf"
 LINKFILE=$PS2SDK/ee/startup/linkfile
 $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
-    -L$PS2SDK/ee/lib -Wl,-zmax-page-size=128 \
+    -L$PS2SDK/ee/lib -L$PS2SDK/ports/lib -Wl,-zmax-page-size=128 \
     -Wl,--start-group \
         "$OUT/Ps2MidpMain.o" "$OUT/ROMImage.o" "$OUT/nativeFunctionTable.o" \
         $JC_OBJS $SHARE_OBJS \
@@ -153,6 +155,7 @@ $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
         "$PCSL_OUT/lib/libpcsl_network.a" \
         "$PCSL_OUT/lib/libpcsl_escfilenames.a" \
         -ldraw -lgraph -lpacket -ldma -lmath3d \
+        -lps2_drivers -lmtap -lpad -lpatches \
         -lkernel -lc -lm -lgcc \
     -Wl,--end-group
 
