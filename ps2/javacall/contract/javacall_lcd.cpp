@@ -63,7 +63,11 @@ char* javacall_lcd_get_display_name(int /*hardwareId*/) {
 }
 
 int javacall_lcd_get_display_capabilities(int /*hardwareId*/) {
-    return 0;
+    // Must advertise title/ticker/forms/etc; a zero mask makes Display.setCurrent
+    // throw "This display does not support title" for any Form (the AMS app list),
+    // which was silently swallowed by the splash's Timer thread and left the splash
+    // on screen forever.
+    return ps2::hal::LcdDevice::instance().capabilities();
 }
 
 int* javacall_lcd_get_display_device_ids(int* n) {

@@ -48,6 +48,27 @@ public:
     int width()  const { return WIDTH; }
     int height() const { return HEIGHT; }
 
+    /// LCDUI feature bits the MIDP DisplayDevice queries via
+    /// javacall_lcd_get_display_capabilities. Mirror
+    /// com.sun.midp.lcdui.DisplayDevice.DISPLAY_DEVICE_SUPPORTS_*. A value of 0
+    /// makes Display.setCurrent throw "This display does not support title"
+    /// (or ticker) for any Form/Screen, so the AMS can never leave the splash.
+    enum Capability {
+        CAP_INPUT_EVENTS = 1,
+        CAP_COMMANDS     = 2,
+        CAP_FORMS        = 4,
+        CAP_TICKER       = 8,
+        CAP_TITLE        = 16,
+        CAP_ALERTS       = 32,
+        CAP_LISTS        = 64,
+        CAP_TEXTBOXES    = 128
+    };
+    /// Full high-level UI support, matching the phoneME reference value (255).
+    int capabilities() const {
+        return CAP_INPUT_EVENTS | CAP_COMMANDS | CAP_FORMS | CAP_TICKER |
+               CAP_TITLE | CAP_ALERTS | CAP_LISTS | CAP_TEXTBOXES;
+    }
+
     bool fullScreenMode() const { return fullScreen_; }
     void setFullScreenMode(bool on) { fullScreen_ = on; }
 
