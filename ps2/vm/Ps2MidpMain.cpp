@@ -49,15 +49,14 @@ int main(int /*argc*/, char** /*argv*/) {
     // without touching the suite storage (runMidlet.c); the class is the MIDlet to
     // run from it.
     //
-    // Milestone B3.2: launch the graphical AppManager. Our romized demo Canvas
-    // MIDlet (com.j2meps2.demo.HelloCanvas) is added to the AppManager list as an
-    // internal suite by patch #14 (AppManagerPeer.updateContent), so it is launched
-    // by selecting it in the UI rather than directly here. The SVM restart loop that
-    // switches from Manager to the selected MIDlet and back is handled natively
-    // inside midp_run_midlet_with_args_cp, so a single JavaTask() call suffices.
+    // Milestone B4: launch our GameLoader bootstrap MIDlet. It enumerates the user's
+    // game archives from storage (host:games/), and will seed + install each so it
+    // shows up in the AppManager. GameLoader hands off to the AppManager itself via
+    // MIDletSuiteUtils.execute; the SVM restart loop (native, inside
+    // midp_run_midlet_with_args_cp) runs the chain, so a single JavaTask() suffices.
     static char a0[] = "runMidlet";
     static char a1[] = "internal";
-    static char a2[] = "com.sun.midp.appmanager.Manager";
+    static char a2[] = "com.j2meps2.loader.GameLoader";
     char* jargv[] = { a0, a1, a2 };
     javanotify_start_java_with_arbitrary_args(3, jargv);
 

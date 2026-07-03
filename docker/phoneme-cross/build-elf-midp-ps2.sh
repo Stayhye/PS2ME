@@ -32,6 +32,7 @@ EE_CC=$GNU_TOOLS_DIR/bin/gcc
 JC_OUT=/build/javacall_ps2
 PCSL_OUT=/build/pcsl_ps2_out/linux_mips
 MIDP_OUT=/build/midp_ps2_out
+CLDC_DIST=/build/cldc_ps2_out/ps2_mips/dist   # kni.h for the GameLoader KNI bridge
 LIBJVM=$MIDP_OUT/bin/mips/libjvm.a
 EXE_OBJ_DIR=$MIDP_OUT/obj/mips
 JC_SHARE=/work/references/phoneme/javacall/implementation/share
@@ -116,6 +117,7 @@ JC_SRCS="
     hal/Storage.cpp
     hal/RandomSource.cpp
     hal/Keypad.cpp
+    hal/GameStorage.cpp
     platform/StdoutSink.cpp
     platform/Ps2CpuCache.cpp
     platform/Ps2AlarmTimer.cpp
@@ -125,6 +127,7 @@ JC_SRCS="
     platform/Ps2Framebuffer.cpp
     platform/NullEventLock.cpp
     platform/Ps2Pad.cpp
+    platform/Ps2HostStorage.cpp
 "
 JC_OBJS=""
 for src in $JC_SRCS; do
@@ -133,11 +136,14 @@ for src in $JC_SRCS; do
     JC_OBJS="$JC_OBJS $obj"
 done
 
-# --- 4) Ps2MidpMain.o: our entrypoint -----------------------------------------
-echo "+ [4/5] Ps2MidpMain.o (entrypoint)"
+# --- 4) Ps2MidpMain.o + GameLoaderKni.o: our entrypoint + KNI bridge -----------
+echo "+ [4/5] Ps2MidpMain.o (entrypoint) + GameLoaderKni.o (KNI bridge)"
 MAIN_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti \
     -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include"
 $EE_CXX $MAIN_FLAGS -c /work/ps2/vm/Ps2MidpMain.cpp -o "$OUT/Ps2MidpMain.o"
+# The KNI bridge needs the VM's kni.h (from the CLDC dist). Its C symbols are what
+# the generated nativeFunctionTable.cpp references for GameLoader's native methods.
+$EE_CXX $MAIN_FLAGS -I$CLDC_DIST/include -c /work/ps2/vm/GameLoaderKni.cpp -o "$OUT/GameLoaderKni.o"
 
 # --- 5) Link the ELF ----------------------------------------------------------
 echo "+ [5/5] link j2me-midp.elf"
@@ -145,7 +151,8 @@ LINKFILE=$PS2SDK/ee/startup/linkfile
 $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
     -L$PS2SDK/ee/lib -L$PS2SDK/ports/lib -Wl,-zmax-page-size=128 \
     -Wl,--start-group \
-        "$OUT/Ps2MidpMain.o" "$OUT/ROMImage.o" "$OUT/nativeFunctionTable.o" \
+        "$OUT/Ps2MidpMain.o" "$OUT/GameLoaderKni.o" \
+        "$OUT/ROMImage.o" "$OUT/nativeFunctionTable.o" \
         $JC_OBJS $SHARE_OBJS \
         "$LIBJVM" \
         "$PCSL_OUT/lib/libpcsl_file.a" \

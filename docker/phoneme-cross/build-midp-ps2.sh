@@ -111,11 +111,11 @@ fi
 # After the MIDP class library exists, compile+preverify our MIDlet against it,
 # stage it into the romizer input, and re-run the ROM step so ROMImage.cpp picks
 # it up. Launched by class name from the internal suite (see Ps2MidpMain.cpp).
-APP_JAVA=${APP_JAVA:-ps2/vm/apps/HelloCanvas.java}
-if [ -n "$APP_JAVA" ] && [ -f "$APP_JAVA" ]; then
-    echo "+ romizing MIDlet suite: $APP_JAVA"
+APP_JAVA=${APP_JAVA:-"ps2/vm/apps/GameLoader.java ps2/vm/apps/HelloCanvas.java"}
+if [ -n "$APP_JAVA" ]; then
+    echo "+ romizing MIDlet suite(s): $APP_JAVA"
     MIDP_OUTPUT_DIR="$MIDP_OUT" CLDC_DIST_DIR="$CLDC_DIST" JDK_DIR="$JDK_DIR" \
-        bash ./docker/phoneme-cross/romize-midlet.sh "$APP_JAVA"
+        bash ./docker/phoneme-cross/romize-midlet.sh $APP_JAVA
     run_make "${@:-midp}"
 fi
 
