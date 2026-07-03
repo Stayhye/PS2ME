@@ -44,13 +44,20 @@ long javacall_file_write(javacall_handle /*handle*/, const unsigned char* /*buf*
 }
 
 // --- font ----------------------------------------------------------------
-// Return OK with zeroed metrics rather than NOT_IMPLEMENTED: get_info's out
-// params must be defined even on the unused path, and a zero width is harmless.
+// Deliberately fail: phoneME's gx_putpixel rasterizer (gxj_text.c) tries the
+// platform font first (gxjport_draw_chars -> javacall_font_set_font/_draw) and,
+// only when it reports failure, falls back to its own built-in bitmap font
+// (FontBitmaps / drawChar). Returning JAVACALL_OK here (with an empty draw)
+// makes gxjport report success, so the fallback is skipped and NO text renders
+// (widgets draw as empty boxes). Returning non-OK routes every glyph through the
+// built-in font, giving us real text for free until a PS2-native font is added.
+// get_width returns 0 so gx_get_charswidth's own `width > 0` guard also falls
+// back to the built-in metrics, keeping draw and layout consistent.
 
 javacall_result javacall_font_set_font(javacall_font_face /*face*/,
                                        javacall_font_style /*style*/,
                                        javacall_font_size /*size*/) {
-    return JAVACALL_OK;
+    return JAVACALL_NOT_IMPLEMENTED;
 }
 
 javacall_result javacall_font_draw(javacall_pixel /*color*/,
@@ -60,7 +67,7 @@ javacall_result javacall_font_draw(javacall_pixel /*color*/,
                                    int /*destBufferHoriz*/, int /*destBufferVert*/,
                                    int /*x*/, int /*y*/,
                                    const javacall_utf16* /*text*/, int /*textLen*/) {
-    return JAVACALL_OK;
+    return JAVACALL_NOT_IMPLEMENTED;
 }
 
 javacall_result javacall_font_get_info(javacall_font_face /*face*/,
@@ -70,7 +77,7 @@ javacall_result javacall_font_get_info(javacall_font_face /*face*/,
     if (ascent)  *ascent  = 0;
     if (descent) *descent = 0;
     if (leading) *leading = 0;
-    return JAVACALL_OK;
+    return JAVACALL_NOT_IMPLEMENTED;
 }
 
 int javacall_font_get_width(javacall_font_face /*face*/,
