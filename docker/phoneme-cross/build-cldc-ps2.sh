@@ -30,15 +30,26 @@ mkdir -p "$BS"
 #     Stream layer against PCSL, so the target needs PCSL's headers (to compile)
 #     and its libs (at the final ELF link). Built with the EE toolchain; portable
 #     modules over newlib (posix file, stub network, heap chunk memory).
+#     File module = ram: an in-memory RAM filesystem (rmfs). The posix module needs
+#     sys/statvfs.h (absent in newlib) and, worse, a mounted writable FS the PS2
+#     lacks; the stubs module's pcsl_file_init() returns -1, so MIDP storage init
+#     aborts ("out of memory") before the AMS can start. rmfs is self-contained and
+#     gives MIDP a working (ephemeral) storage + RMS without any hardware I/O.
 export PCSL_OUTPUT_DIR=${PCSL_OUTPUT_DIR:-/build/pcsl_ps2_out}
-if [ ! -f "$PCSL_OUTPUT_DIR/linux_mips/inc/pcsl_file.h" ]; then
+PCSL_FILE_MODULE=${PCSL_FILE_MODULE:-ram}
+PCSL_STAMP="$PCSL_OUTPUT_DIR/.pcsl_file_module"
+if [ ! -f "$PCSL_OUTPUT_DIR/linux_mips/inc/pcsl_file.h" ] || \
+   [ "$(cat "$PCSL_STAMP" 2>/dev/null)" != "$PCSL_FILE_MODULE" ]; then
+    echo "+ building PCSL (FILE_MODULE=$PCSL_FILE_MODULE)"
+    rm -rf "$PCSL_OUTPUT_DIR/linux_mips"
     make -C references/phoneme/pcsl \
         PCSL_PLATFORM=ps2_mips_gcc \
         PCSL_OUTPUT_DIR="$PCSL_OUTPUT_DIR" \
         GNU_TOOLS_DIR="$GNU_TOOLS_DIR" \
         JDK_DIR="$JDK_DIR" \
         NETWORK_MODULE=stubs \
-        FILE_MODULE=posix
+        FILE_MODULE="$PCSL_FILE_MODULE"
+    echo "$PCSL_FILE_MODULE" > "$PCSL_STAMP"
 fi
 
 # 3) Assemble JAVACALL_OUTPUT_DIR = the javacall port as the build expects it:

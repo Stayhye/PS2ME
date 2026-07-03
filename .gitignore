@@ -4,3 +4,4 @@ references/
 # Build artifacts
 *.o
 *.elf
+/build/
