@@ -49,6 +49,16 @@ echo "=================================================================="
 bash ./docker/phoneme-host/patch-phoneme.sh references/phoneme >/dev/null 2>&1 || true
 cp -r ps2/phoneme/. references/phoneme/
 
+# --- 0.5) Optionally romize an app into the ROM image (APP_JAVA=path/to.java) --
+# Ps2Main.cpp launches "HelloWorld" by name, so it must be in the ROM. Regenerates
+# target/generated/ROMImage.cpp with the app; step [1] then compiles the fresh one.
+APP_JAVA=${APP_JAVA:-ps2/vm/apps/HelloWorld.java}
+if [ -n "$APP_JAVA" ] && [ -f "$APP_JAVA" ]; then
+    echo "+ [0.5] romize app: $APP_JAVA"
+    GNU_TOOLS_DIR="$GNU_TOOLS_DIR" JDK_DIR=/opt/java/openjdk \
+        bash ./docker/phoneme-cross/romize-app.sh "/work/$APP_JAVA"
+fi
+
 # --- 1) EXE_OBJS: let the build system compile them with the target flags ------
 echo "+ [1/4] EXE_OBJS (ROMImage / NativesTable / jvmspi)"
 make -C "$PROD" \
