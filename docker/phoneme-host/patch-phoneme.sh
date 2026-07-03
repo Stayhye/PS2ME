@@ -28,4 +28,29 @@ sed -i 's/CPP_DEF_FLAGS[[:space:]]*+=[[:space:]]*-fstrict-aliasing/CPP_DEF_FLAGS
 #    (or build only romgen at -O0) once the exact miscompiled pass is identified.
 sed -i 's/-O2 /-O0 /g' "$PHONEME/cldc/build/share/jvm.make"
 
+# 4) Large-file support for the 32-bit host tools (romgen/loopgen).
+#    romgen is built -m32. On a Docker Desktop (Windows) bind mount the shared
+#    files get 64-bit inode numbers, so a 32-bit stat() over the mount fails with
+#    EOVERFLOW ("Value too large for defined data type"). romgen resolves the
+#    `Include cldcx_rom.cfg` directive via OsFile_exists() -> stat()+S_ISREG(),
+#    so it reported "Cannot find included ROM configuration file" even though the
+#    file opened fine with fopen(). -D_FILE_OFFSET_BITS=64 makes stat() use the
+#    64-bit stat64 path and resolves the include. (fopen already worked, which is
+#    why the main -romconfig loaded but the Include failed.)
+# NOTE: jvm.make has CRLF line endings, so do NOT anchor on '$' (the line really
+# ends in "-DGCC\r"). Insert the flag before -pipe so the trailing \r stays where
+# it already is.
+grep -q '_FILE_OFFSET_BITS' "$PHONEME/cldc/build/share/jvm.make" || \
+  sed -i 's/+= -pipe -DGCC/+= -D_FILE_OFFSET_BITS=64 -pipe -DGCC/' \
+      "$PHONEME/cldc/build/share/jvm.make"
+
+# 5) The generated ROMImage.cpp initializes int[] arrays with word values > INT_MAX
+#    (e.g. 0xFFFFFFFF = 4294967295). In C++11+ brace-init, that is a narrowing
+#    conversion, which modern gcc reports as a hard ERROR. The 2009 code is C++03,
+#    where this is fine. -Wno-narrowing restores the old (accepting) behaviour.
+#    (Same CRLF caveat: insert before -pipe, not at end of line.)
+grep -q 'Wno-narrowing' "$PHONEME/cldc/build/share/jvm.make" || \
+  sed -i 's/+= -D_FILE_OFFSET_BITS=64 -pipe -DGCC/+= -D_FILE_OFFSET_BITS=64 -Wno-narrowing -pipe -DGCC/' \
+      "$PHONEME/cldc/build/share/jvm.make"
+
 echo "phoneME patches applied to: $PHONEME"
