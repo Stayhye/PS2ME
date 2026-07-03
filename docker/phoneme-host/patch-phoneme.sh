@@ -136,4 +136,51 @@ grep -q 'ps2-romized-icons-with-fs' "$KNI_C" || { \
       "$KNI_C"; \
 }
 
+# 14) j2me-ps2: show our romized demo Canvas MIDlet in the AppManager list.
+#     AppManagerPeer.updateContent() lists getListOfSuites() (empty rmfs -> none)
+#     plus the hardcoded internal MIDlets (installer/CA/component/ODT). Add
+#     HelloCanvas as one more internal MIDlet (INTERNAL_SUITE_ID) so it appears in
+#     the list and launches through the UI (launchMidlet -> Manager.launchSuite ->
+#     MIDletSuiteUtils.execute(INTERNAL_SUITE_ID, class)). Inserted right before the
+#     caManagerIncluded block, mirroring the DISCOVERY_APP pattern. Java is
+#     whitespace-insensitive so the inserted lines need no indentation. Milestone
+#     B3.2. Idempotent (guarded by the marker comment).
+APM="$PHONEME/midp/src/ams/appmanager_base/reference/classes/com/sun/midp/appmanager/AppManagerPeer.java"
+grep -q 'ps2-demo-canvas-in-list' "$APM" || \
+  sed -i '/if (caManagerIncluded) {/i\
+// j2me-ps2 (ps2-demo-canvas-in-list): our romized demo Canvas MIDlet, shown as an\
+// internal suite so it appears in and launches from the AppManager list (B3.2).\
+if (null == findInternalMidletRmsi("com.j2meps2.demo.HelloCanvas")) {\
+msi = new RunningMIDletSuiteInfo(MIDletSuite.INTERNAL_SUITE_ID,\
+"com.j2meps2.demo.HelloCanvas", "Hello Canvas (PS2)", true);\
+append(msi);\
+}' "$APM"
+
+# 15) j2me-ps2: launch generic internal MIDlets from the AppManager (B3.2).
+#     AppManagerUIImpl.setupDefaultCommand() only knows the 4 system internal
+#     MIDlets (installer/CA/component/ODT); any other internal MIDlet falls into
+#     the "This should never happen" else and gets infoCmd as its default select
+#     command. Selecting our HelloCanvas then opened AppInfo, whose <init> calls
+#     MIDletSuiteStorage.getMIDletSuite(INTERNAL_SUITE_ID) -> reads a .ss settings
+#     file for suite FFFFFFFF that does not exist in the rmfs -> IOException. Give
+#     that fallback openCmd instead, so select -> enterSuite -> launchMidlet ->
+#     MIDletSuiteUtils.execute(INTERNAL_SUITE_ID, class) (InternalMIDletSuiteImpl,
+#     no storage read). Anchored on the comment, then advance one line to the
+#     setDefaultCommand. Idempotent (guarded by the inline marker).
+APMUI="$PHONEME/midp/src/ams/appmanager_ui/reference/classes/com/sun/midp/appmanager/AppManagerUIImpl.java"
+grep -q 'ps2-demo-launch-cmd' "$APMUI" || \
+  sed -i '/internal applications must be listed above/{n;s@mci.setDefaultCommand(infoCmd);@mci.setDefaultCommand(openCmd); // ps2-demo-launch-cmd (launch generic internal MIDlets like HelloCanvas)@;}' \
+      "$APMUI"
+
+# 16) j2me-ps2: mark our demo suite as single-MIDlet so enterSuite() launches it.
+#     The RunningMIDletSuiteInfo(int,String,String,boolean) constructor leaves
+#     numberOfMidlets=0, so hasSingleMidlet() is false and enterSuite() would call
+#     showMidletSelector() (which also reads getMIDletSuite() -> same IOException).
+#     Set numberOfMidlets=1 on our msi so enterSuite() -> launchMidlet() directly.
+#     Separate marker from #14 so it also applies to an already-#14-patched tree.
+grep -q 'ps2-demo-single-midlet' "$APM" || \
+  sed -i '/"Hello Canvas (PS2)", true);/a\
+msi.numberOfMidlets = 1; // ps2-demo-single-midlet (hasSingleMidlet -> launchMidlet, not AppInfo)' \
+      "$APM"
+
 echo "phoneME patches applied to: $PHONEME"

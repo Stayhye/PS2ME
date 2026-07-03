@@ -49,14 +49,15 @@ int main(int /*argc*/, char** /*argv*/) {
     // without touching the suite storage (runMidlet.c); the class is the MIDlet to
     // run from it.
     //
-    // Milestone B3.1 -- first light: launch our romized Canvas MIDlet directly,
-    // bypassing the AppManager. This is the smallest surface that exercises the
-    // full loop (paint() -> gxj -> framebuffer, keyPressed() <- pad, animation
-    // thread). B3.2 will switch this back to com.sun.midp.appmanager.Manager and
-    // make the MIDlet appear in the AppManager list instead.
+    // Milestone B3.2: launch the graphical AppManager. Our romized demo Canvas
+    // MIDlet (com.j2meps2.demo.HelloCanvas) is added to the AppManager list as an
+    // internal suite by patch #14 (AppManagerPeer.updateContent), so it is launched
+    // by selecting it in the UI rather than directly here. The SVM restart loop that
+    // switches from Manager to the selected MIDlet and back is handled natively
+    // inside midp_run_midlet_with_args_cp, so a single JavaTask() call suffices.
     static char a0[] = "runMidlet";
     static char a1[] = "internal";
-    static char a2[] = "com.j2meps2.demo.HelloCanvas";
+    static char a2[] = "com.sun.midp.appmanager.Manager";
     char* jargv[] = { a0, a1, a2 };
     javanotify_start_java_with_arbitrary_args(3, jargv);
 
