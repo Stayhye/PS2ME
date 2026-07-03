@@ -53,4 +53,23 @@ grep -q 'Wno-narrowing' "$PHONEME/cldc/build/share/jvm.make" || \
   sed -i 's/+= -D_FILE_OFFSET_BITS=64 -pipe -DGCC/+= -D_FILE_OFFSET_BITS=64 -Wno-narrowing -pipe -DGCC/' \
       "$PHONEME/cldc/build/share/jvm.make"
 
+# 6) Modern binutils (2.4x) no longer enable the x87 FPU implicitly under
+#    `.arch i486`, so the i386 float-support stubs (AsmStubs_i386.s: fld1/fmul/…,
+#    used by the HOST romizer) fail to assemble: "`fld1' is not supported on
+#    `i486'". Explicitly enable the 387 coprocessor extension right after the
+#    .arch directive. Idempotent. (File is CRLF; the inserted line is LF, which
+#    the assembler accepts.)
+grep -q '\.arch \.387' "$PHONEME/cldc/src/vm/cpu/c/AsmStubs_i386.s" || \
+  sed -i 's/^\.arch i486/.arch i486\n.arch .387/' \
+      "$PHONEME/cldc/src/vm/cpu/c/AsmStubs_i386.s"
+
+# 7) PCSL's stub network module declares a `javacall_result` local where it only
+#    means an int — it calls no javacall function, just assigns a PCSL return
+#    value — so it fails to compile unless the javacall headers happen to be on
+#    the include path. Make the stub self-contained by using int. Idempotent
+#    (re-running finds nothing to change). Only NETWORK_MODULE=stubs (the PS2
+#    build) hits this; the host build uses bsd/generic.
+sed -i 's/javacall_result res;/int res;/' \
+    "$PHONEME/pcsl/network/stubs/pcsl_network.c"
+
 echo "phoneME patches applied to: $PHONEME"

@@ -1,0 +1,31 @@
+#
+# PCSL platform configuration for the PlayStation 2 (Emotion Engine, MIPS r5900).
+#
+# Cross-build with the ps2sdk EE toolchain (reached through the unprefixed
+# $(GNU_TOOLS_DIR)/bin/{gcc,g++,ar} wrappers, same as the CLDC ps2_mips target).
+# The CLDC javacall os-family links its OsFile/Stream layer against PCSL, so PCSL
+# must exist for the target; this config builds the portable modules over newlib:
+#
+#   * chunk memory: the HEAP implementation (plain malloc) — the default
+#     pcsl_chunkmmap_linux uses mmap(), which ps2sdk newlib does not provide.
+#   * file:    posix   (open/read/write over newlib)          [set via FILE_MODULE]
+#   * network: stubs   (no sockets on the PS2 yet)             [set via NETWORK_MODULE]
+#   * print:   stdout                                          [default]
+#
+# Output lands in $(PCSL_OUTPUT_DIR)/linux_mips/{inc,lib} (PCSL_OS_PCSL_CPU).
+#
+PCSL_OS=linux
+PCSL_CPU=mips
+
+# Heap-based chunk allocator (malloc); avoids the mmap dependency of the default
+# linux chunk implementation.
+PCSL_CHUNKMEM_IMPL=pcsl_chunkheap
+PCSL_CHUNKMEM_DIR=$(PCSL_DIR)/memory/heap
+
+include $(PCSL_DIR)/makefiles/share/gcc.gmk
+include $(PCSL_DIR)/makefiles/share/linux.gmk
+
+# EE 32-bit ABI: keep globals out of the small-data section so the objects match
+# ps2sdk's crt0/link model at the final ELF link. Appended after gcc.gmk sets the
+# base CFLAGS (the gcc path here ignores EXTRA_CFLAGS, so append to CFLAGS directly).
+CFLAGS += -G0
