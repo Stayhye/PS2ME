@@ -38,7 +38,13 @@ bool GsDisplay::init(int lcdW, int lcdH) {
     dma_channel_fast_waits(DMA_CHANNEL_GIF);
 
     // --- GS framebuffer + 2D draw environment ---
-    packet_t* env = packet_init(16, PACKET_NORMAL);
+    // Must hold draw_setup_environment (GIFTAG + 15 GS regs = 16 qwords) followed
+    // by draw_finish (GIFTAG + FINISH = 2 qwords) = 18 qwords. A 16-qword packet
+    // overran env->data by 32 bytes, smashing the next heap chunk header -> the
+    // packet_free(env) below (or a later free) crashed in newlib _free_r. The bug
+    // was heap-layout dependent, so it only bit once real suites populated the heap.
+    // 20 matches the ps2sdk draw samples' environment packet and leaves margin.
+    packet_t* env = packet_init(20, PACKET_NORMAL);
     if (env == 0) {
         return false;
     }

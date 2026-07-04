@@ -13,8 +13,8 @@
 <!-- INTERNAL PROPERTIES -->
 <!-- Visible from Configuration.getProperty() -->
   <property Key="system.jam_space"
-		Value="1000000"
+		Value="3000000"
 		Scope="internal"
-		Comment="Amount of space to reserve for JAM storage."/>
+		Comment="Space reserved for JAM storage. Kept just under the 4M physical rmfs (patch #17) so the installer's clean storage-full gate fires before a physical rmfs write fails. (Effective value comes from configuration_xml via patch #19; this fragment is merged first and overridden.)"/>
 </properties>
 </configuration>

@@ -183,4 +183,40 @@ grep -q 'ps2-demo-single-midlet' "$APM" || \
 msi.numberOfMidlets = 1; // ps2-demo-single-midlet (hasSingleMidlet -> launchMidlet, not AppInfo)' \
       "$APM"
 
+# 17) j2me-ps2: size the RMFS (in-memory storage) to 4M. EE RAM is 32M; with
+#     MEMORY_MODULE=malloc the Java heap pool, all MIDP structures AND the rmfs share
+#     the single newlib heap (~28M usable above the ELF, below the stack). The rmfs
+#     comes straight out of that, so it trades directly against the Java pool -- 4M
+#     rmfs + 12M pool leaves a wide margin, whereas an 8M rmfs pushed the heap into
+#     the stack and corrupted it (crash in _free_r). Normalized (regex matches any
+#     prior value) so re-runs converge whatever the tree currently holds.
+RMFS_C="$PHONEME/pcsl/file/ram/pcsl_rmfs.c"
+sed -i -E 's/DEFAULT_RAMFS_SIZE  = [0-9*]+;.*/DEFAULT_RAMFS_SIZE  = 4*1024*1024; \/* ps2: 4M (fits the 32M EE RAM budget) *\//' \
+    "$RMFS_C"
+
+# 18) j2me-ps2: raise the RMFS max block count from 40 to 256. rmfsDataBlockHdrArray
+#     is a fixed 40-entry table; each stored file takes >=1 block and the best-fit
+#     allocator does not coalesce freed blocks, so a handful of installed suites
+#     (jar+ap+ss+ii+rms each) exhausts the 40 slots and rmfsAllocFileMemory returns
+#     -1 ("storage full") well before the 8M is used. 256 entries (~6KB of .bss)
+#     removes that ceiling.
+RMFS_ALLOC_H="$PHONEME/pcsl/file/ram/rmfsAlloc.h"
+grep -q 'MAX_DATABLOCK_NUMBER   256' "$RMFS_ALLOC_H" || \
+  sed -i 's/#define   MAX_DATABLOCK_NUMBER   40/#define   MAX_DATABLOCK_NUMBER   256/' \
+      "$RMFS_ALLOC_H"
+
+# 19) j2me-ps2: set system.jam_space (JAM storage quota) to 3M in the
+#     configuration_xml properties. This is the value the Configurator actually
+#     merges into jwc_properties.ini -- a per-platform properties.xml is merged
+#     AFTER $(JAVACALL_OUTPUT_DIR)/properties.xml, so overriding jam_space in our
+#     javacall properties.xml is silently lost (last one wins). The quota gates the
+#     installer (Installer.java: suiteSize > getBytesAvailableForFiles -> "storage
+#     full"); the stock 1M was exhausted after one game. 3M sits just under the 4M
+#     physical rmfs (patch #17) so the clean quota gate fires before a physical rmfs
+#     write fails. Normalized (regex) so re-runs converge from any prior value.
+for f in "$PHONEME"/midp/src/configuration/configuration_xml/*/properties.xml; do
+  [ -f "$f" ] || continue
+  sed -i -E 's/Value="(1000000|7000000)"/Value="3000000"/' "$f"
+done
+
 echo "phoneME patches applied to: $PHONEME"

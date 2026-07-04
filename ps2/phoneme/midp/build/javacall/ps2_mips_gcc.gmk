@@ -45,6 +45,16 @@ GCC_LIBS =
 #                   conversions) back to warnings.
 EXTRA_CFLAGS += -std=gnu99 -fpermissive
 
+# Select the hard-coded (generic) security policy back-end instead of the dynamic
+# javacall one. The javacall path (javacall_policy_load.c) reads the permission
+# group/domain tables through javacall_permissions_* -- which are stubs in our port
+# -- so loadGroupList() returns null and Permissions.init() throws
+# "Policy file not found", breaking suite installation. generic_policy_load.c
+# supplies those tables hard-coded in C (no filesystem access), which is exactly the
+# "non-javacall implementation" path Permissions.java documents. This flag is `?=`
+# in Options.gmk (included after this platform gmk), so setting it here wins.
+USE_DYNAMIC_PERMISSIONS = false
+
 # Platform-specific compiler/linker flags.
 EXTRA_CPPFLAGS +=
 LD_FLAGS +=

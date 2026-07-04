@@ -60,7 +60,13 @@ cp "$EXE_OBJ_DIR"/ROMImage.o "$EXE_OBJ_DIR"/nativeFunctionTable.o "$OUT/"
 # enlarge the pool. Applied by rewriting the value as the static table is generated
 # (getInternalProperty -> javacall_get_property reads exactly this table).
 echo "+ [2/5] properties (static table + share/properties + share/utils)"
-MIDP_HEAP_BYTES=${MIDP_HEAP_BYTES:-20971520}    # 20 MB pool (8 MB stock; rmfs takes 4 MB; must fit in 32 MB EE RAM alongside the ELF+stack)
+# EE RAM is 32 MB. The ELF occupies ~0x100000..0x3ba000 (_end ~3.9 MB); the newlib
+# heap (MEMORY_MODULE=malloc puts the Java heap, all MIDP structures AND the rmfs
+# there) runs from _end up to the stack at the top of RAM -> ~28 MB usable. The 20 MB
+# pool + 8 MB rmfs = 28 MB left ZERO headroom, so a video/install malloc grew the
+# heap into the stack and corrupted chunk headers -> crash in _free_r's unlink.
+# 12 MB pool + rmfs + ELF leaves a wide margin; J2ME games target 1-4 MB of Java heap.
+MIDP_HEAP_BYTES=${MIDP_HEAP_BYTES:-12582912}    # 12 MB pool
 STATIC_C="$OUT/javacall_static_properties.c"
 sed "s/^MAIN_MEMORY_CHUNK_SIZE.*/MAIN_MEMORY_CHUNK_SIZE = $MIDP_HEAP_BYTES/" \
     "$JC_OUT/jwc_properties.ini" \
