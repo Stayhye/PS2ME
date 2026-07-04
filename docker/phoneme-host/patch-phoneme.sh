@@ -219,4 +219,23 @@ for f in "$PHONEME"/midp/src/configuration/configuration_xml/*/properties.xml; d
   sed -i -E 's/Value="(1000000|7000000)"/Value="3000000"/' "$f"
 done
 
+# 20) rmfs reclaim fix (ps2-rmfs-iter-reset). midp_remove_suite() frees a suite by
+#     iterating its storage-root files (storage_get_next_file_in_iterator) and deleting
+#     each one *during* the walk. Our rmfs prefix iterator (searchNameTabStartWith) is
+#     STATEFUL: it remembers the last returned name in a file-static `prevFilename` and
+#     returns "the next match after it". Deleting that file (delNameTabByID tombstones
+#     its name-table entry / moves RmfsNameTableEnd) leaves prevFilename pointing at a
+#     stale entry, so the next search can't re-find it to advance and reports "no more"
+#     after the FIRST file. Net: remove() drops the suite from _suites.dat (~2 KB) but
+#     orphans the ~1 MB jar+metadata in the rmfs, which then fills up after a couple of
+#     installs ("storage full"). Reset the iterator on every name-entry delete so the
+#     next search restarts from the first remaining match; the delete loop then frees
+#     ALL of the suite's files. Plain listing (never deletes mid-walk) is unaffected.
+#     Inserted after delNameTabByID's locals (C89-safe). Idempotent.
+RMFS_ALLOC_C="$PHONEME/pcsl/file/ram/rmfsAlloc.c"
+grep -q 'ps2-rmfs-iter-reset' "$RMFS_ALLOC_C" || \
+  sed -i '/entityPos = searchNameTabByID(&filename, identifier);/i\
+  prevFilename = NULL; /* ps2-rmfs-iter-reset: a delete invalidates the stateful startWith iterator */' \
+      "$RMFS_ALLOC_C"
+
 echo "phoneME patches applied to: $PHONEME"
