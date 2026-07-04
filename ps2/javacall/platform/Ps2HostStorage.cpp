@@ -24,7 +24,7 @@ namespace platform {
 
 namespace {
 const char* GAMES_DIR = "host:games";   // <hostfs-root>/games/
-const int   MAX_GAMES = 64;
+const int   MAX_GAMES = 2048;           // large libraries / load testing
 const int   NAME_CAP  = 64;             // basename cap (fits a typical <suite>.jar)
 
 bool endsWithJar(const char* s) {
