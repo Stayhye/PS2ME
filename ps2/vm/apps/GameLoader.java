@@ -1,15 +1,22 @@
 /*
- * GameLoader - Milestone B4 bootstrap MIDlet for the PlayStation 2 port.
+ * GameLoader - launcher glue for the PlayStation 2 port.
  *
- * Front-end foundation: enumerates the user's game archives (.jar) from a storage
- * device (host:games/ for now; USB mass:/memory card later) through native methods
- * bridged to our C game-storage HAL, seeds each into the rmfs and installs it, then
- * hands off to the AppManager -- where the installed suites now appear in the list
- * and launch through the standard path (no internal-suite patching needed).
+ * This is the *invisible* Java shim behind our native (C) front-end. It is NOT a UI:
+ * the user-facing menu is drawn entirely in C (ps2/javacall/.../Ps2Frontend), which
+ * runs from main() BEFORE the VM starts and has no ties to MIDP. By the time this
+ * shim runs, the game has already been chosen; the shim only does the things that
+ * inherently belong to the VM -- install the chosen JAR and tell the AMS to run it.
  *
- * The rmfs is volatile, so this runs every boot: read from storage -> install ->
- * list. Installation runs on a worker thread (like CommandLineInstaller) and the
- * install prompts are all answered "yes" for a silent, headless install.
+ * Per run (one VM boot per game, driven by the C main() loop):
+ *   1. chosenGame() -> the index the native menu already picked (never a UI call).
+ *   2. install that one game (uninstalling any leftover so the volatile ~3 MB rmfs
+ *      only ever holds one suite -- an install balloons to ~1.2 MB).
+ *   3. execute(game): the native SVM restart loop (midp_run_midlet_with_args_cp) runs
+ *      the game; when it exits with nothing else queued, the loop ends and JavaTask()
+ *      returns to C main(), which redraws the native menu.
+ *
+ * The class keeps its name + native methods (bridged in GameLoaderKni.cpp) so the
+ * KNI table and the Ps2MidpMain entry point stay unchanged.
  *
  * CLDC 1.1 / MIDP 2.0, compiled -source/-target 1.4.
  */
@@ -21,7 +28,6 @@ import java.io.OutputStream;
 
 import com.sun.midp.main.MIDletSuiteUtils;
 import com.sun.midp.midlet.MIDletSuite;
-import com.sun.midp.installer.Installer;
 import com.sun.midp.installer.FileInstaller;
 import com.sun.midp.installer.InstallListener;
 import com.sun.midp.installer.InstallState;
@@ -33,71 +39,91 @@ import com.sun.midp.midletsuite.MIDletInfo;
 
 public class GameLoader extends MIDlet implements InstallListener, Runnable {
 
-    // Bridged to ps2/vm/GameLoaderKni.cpp -> ps2::hal::GameStorage.
+    // Bridged to ps2/vm/GameLoaderKni.cpp -> ps2::hal::GameStorage + the chosen index.
     private static native int listGames();
     private static native int gameName(int index, byte[] buf);
     private static native int openGame(int index);
     private static native int readChunk(byte[] buf, int max);
     private static native void closeGame();
+    /** The game index the native C front-end already picked (or -1). No UI here. */
+    private static native int chosenGame();
+    /** Drop a stale native suite storage lock so remove() can free the suite. */
+    private static native void clearSuiteLock(int id);
 
-    public GameLoader() {
-        // Install off the event thread (mirrors CommandLineInstaller).
+    protected void startApp() {
+        // Install can be slow; run it off the event thread (mirrors
+        // CommandLineInstaller). No game is running while we are the active MIDlet, so
+        // blocking the single green-thread OS thread is fine.
         new Thread(this).start();
     }
 
     public void run() {
-        int firstId = 0;
-        String firstName = null;
+        // The native C menu already ran (before the VM booted) and stored the pick.
+        // We do not draw or block on any UI here; we just read the chosen index.
+        final int idx = chosenGame();
+        if (idx < 0) {
+            notifyDestroyed();         // nothing to run -> end this VM run
+            return;
+        }
+
         try {
-            int n = listGames();
-            System.out.println("[GameLoader] .jar files in host:games/ = " + n);
-            System.out.println("[GameLoader]   rmfs free at start = " + freeBytes());
-            for (int i = 0; i < n; i++) {
-                byte[] nb = new byte[256];
-                int nl = gameName(i, nb);
-                String name = new String(nb, 0, nl);
+            byte[] nb = new byte[256];
+            int nl = gameName(idx, nb);
+            String name = new String(nb, 0, nl);
+
+            // Keep the rmfs to one installed game at a time.
+            uninstallAll();
+            int suiteId = installGame(idx, name);
+            if (suiteId <= 0) {
+                throw new IOException("install returned " + suiteId);
+            }
+
+            MIDletSuiteStorage storage = MIDletSuiteStorage.getMIDletSuiteStorage();
+            MIDletSuite suite = storage.getMIDletSuite(suiteId, false);
+            String cls = new MIDletInfo(suite.getProperty("MIDlet-1")).classname;
+            suite.close();
+
+            System.out.println("[Launcher] launching " + name + " (suite " + suiteId
+                + ", midlet " + cls + ")");
+
+            MIDletSuiteUtils.execute(suiteId, cls, name);
+        } catch (Throwable t) {
+            System.out.println("[Launcher] launch FAILED: " + t);
+            // Nothing is queued, so this VM run just ends and JavaTask() returns to C
+            // main(), which redraws the native menu -- a failed launch drops the user
+            // back to the menu rather than halting the launcher.
+        }
+        notifyDestroyed();             // end this run so the SVM loop starts the game
+    }
+
+    /** Remove every installed (stored) suite, freeing the rmfs for the next game. */
+    private void uninstallAll() {
+        try {
+            MIDletSuiteStorage storage = MIDletSuiteStorage.getMIDletSuiteStorage();
+            int[] ids = storage.getListOfSuites();
+            // TEMP diagnostic: the "storage full" on the 2nd/3rd launch means the rmfs
+            // is not being reclaimed. Log the suite list and the free bytes after each
+            // remove so we can see whether remove() actually frees (or throws
+            // MIDletSuiteLockedException for the suite that just ran). REMOVE later.
+            System.out.println("[Launcher] uninstallAll: " + ids.length
+                + " suite(s) installed, rmfs free = " + freeBytes());
+            for (int i = 0; i < ids.length; i++) {
+                // The suite's run-lock from its last launch can outlive that VM cycle
+                // (finalizer-based unlock isn't guaranteed on teardown), which makes
+                // remove() throw MIDletSuiteLockedException. No stored suite is running
+                // at the menu, so any lock here is stale -> drop it before removing.
+                clearSuiteLock(ids[i]);
                 try {
-                    int id = installGame(i, name);
-                    if (firstId == 0 && id > 0) {
-                        firstId = id;
-                        firstName = name;
-                    }
+                    storage.remove(ids[i]);
+                    System.out.println("[Launcher]   removed suite " + ids[i]
+                        + ", rmfs free = " + freeBytes());
                 } catch (Throwable t) {
-                    System.out.println("[GameLoader]   " + name + " FAILED: " + t);
+                    System.out.println("[Launcher]   remove " + ids[i] + " failed: " + t);
                 }
             }
         } catch (Throwable t) {
-            System.out.println("[GameLoader] ERROR: " + t);
+            System.out.println("[Launcher] uninstallAll: " + t);
         }
-
-        // Diagnostic B4.1b: launch the first installed (stored) suite DIRECTLY,
-        // bypassing the AppManager UI. The crash in _free_r happens right after the
-        // Manager's list UI comes up with a stored suite; launching straight to the
-        // game tells us whether the fault is in the Manager's list rendering (this
-        // path avoids it) or in reading the stored suite itself (this path still hits
-        // it). If it works, it's also the seed of our own front-end launcher.
-        if (firstId > 0) {
-            try {
-                launchInstalled(firstId, firstName);
-            } catch (Throwable t) {
-                System.out.println("[GameLoader] launch FAILED: " + t);
-            }
-        } else {
-            MIDletSuiteUtils.execute(MIDletSuite.INTERNAL_SUITE_ID,
-                "com.sun.midp.appmanager.Manager", "AppManager");
-        }
-        notifyDestroyed();
-    }
-
-    /** Launch an installed (stored) suite by id, resolving its MIDlet-1 class. */
-    private void launchInstalled(int suiteId, String name) throws Exception {
-        MIDletSuiteStorage storage = MIDletSuiteStorage.getMIDletSuiteStorage();
-        MIDletSuite suite = storage.getMIDletSuite(suiteId, false);
-        String cls = new MIDletInfo(suite.getProperty("MIDlet-1")).classname;
-        suite.close();
-        System.out.println("[GameLoader] launching suite " + suiteId
-            + " midlet " + cls);
-        MIDletSuiteUtils.execute(suiteId, cls, name);
     }
 
     /**
@@ -126,22 +152,18 @@ public class GameLoader extends MIDlet implements InstallListener, Runnable {
         os.close();
         out.disconnect();
         closeGame();
-        System.out.println("[GameLoader]   seeded " + name + " (" + total
+        System.out.println("[Launcher]   seeded " + name + " (" + total
             + " bytes), rmfs free = " + freeBytes());
 
         int id = new FileInstaller().installJar(url, null,
             Constants.INTERNAL_STORAGE_ID, false, false, this);
-        System.out.println("[GameLoader]   installed " + name + " id=" + id
+        System.out.println("[Launcher]   installed " + name + " id=" + id
             + ", rmfs free = " + freeBytes());
 
-        // The installer copied the JAR into the suite storage; the seed is now a
-        // duplicate. Delete it to release its rmfs blocks before the next game.
         try {
             new File().delete(storageName);
-            System.out.println("[GameLoader]   freed seed " + storageName
-                + ", rmfs free = " + freeBytes());
         } catch (Throwable t) {
-            System.out.println("[GameLoader]   seed delete failed: " + t);
+            System.out.println("[Launcher]   seed delete failed: " + t);
         }
         return id;
     }
@@ -153,9 +175,6 @@ public class GameLoader extends MIDlet implements InstallListener, Runnable {
         } catch (Throwable t) {
             return -1;
         }
-    }
-
-    protected void startApp() {
     }
 
     protected void pauseApp() {

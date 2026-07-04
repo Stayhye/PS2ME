@@ -16,6 +16,32 @@
 
 extern "C" {
 
+// The game index the standalone native front-end (Ps2Frontend, driven from main()
+// before the VM starts) chose. main() writes it; GameLoader.chosenGame() reads it.
+// The menu is drawn entirely in C -- the VM only ever receives the final choice.
+int ps2_chosen_game = -1;
+
+// Defined in libjvm (midp/.../suitestore/internal_api/.../suitestore_locks.c). The
+// native suite lock list is a C static that outlives a VM restart (it lives in the
+// pcsl_mem pool alongside the rmfs, and midpFinalize is not called between the SVM
+// loop's VM cycles). A stored suite is locked while it runs; our MIDletSuiteLoader
+// .closeSuite() deliberately skips suite.close(), so unlocking is left to a finalizer
+// -- which the CLDC VM may not run on teardown. The stale lock then makes the next
+// menu cycle's MIDletSuiteStorage.remove() fail with SUITE_LOCKED (midp_remove_suite
+// returns SUITE_LOCKED for any non-update lock), so the previous game is never freed
+// and the tiny rmfs fills up ("storage full"). remove_storage_lock() drops the node
+// outright; it is a no-op if the id is not locked, and safe at menu time because no
+// stored suite is running then.
+void remove_storage_lock(int suiteId);
+
+
+// int chosenGame() -> the game index the native front-end already picked (or -1).
+// No UI here: the menu ran in C before the VM started; this just returns the result.
+KNIEXPORT KNI_RETURNTYPE_INT
+KNIDECL(com_j2meps2_loader_GameLoader_chosenGame) {
+    KNI_ReturnInt(ps2_chosen_game);
+}
+
 // int listGames();
 KNIEXPORT KNI_RETURNTYPE_INT
 KNIDECL(com_j2meps2_loader_GameLoader_listGames) {
@@ -86,6 +112,14 @@ KNIDECL(com_j2meps2_loader_GameLoader_readChunk) {
 KNIEXPORT KNI_RETURNTYPE_VOID
 KNIDECL(com_j2meps2_loader_GameLoader_closeGame) {
     ps2::hal::GameStorage::instance().close();
+    KNI_ReturnVoid();
+}
+
+// void clearSuiteLock(int id) -> drop a stale native suite storage lock so the suite
+// can be removed. See the remove_storage_lock note above.
+KNIEXPORT KNI_RETURNTYPE_VOID
+KNIDECL(com_j2meps2_loader_GameLoader_clearSuiteLock) {
+    remove_storage_lock(KNI_GetParameterAsInt(1));
     KNI_ReturnVoid();
 }
 
