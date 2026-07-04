@@ -1,14 +1,20 @@
 // PS2 JavaCall port — platform layer. Ps2Frontend implementation.
 //
 // Standalone native menu, no dependency on the Java VM. It renders a full native
-// resolution (640x448) grid of games -- each an application icon extracted from the
-// JAR with a name below, phone-launcher style -- into its own RGBA5551 raster with the
-// embedded TrueType font, presents it fullscreen through the shared GsDisplay (no
-// pillarbox), reads the shared pad backend, and lists games from hal::GameStorage.
+// resolution (640x448) grid of games -- each an application icon with a name below,
+// phone-launcher style -- into its own RGBA5551 raster with the embedded TrueType font,
+// presents it fullscreen through the shared GsDisplay (no pillarbox), reads the shared
+// pad backend, and lists games from hal::GameStorage.
+//
+// Icons come from IconCache, a background worker that decodes only the on-screen icons
+// off the render path, so navigation never stalls on JAR I/O. The render thread paces
+// on vsync via an interrupt handler + semaphore (rather than a busy wait), which is
+// also what lets the lower-priority icon worker run in the idle time between frames.
 #include "Ps2Frontend.hpp"
 
 #include "GsDisplay.hpp"
 #include "MidletIcon.hpp"
+#include "IconCache.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
@@ -16,6 +22,8 @@
 #include <tamtypes.h>   // u16
 #include <malloc.h>     // memalign / malloc / free
 #include <stdlib.h>
+#include <kernel.h>     // CreateSema / WaitSema / iSignalSema (vsync pacing)
+#include <graph.h>      // graph_add_vsync_handler / graph_wait_vsync
 
 // stb_truetype is a single-header library; define the implementation here (exactly
 // one TU). The embedded font (g_ui_ttf/g_ui_ttf_len) is generated from vendors/ui.ttf.
@@ -45,12 +53,10 @@ const int   COLS     = 4;
 const int   ROWS     = 5;
 const int   GAP      = 8;               // horizontal gap between cells
 const int   VGAP     = 6;               // vertical gap between cells
-const int   ICON     = 48;             // on-screen icon size (square)
-const int   TITLE_ICON = 36;           // logo drawn left of the title text
+const int   ICON     = 48;              // on-screen icon size (square)
+const int   TITLE_ICON = 36;            // logo drawn left of the title text
 const float TITLE_PX   = 30.0f;
 const float NAME_PX    = 15.0f;
-
-const int MAX_ICONS = 2048;            // matches Ps2HostStorage's cap (lazy-loaded)
 
 // --- Font -------------------------------------------------------------------------
 stbtt_fontinfo g_font;
@@ -75,25 +81,23 @@ u16* g_ras = 0;
 int  g_w = 0;
 int  g_h = 0;
 
-// Decoded, downscaled icon tiles (ICON x ICON RGBA8888), one per game; null = none.
-// Icons are loaded lazily (only when a tile becomes visible) so a huge library never
-// reads 1000+ JARs up front. g_iconTried marks a game whose JAR was already probed.
-unsigned char* g_icons[MAX_ICONS]     = { 0 };
-bool           g_iconTried[MAX_ICONS] = { false };
-
-// Bounded cache: keep at most CACHE_MAX decoded tiles, evicting the oldest-loaded so
-// scrolling a large library never grows memory without bound.
-const int CACHE_MAX = 128;
-int g_ring[CACHE_MAX];
-int g_ringHead  = 0;
-int g_ringCount = 0;
-
 // The title logo (TITLE_ICON x TITLE_ICON RGBA8888), decoded once; null if it failed.
 unsigned char* g_titleIcon = 0;
 
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
 unsigned g_marqueeTick = 0;
+
+// Vsync pacing: an interrupt handler signals this semaphore each field, and the render
+// loop blocks on it. Blocking (rather than busy-waiting graph_wait_vsync) is what frees
+// the CPU for the lower-priority icon worker between frames.
+int g_vsyncSema = -1;
+int g_vsyncCb   = -1;
+
+int onVsync(int /*cause*/) {
+    iSignalSema(g_vsyncSema);
+    return 0;
+}
 
 inline u16 rgba5551(int r, int g, int b) {
     return (u16)(((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) |
@@ -228,7 +232,7 @@ void makeLabel(char* out, int outCap, const char* src, float maxW, float pxh) {
 }
 
 // Nearest-neighbour downscale of an @p w x @p h RGBA source into a fresh @p dst x @p dst
-// RGBA tile (caller frees). Returns null on OOM.
+// RGBA tile (caller frees). Returns null on OOM. Used for the (synchronous) title logo.
 unsigned char* downscaleSquare(const unsigned char* src, int w, int h, int dst) {
     unsigned char* tile = (unsigned char*)malloc(dst * dst * 4);
     if (tile == 0) {
@@ -244,67 +248,6 @@ unsigned char* downscaleSquare(const unsigned char* src, int w, int h, int dst) 
         }
     }
     return tile;
-}
-
-// Read the whole JAR for game @p i, extract + decode its icon, and downscale it into a
-// fresh ICON x ICON RGBA tile stored in g_icons[i] (null if it has no usable icon).
-void loadIcon(int i) {
-    g_icons[i] = 0;
-
-    hal::GameStorage& store = hal::GameStorage::instance();
-    const int size = store.openAt(i);
-    if (size <= 0) {
-        store.close();
-        return;
-    }
-    unsigned char* jar = (unsigned char*)malloc(size);
-    if (jar == 0) {
-        store.close();
-        return;
-    }
-    int off = 0;
-    while (off < size) {
-        const int r = store.read(jar + off, size - off);
-        if (r <= 0) break;
-        off += r;
-    }
-    store.close();
-
-    int iw = 0, ih = 0;
-    unsigned char* src = (off == size) ? MidletIcon::load(jar, size, &iw, &ih) : 0;
-    free(jar);
-    if (src == 0 || iw <= 0 || ih <= 0) {
-        return;
-    }
-
-    g_icons[i] = downscaleSquare(src, iw, ih, ICON);
-    MidletIcon::release(src);
-}
-
-// Lazily load game i's icon the first time it becomes visible, bounding total memory
-// with the ring cache (the oldest decoded tile is evicted when the cache is full).
-void ensureIcon(int i, int count) {
-    if (i < 0 || i >= count || i >= MAX_ICONS || g_iconTried[i]) {
-        return;
-    }
-    loadIcon(i);                 // sets g_icons[i], or leaves it null (no icon)
-    g_iconTried[i] = true;
-    if (g_icons[i] == 0) {
-        return;                  // icon-less game: nothing to cache/evict
-    }
-    if (g_ringCount == CACHE_MAX) {
-        const int victim = g_ring[g_ringHead];
-        if (victim >= 0 && g_icons[victim] != 0) {
-            free(g_icons[victim]);
-            g_icons[victim] = 0;
-            g_iconTried[victim] = false;   // may reload if scrolled back to
-        }
-    }
-    g_ring[g_ringHead] = i;
-    g_ringHead = (g_ringHead + 1) % CACHE_MAX;
-    if (g_ringCount < CACHE_MAX) {
-        g_ringCount++;
-    }
 }
 
 // Decode + downscale the embedded PS2ME title logo once into g_titleIcon.
@@ -339,21 +282,19 @@ void blitRGBA(const unsigned char* t, int tw, int th, int x, int y) {
     }
 }
 
-// Draw game i's icon at (x,y): the decoded tile alpha-blended over the raster, or a
-// lettered placeholder when the JAR carried no icon.
+// Draw game i's icon at (x,y): the cached tile if the worker has decoded it, otherwise
+// a lettered placeholder (and the request is queued by IconCache::draw).
 void drawIcon(int x, int y, int i) {
-    const unsigned char* t = (i >= 0 && i < MAX_ICONS) ? g_icons[i] : 0;
-    if (t == 0) {
-        fillRect(x, y, ICON, ICON, rgba5551(70, 74, 96));
-        const char* nm = hal::GameStorage::instance().nameAt(i);
-        char c[2];
-        c[0] = (nm != 0 && nm[0] != 0) ? nm[0] : '?';
-        c[1] = '\0';
-        drawText(x + ICON / 2 - textWidth(c, 40.0f) / 2, y + ICON / 2 - 22,
-                 c, 230, 230, 240, 40.0f);
+    if (IconCache::instance().draw(i, g_ras, g_w, g_h, x, y)) {
         return;
     }
-    blitRGBA(t, ICON, ICON, x, y);
+    fillRect(x, y, ICON, ICON, rgba5551(70, 74, 96));
+    const char* nm = hal::GameStorage::instance().nameAt(i);
+    char c[2];
+    c[0] = (nm != 0 && nm[0] != 0) ? nm[0] : '?';
+    c[1] = '\0';
+    drawText(x + ICON / 2 - textWidth(c, 40.0f) / 2, y + ICON / 2 - 22,
+             c, 230, 230, 240, 40.0f);
 }
 
 void render(int count, int selected, int topRow, int cellW, int rowStride,
@@ -373,18 +314,16 @@ void render(int count, int selected, int topRow, int cellW, int rowStride,
         return;
     }
 
-    for (int i = 0; i < count; ++i) {
+    // Only the visible page is drawn (the grid can hold ~1200 games).
+    const int firstIdx = topRow * COLS;
+    const int lastIdx  = (topRow + visibleRows) * COLS;   // exclusive
+    for (int i = firstIdx; i < count && i < lastIdx; ++i) {
         const int r = i / COLS;
         const int c = i % COLS;
-        if (r < topRow || r >= topRow + visibleRows) {
-            continue;
-        }
         const int cellX = MARGIN + c * (cellW + GAP);
         const int cellY = gridY + (r - topRow) * rowStride;
         const int cellH = rowStride - VGAP;
         const bool sel = (i == selected);
-
-        ensureIcon(i, count);   // lazy-load this tile's icon on first sight
 
         if (sel) {
             fillRect(cellX, cellY - 2, cellW, cellH, rgba5551(70, 130, 225));
@@ -444,6 +383,16 @@ bool ensureVideo() {
     return GsDisplay::instance().init();
 }
 
+// Frame pacing: block until the next field. Uses the vsync-interrupt semaphore when
+// it is installed (so the icon worker runs meanwhile); falls back to a busy vsync.
+void waitFrame() {
+    if (g_vsyncCb >= 0) {
+        WaitSema(g_vsyncSema);
+    } else {
+        graph_wait_vsync();
+    }
+}
+
 } // namespace
 
 Ps2Frontend& Ps2Frontend::instance() {
@@ -462,16 +411,31 @@ int Ps2Frontend::pick() {
         count = 0;
     }
 
-    // Brief splash: the first visible page of icons decodes on the first render.
-    if (count > 0) {
-        fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
-        drawText(MARGIN, g_h / 2 - 16, "Carregando...", 60, 70, 95, 24.0f);
-        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-    }
+    // First fullscreen present also allocates the GS texture; do it before the worker
+    // starts, and show a brief splash while the first icons decode.
+    fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
+    drawText(MARGIN, g_h / 2 - 16, "Carregando...", 60, 70, 95, 24.0f);
+    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
-    // the controller exactly once; reading it here drives no VM code path.
+    // the controller exactly once; reading it here drives no VM code path. Do the
+    // (SIF-heavy) open() NOW, while we're still single-threaded -- once the icon
+    // worker exists, its host: I/O would collide with the pad's SIF RPC.
     hal::IPad* pad = hal::Keypad::instance().pad();
+    if (pad != 0) {
+        pad->ensureReady();   // fires Ps2Pad::open() (SifInitRpc + load pad IRX)
+    }
+
+    // Install the vsync pacing handler + semaphore, then start the background icon
+    // worker (which runs at a lower priority, in the idle time between frames).
+    if (g_vsyncSema < 0) {
+        ee_sema_t s;
+        s.count = 0; s.max_count = 1; s.init_count = 0;
+        s.wait_threads = 0; s.attr = 0; s.option = 0;
+        g_vsyncSema = CreateSema(&s);
+    }
+    g_vsyncCb = graph_add_vsync_handler(onVsync);
+    IconCache::instance().begin(count, ICON);
 
     // Fixed 4 x 5 grid page.
     const int gridY       = TITLE_H + 4;
@@ -482,9 +446,14 @@ int Ps2Frontend::pick() {
     int selected = 0;
     int topRow = 0;
     int lastSel = -1;
+    int lastTop = -1;
+    int chosen = -1;
+    bool firstFrame = true;
     hal::PadButtons prev;   // all-false initial snapshot
 
-    for (;;) {
+    while (chosen < 0) {
+        // Poll the pad every field so input stays responsive even when we skip the
+        // (expensive) redraw below.
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
             if (count > 0) {
@@ -492,7 +461,7 @@ int Ps2Frontend::pick() {
                 if (b.left  && !prev.left  && selected > 0)            { selected--; }
                 if (b.down  && !prev.down  && selected + COLS < count) { selected += COLS; }
                 if (b.up    && !prev.up    && selected - COLS >= 0)    { selected -= COLS; }
-                if (b.cross && !prev.cross)                            { return selected; }
+                if (b.cross && !prev.cross)                            { chosen = selected; }
             }
             prev = b;
         }
@@ -506,17 +475,50 @@ int Ps2Frontend::pick() {
             topRow = selRow - visibleRows + 1;
         }
 
-        // Advance the marquee, restarting it whenever the active item changes.
-        if (selected != lastSel) {
-            g_marqueeTick = 0;
-            lastSel = selected;
-        } else {
-            g_marqueeTick++;
+        const bool moved = (selected != lastSel) || (topRow != lastTop);
+        if (moved) {
+            g_marqueeTick = 0;   // restart the marquee for the newly active item
         }
 
-        render(count, selected, topRow, cellW, rowStride, gridY, visibleRows);
-        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+        // Does the active item's name overflow its cell? Only then must we keep
+        // redrawing every field to animate the marquee.
+        bool marquee = false;
+        if (count > 0 && !moved) {
+            const char* nm = hal::GameStorage::instance().nameAt(selected);
+            char base[128];
+            stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
+            marquee = textWidth(base, NAME_PX) > (cellW - 8);
+        }
+
+        // Render on demand: only when something changed -- navigation, a marquee in
+        // flight, or a freshly decoded icon. Otherwise stay blocked on vsync so the
+        // low-priority icon worker gets the whole field to decode in.
+        const bool dirty = IconCache::instance().takeDirty();
+        if (firstFrame || moved || marquee || dirty) {
+            if (marquee) {
+                g_marqueeTick++;
+            }
+            IconCache::instance().tick();
+            render(count, selected, topRow, cellW, rowStride, gridY, visibleRows);
+            GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+            lastSel    = selected;
+            lastTop    = topRow;
+            firstFrame = false;
+        }
+        waitFrame();
     }
+
+    // Quiesce the icon worker before handing the CPU to the VM: drop queued work and
+    // let any in-flight decode finish, so the worker is left blocked (idle).
+    IconCache::instance().clearPending();
+    while (IconCache::instance().busy()) {
+        waitFrame();
+    }
+    if (g_vsyncCb >= 0) {
+        graph_remove_vsync_handler(g_vsyncCb);
+        g_vsyncCb = -1;
+    }
+    return chosen;
 }
 
 } // namespace platform

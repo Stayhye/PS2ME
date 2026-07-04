@@ -136,6 +136,7 @@ JC_SRCS="
     platform/Ps2Pad.cpp
     platform/Ps2HostStorage.cpp
     platform/MidletIcon.cpp
+    platform/IconCache.cpp
     platform/Ps2Frontend.cpp
 "
 JC_OBJS=""
