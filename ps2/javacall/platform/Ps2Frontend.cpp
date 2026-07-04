@@ -1,0 +1,523 @@
+// PS2 JavaCall port — platform layer. Ps2Frontend implementation.
+//
+// Standalone native menu, no dependency on the Java VM. It renders a full native
+// resolution (640x448) grid of games -- each an application icon extracted from the
+// JAR with a name below, phone-launcher style -- into its own RGBA5551 raster with the
+// embedded TrueType font, presents it fullscreen through the shared GsDisplay (no
+// pillarbox), reads the shared pad backend, and lists games from hal::GameStorage.
+#include "Ps2Frontend.hpp"
+
+#include "GsDisplay.hpp"
+#include "MidletIcon.hpp"
+#include "../hal/GameStorage.hpp"
+#include "../hal/Keypad.hpp"
+#include "../hal/IPad.hpp"
+
+#include <tamtypes.h>   // u16
+#include <malloc.h>     // memalign / malloc / free
+#include <stdlib.h>
+
+// stb_truetype is a single-header library; define the implementation here (exactly
+// one TU). The embedded font (g_ui_ttf/g_ui_ttf_len) is generated from vendors/ui.ttf.
+// Both are found via -I<repo>/vendors added to this file's compile flags.
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+#include "ui_ttf.h"
+
+// Embedded PS2ME title icon (assets/PS2ME_ICON.png -> byte array). Decoded once at
+// startup via MidletIcon::decodePng and drawn beside the title. -I<repo>/assets.
+#include "ps2me_icon.h"
+
+namespace ps2 {
+namespace platform {
+
+namespace {
+
+// Native NTSC TV resolution: the UI owns the whole screen (no pillarbox), so its
+// raster is full-size and GsDisplay stretches it 1:1 onto the framebuffer.
+const int SCREEN_W = 640;
+const int SCREEN_H = 448;
+
+// Phone-launcher grid: square icon + name label below, fixed 4 x 5 page.
+const int   MARGIN   = 14;
+const int   TITLE_H  = 46;
+const int   COLS     = 4;
+const int   ROWS     = 5;
+const int   GAP      = 8;               // horizontal gap between cells
+const int   VGAP     = 6;               // vertical gap between cells
+const int   ICON     = 48;             // on-screen icon size (square)
+const int   TITLE_ICON = 36;           // logo drawn left of the title text
+const float TITLE_PX   = 30.0f;
+const float NAME_PX    = 15.0f;
+
+const int MAX_ICONS = 2048;            // matches Ps2HostStorage's cap (lazy-loaded)
+
+// --- Font -------------------------------------------------------------------------
+stbtt_fontinfo g_font;
+bool           g_fontOk = false;
+
+bool initFont() {
+    if (g_fontOk) {
+        return true;
+    }
+    const int off = stbtt_GetFontOffsetForIndex(g_ui_ttf, 0);
+    if (off < 0 || !stbtt_InitFont(&g_font, g_ui_ttf, off)) {
+        return false;
+    }
+    g_fontOk = true;
+    return true;
+}
+
+// --- Our own software raster (GS-native RGBA5551 / CT16) --------------------------
+// The GS 16-bit texture is R in the low bits, G, then B, alpha in the top bit (the
+// exact layout Ps2Framebuffer converts RGB565 into before presenting).
+u16* g_ras = 0;
+int  g_w = 0;
+int  g_h = 0;
+
+// Decoded, downscaled icon tiles (ICON x ICON RGBA8888), one per game; null = none.
+// Icons are loaded lazily (only when a tile becomes visible) so a huge library never
+// reads 1000+ JARs up front. g_iconTried marks a game whose JAR was already probed.
+unsigned char* g_icons[MAX_ICONS]     = { 0 };
+bool           g_iconTried[MAX_ICONS] = { false };
+
+// Bounded cache: keep at most CACHE_MAX decoded tiles, evicting the oldest-loaded so
+// scrolling a large library never grows memory without bound.
+const int CACHE_MAX = 128;
+int g_ring[CACHE_MAX];
+int g_ringHead  = 0;
+int g_ringCount = 0;
+
+// The title logo (TITLE_ICON x TITLE_ICON RGBA8888), decoded once; null if it failed.
+unsigned char* g_titleIcon = 0;
+
+// Frame counter for the active item's name auto-shift (marquee); reset when the
+// selection changes so each newly-active long name scrolls from the start.
+unsigned g_marqueeTick = 0;
+
+inline u16 rgba5551(int r, int g, int b) {
+    return (u16)(((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) |
+                 (((b >> 3) & 0x1F) << 10) | 0x8000);
+}
+
+// Blend an (sr,sg,sb) colour over an RGBA5551 pixel with coverage a (0..255).
+inline u16 blend5551(u16 dst, int sr, int sg, int sb, int a) {
+    const int dr = ( dst        & 0x1F) << 3;
+    const int dg = ((dst >> 5)  & 0x1F) << 3;
+    const int db = ((dst >> 10) & 0x1F) << 3;
+    const int r = dr + ((sr - dr) * a) / 255;
+    const int g = dg + ((sg - dg) * a) / 255;
+    const int b = db + ((sb - db) * a) / 255;
+    return rgba5551(r, g, b);
+}
+
+void fillRect(int x, int y, int w, int h, u16 c) {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > g_w) w = g_w - x;
+    if (y + h > g_h) h = g_h - y;
+    for (int j = 0; j < h; ++j) {
+        u16* row = g_ras + (y + j) * g_w + x;
+        for (int i = 0; i < w; ++i) {
+            row[i] = c;
+        }
+    }
+}
+
+// Pixel width of an ASCII string at pixel-height @p pxh (for centring).
+int textWidth(const char* s, float pxh) {
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, pxh);
+    float w = 0.0f;
+    for (const unsigned char* p = (const unsigned char*)s; *p != 0; ++p) {
+        int advance = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&g_font, *p, &advance, &lsb);
+        w += advance * scale;
+    }
+    return (int)w;
+}
+
+// Draw an ASCII string with its top-left near (x,y), clipping horizontally to
+// [clipL, clipR). Returns the end x pen position.
+int drawTextClip(int x, int y, const char* s, int sr, int sg, int sb, float pxh,
+                 int clipL, int clipR) {
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, pxh);
+    int ascent = 0, descent = 0, lineGap = 0;
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &lineGap);
+    const int baseline = y + (int)(ascent * scale);
+
+    float xpos = (float)x;
+    for (const unsigned char* p = (const unsigned char*)s; *p != 0; ++p) {
+        int advance = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&g_font, *p, &advance, &lsb);
+
+        int x0, y0, x1, y1;
+        stbtt_GetCodepointBitmapBox(&g_font, *p, scale, scale, &x0, &y0, &x1, &y1);
+        const int gw = x1 - x0;
+        const int gh = y1 - y0;
+        if (gw > 0 && gh > 0 && gw <= 96 && gh <= 96) {
+            static unsigned char gbuf[96 * 96];
+            stbtt_MakeCodepointBitmap(&g_font, gbuf, gw, gh, gw, scale, scale, *p);
+            const int gx = (int)(xpos + 0.5f) + x0;
+            const int gy = baseline + y0;
+            for (int j = 0; j < gh; ++j) {
+                const int py = gy + j;
+                if (py < 0 || py >= g_h) continue;
+                u16* row = g_ras + py * g_w;
+                const unsigned char* gr = gbuf + j * gw;
+                for (int i = 0; i < gw; ++i) {
+                    const int px = gx + i;
+                    if (px < clipL || px >= clipR || px < 0 || px >= g_w) continue;
+                    const int a = gr[i];
+                    if (a) {
+                        row[px] = blend5551(row[px], sr, sg, sb, a);
+                    }
+                }
+            }
+        }
+        xpos += advance * scale;
+    }
+    return (int)xpos;
+}
+
+// Draw an ASCII string clipped only to the raster.
+int drawText(int x, int y, const char* s, int sr, int sg, int sb, float pxh) {
+    return drawTextClip(x, y, s, sr, sg, sb, pxh, 0, g_w);
+}
+
+// Copy game name @p src into @p out, dropping a trailing ".jar".
+void stripJar(char* out, int outCap, const char* src) {
+    int n = 0;
+    for (const char* p = src; *p != 0 && n < outCap - 1; ++p) {
+        out[n++] = *p;
+    }
+    out[n] = '\0';
+    if (n >= 4) {
+        char* e = out + n - 4;
+        if (e[0] == '.' &&
+            (e[1] == 'j' || e[1] == 'J') &&
+            (e[2] == 'a' || e[2] == 'A') &&
+            (e[3] == 'r' || e[3] == 'R')) {
+            out[n - 4] = '\0';
+        }
+    }
+}
+
+// Build a display label for game name @p src: drop a trailing ".jar" and truncate with
+// ".." so it fits @p maxW pixels at @p pxh.
+void makeLabel(char* out, int outCap, const char* src, float maxW, float pxh) {
+    char base[128];
+    stripJar(base, (int)sizeof(base), src);
+
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, pxh);
+    float w = 0.0f;
+    int o = 0;
+    for (const unsigned char* p = (const unsigned char*)base; *p != 0 && o < outCap - 3; ++p) {
+        int advance = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&g_font, *p, &advance, &lsb);
+        const float cw = advance * scale;
+        if (w + cw > maxW) {
+            out[o++] = '.';
+            out[o++] = '.';
+            out[o] = '\0';
+            return;
+        }
+        out[o++] = (char)*p;
+        w += cw;
+    }
+    out[o] = '\0';
+}
+
+// Nearest-neighbour downscale of an @p w x @p h RGBA source into a fresh @p dst x @p dst
+// RGBA tile (caller frees). Returns null on OOM.
+unsigned char* downscaleSquare(const unsigned char* src, int w, int h, int dst) {
+    unsigned char* tile = (unsigned char*)malloc(dst * dst * 4);
+    if (tile == 0) {
+        return 0;
+    }
+    for (int dy = 0; dy < dst; ++dy) {
+        const int sy = (h > 0) ? dy * h / dst : 0;
+        for (int dx = 0; dx < dst; ++dx) {
+            const int sx = (w > 0) ? dx * w / dst : 0;
+            const unsigned char* s = src + (sy * w + sx) * 4;
+            unsigned char* d = tile + (dy * dst + dx) * 4;
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+        }
+    }
+    return tile;
+}
+
+// Read the whole JAR for game @p i, extract + decode its icon, and downscale it into a
+// fresh ICON x ICON RGBA tile stored in g_icons[i] (null if it has no usable icon).
+void loadIcon(int i) {
+    g_icons[i] = 0;
+
+    hal::GameStorage& store = hal::GameStorage::instance();
+    const int size = store.openAt(i);
+    if (size <= 0) {
+        store.close();
+        return;
+    }
+    unsigned char* jar = (unsigned char*)malloc(size);
+    if (jar == 0) {
+        store.close();
+        return;
+    }
+    int off = 0;
+    while (off < size) {
+        const int r = store.read(jar + off, size - off);
+        if (r <= 0) break;
+        off += r;
+    }
+    store.close();
+
+    int iw = 0, ih = 0;
+    unsigned char* src = (off == size) ? MidletIcon::load(jar, size, &iw, &ih) : 0;
+    free(jar);
+    if (src == 0 || iw <= 0 || ih <= 0) {
+        return;
+    }
+
+    g_icons[i] = downscaleSquare(src, iw, ih, ICON);
+    MidletIcon::release(src);
+}
+
+// Lazily load game i's icon the first time it becomes visible, bounding total memory
+// with the ring cache (the oldest decoded tile is evicted when the cache is full).
+void ensureIcon(int i, int count) {
+    if (i < 0 || i >= count || i >= MAX_ICONS || g_iconTried[i]) {
+        return;
+    }
+    loadIcon(i);                 // sets g_icons[i], or leaves it null (no icon)
+    g_iconTried[i] = true;
+    if (g_icons[i] == 0) {
+        return;                  // icon-less game: nothing to cache/evict
+    }
+    if (g_ringCount == CACHE_MAX) {
+        const int victim = g_ring[g_ringHead];
+        if (victim >= 0 && g_icons[victim] != 0) {
+            free(g_icons[victim]);
+            g_icons[victim] = 0;
+            g_iconTried[victim] = false;   // may reload if scrolled back to
+        }
+    }
+    g_ring[g_ringHead] = i;
+    g_ringHead = (g_ringHead + 1) % CACHE_MAX;
+    if (g_ringCount < CACHE_MAX) {
+        g_ringCount++;
+    }
+}
+
+// Decode + downscale the embedded PS2ME title logo once into g_titleIcon.
+void loadTitleIcon() {
+    if (g_titleIcon != 0) {
+        return;
+    }
+    int w = 0, h = 0;
+    unsigned char* src = MidletIcon::decodePng(g_ps2me_icon, (int)g_ps2me_icon_len, &w, &h);
+    if (src == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    g_titleIcon = downscaleSquare(src, w, h, TITLE_ICON);
+    MidletIcon::release(src);
+}
+
+// Alpha-blend a @p tw x @p th RGBA8888 tile over the raster at (x,y).
+void blitRGBA(const unsigned char* t, int tw, int th, int x, int y) {
+    for (int dy = 0; dy < th; ++dy) {
+        const int py = y + dy;
+        if (py < 0 || py >= g_h) continue;
+        u16* row = g_ras + py * g_w;
+        const unsigned char* s = t + dy * tw * 4;
+        for (int dx = 0; dx < tw; ++dx) {
+            const int px = x + dx;
+            if (px < 0 || px >= g_w) continue;
+            const int a = s[dx * 4 + 3];
+            if (a) {
+                row[px] = blend5551(row[px], s[dx * 4 + 0], s[dx * 4 + 1], s[dx * 4 + 2], a);
+            }
+        }
+    }
+}
+
+// Draw game i's icon at (x,y): the decoded tile alpha-blended over the raster, or a
+// lettered placeholder when the JAR carried no icon.
+void drawIcon(int x, int y, int i) {
+    const unsigned char* t = (i >= 0 && i < MAX_ICONS) ? g_icons[i] : 0;
+    if (t == 0) {
+        fillRect(x, y, ICON, ICON, rgba5551(70, 74, 96));
+        const char* nm = hal::GameStorage::instance().nameAt(i);
+        char c[2];
+        c[0] = (nm != 0 && nm[0] != 0) ? nm[0] : '?';
+        c[1] = '\0';
+        drawText(x + ICON / 2 - textWidth(c, 40.0f) / 2, y + ICON / 2 - 22,
+                 c, 230, 230, 240, 40.0f);
+        return;
+    }
+    blitRGBA(t, ICON, ICON, x, y);
+}
+
+void render(int count, int selected, int topRow, int cellW, int rowStride,
+            int gridY, int visibleRows) {
+    // Ice-white background + subtle header (light theme).
+    fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
+    fillRect(0, 0, g_w, TITLE_H, rgba5551(218, 224, 234));
+    int titleX = MARGIN;
+    if (g_titleIcon != 0) {
+        blitRGBA(g_titleIcon, TITLE_ICON, TITLE_ICON, MARGIN, (TITLE_H - TITLE_ICON) / 2);
+        titleX = MARGIN + TITLE_ICON + 12;
+    }
+    drawText(titleX, 10, "PS2ME", 40, 52, 84, TITLE_PX);
+
+    if (count <= 0) {
+        drawText(MARGIN, gridY + 8, "Nenhum .jar em host:games/", 90, 96, 112, NAME_PX + 4);
+        return;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const int r = i / COLS;
+        const int c = i % COLS;
+        if (r < topRow || r >= topRow + visibleRows) {
+            continue;
+        }
+        const int cellX = MARGIN + c * (cellW + GAP);
+        const int cellY = gridY + (r - topRow) * rowStride;
+        const int cellH = rowStride - VGAP;
+        const bool sel = (i == selected);
+
+        ensureIcon(i, count);   // lazy-load this tile's icon on first sight
+
+        if (sel) {
+            fillRect(cellX, cellY - 2, cellW, cellH, rgba5551(70, 130, 225));
+        }
+
+        drawIcon(cellX + (cellW - ICON) / 2, cellY, i);
+
+        const char* nm = hal::GameStorage::instance().nameAt(i);
+        if (nm == 0) {
+            nm = "?";
+        }
+        const int nameY = cellY + ICON + 6;
+        const int pad   = 4;
+        const int clipL = cellX + pad;
+        const int clipR = cellX + cellW - pad;
+        const int avail = cellW - 2 * pad;
+        // Light text over the highlight; dark text on the ice-white background.
+        const int tr = sel ? 255 : 55;
+        const int tg = sel ? 255 : 62;
+        const int tb = sel ? 255 : 82;
+
+        char base[128];
+        stripJar(base, (int)sizeof(base), nm);
+        const int fullW = textWidth(base, NAME_PX);
+
+        if (!sel || fullW <= avail) {
+            // Static: truncate ("..") when it overflows, otherwise centre.
+            char label[48];
+            makeLabel(label, (int)sizeof(label), nm, (float)avail, NAME_PX);
+            const int tw = textWidth(label, NAME_PX);
+            drawText(cellX + (cellW - tw) / 2, nameY, label, tr, tg, tb, NAME_PX);
+        } else {
+            // Active item whose name overflows: auto-shift (marquee) the full name,
+            // clipped to the cell, with a seamless wrap and a brief start pause.
+            const int period = fullW + 32;             // trailing gap before repeat
+            int t = (int)g_marqueeTick - 45;           // hold at the start briefly
+            if (t < 0) t = 0;
+            const int off = (t / 2) % period;          // ~30 px/s at 60 fps
+            const int x0  = clipL - off;
+            drawTextClip(x0,          nameY, base, tr, tg, tb, NAME_PX, clipL, clipR);
+            drawTextClip(x0 + period, nameY, base, tr, tg, tb, NAME_PX, clipL, clipR);
+        }
+    }
+}
+
+// Allocate the DMA-aligned native-resolution raster and bring up the shared GS.
+bool ensureVideo() {
+    if (g_ras == 0) {
+        const size_t bytes = (size_t)SCREEN_W * SCREEN_H * sizeof(u16);
+        g_ras = (u16*)memalign(128, bytes);
+        if (g_ras == 0) {
+            return false;
+        }
+        g_w = SCREEN_W;
+        g_h = SCREEN_H;
+    }
+    return GsDisplay::instance().init();
+}
+
+} // namespace
+
+Ps2Frontend& Ps2Frontend::instance() {
+    static Ps2Frontend inst;
+    return inst;
+}
+
+int Ps2Frontend::pick() {
+    if (!initFont() || !ensureVideo()) {
+        return -1;
+    }
+    loadTitleIcon();
+
+    int count = hal::GameStorage::instance().list();
+    if (count < 0) {
+        count = 0;
+    }
+
+    // Brief splash: the first visible page of icons decodes on the first render.
+    if (count > 0) {
+        fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
+        drawText(MARGIN, g_h / 2 - 16, "Carregando...", 60, 70, 95, 24.0f);
+        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+    }
+
+    // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
+    // the controller exactly once; reading it here drives no VM code path.
+    hal::IPad* pad = hal::Keypad::instance().pad();
+
+    // Fixed 4 x 5 grid page.
+    const int gridY       = TITLE_H + 4;
+    const int cellW       = (g_w - 2 * MARGIN - (COLS - 1) * GAP) / COLS;
+    const int rowStride   = (g_h - gridY - 6) / ROWS;
+    const int visibleRows = ROWS;
+
+    int selected = 0;
+    int topRow = 0;
+    int lastSel = -1;
+    hal::PadButtons prev;   // all-false initial snapshot
+
+    for (;;) {
+        hal::PadButtons b;
+        if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
+            if (count > 0) {
+                if (b.right && !prev.right && selected + 1 < count)    { selected++; }
+                if (b.left  && !prev.left  && selected > 0)            { selected--; }
+                if (b.down  && !prev.down  && selected + COLS < count) { selected += COLS; }
+                if (b.up    && !prev.up    && selected - COLS >= 0)    { selected -= COLS; }
+                if (b.cross && !prev.cross)                            { return selected; }
+            }
+            prev = b;
+        }
+
+        // Keep the selected row within the visible window.
+        const int selRow = (count > 0) ? selected / COLS : 0;
+        if (selRow < topRow) {
+            topRow = selRow;
+        }
+        if (selRow >= topRow + visibleRows) {
+            topRow = selRow - visibleRows + 1;
+        }
+
+        // Advance the marquee, restarting it whenever the active item changes.
+        if (selected != lastSel) {
+            g_marqueeTick = 0;
+            lastSel = selected;
+        } else {
+            g_marqueeTick++;
+        }
+
+        render(count, selected, topRow, cellW, rowStride, gridY, visibleRows);
+        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+    }
+}
+
+} // namespace platform
+} // namespace ps2

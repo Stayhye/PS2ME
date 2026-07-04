@@ -23,6 +23,9 @@ public:
 
     /// Install the controller backend. Ownership stays with the caller.
     void setPad(IPad* pad) { pad_ = pad; }
+    /// The shared controller backend, for code (e.g. the native front-end) that
+    /// needs to read the pad directly instead of through the key-event mapping.
+    IPad* pad() const { return pad_; }
 
     /// IPollHook: read the pad and emit key events for changed buttons.
     virtual void onPoll();
