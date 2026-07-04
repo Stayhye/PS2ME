@@ -1,5 +1,6 @@
 // PS2 JavaCall port — platform layer. Ps2Framebuffer implementation + registration.
 #include "Ps2Framebuffer.hpp"
+#include "GsDisplay.hpp"
 #include "../hal/LcdDevice.hpp"
 
 #include <malloc.h>   // memalign / free (128-byte aligned for DMA)
@@ -42,8 +43,10 @@ void Ps2Framebuffer::present() {
     if (raster_ == 0 || gsBuf_ == 0) {
         return;
     }
-    // Bring up the GS on first use (on the VM thread, once the display exists).
-    if (!gs_.ready() && !gs_.init(width_, height_)) {
+    // Bring up the shared GS on first use (idempotent: the native front-end may have
+    // already initialized it before the VM started).
+    GsDisplay& gs = GsDisplay::instance();
+    if (!gs.ready() && !gs.init()) {
         return;
     }
 
@@ -59,7 +62,7 @@ void Ps2Framebuffer::present() {
         gsBuf_[i] = static_cast<javacall_pixel>(r | ((g >> 1) << 5) | (b << 10) | 0x8000);
     }
 
-    gs_.present(reinterpret_cast<const u16*>(gsBuf_));
+    gs.present(reinterpret_cast<const u16*>(gsBuf_), width_, height_);
 }
 
 void Ps2Framebuffer::presentRegion(int /*ystart*/, int /*yend*/) {

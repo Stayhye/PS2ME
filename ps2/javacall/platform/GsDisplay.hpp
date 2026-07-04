@@ -22,34 +22,53 @@ namespace platform {
 
 class GsDisplay {
 public:
-    GsDisplay() : ready_(false), lcdW_(0), lcdH_(0), xfer_(0), draw_(0) {}
+    /// Process-wide instance. One GS/VRAM bring-up shared by the native front-end
+    /// (Ps2Frontend) and the MIDP framebuffer (Ps2Framebuffer), so graph_initialize
+    /// and the VRAM allocations happen exactly once regardless of who presents first.
+    static GsDisplay& instance();
+
     ~GsDisplay();
 
-    /// One-time GS/DMA/VRAM bring-up for an @p lcdW x @p lcdH source screen. Safe to
-    /// call repeatedly; only the first successful call does work. Returns false if
-    /// VRAM allocation or packet setup fails.
-    bool init(int lcdW, int lcdH);
+    /// One-time GS/DMA/VRAM bring-up (the 640x448 TV framebuffer + draw environment
+    /// + DMA packets, shared by both present paths). Safe to call repeatedly; only the
+    /// first successful call does work. Returns false on VRAM/packet setup failure.
+    bool init();
 
     bool ready() const { return ready_; }
 
-    /// Upload @p rgba5551 (lcdW x lcdH, 128-byte aligned) to VRAM and draw it as the
-    /// pillarboxed sprite, then wait for vsync. No-op until init() has succeeded.
-    void present(const u16* rgba5551);
+    /// Upload @p rgba5551 (@p w x @p h, 128-byte aligned) and draw it as an
+    /// aspect-preserved, pillarboxed sprite -- the path the MIDP games use (portrait
+    /// 240x320 on the TV). No-op until init() has succeeded. The game texture is
+    /// allocated on the first call.
+    void present(const u16* rgba5551, int w, int h);
+
+    /// Upload @p rgba5551 (@p w x @p h, 128-byte aligned) and draw it stretched to
+    /// FILL the whole native TV screen (no pillarbox) -- the path the native
+    /// front-end uses. No-op until init() has succeeded. The fullscreen texture is
+    /// allocated on the first call.
+    void presentFullscreen(const u16* rgba5551, int w, int h);
 
 private:
+    GsDisplay()
+        : ready_(false), gameTexReady_(false), fsTexReady_(false),
+          xfer_(0), draw_(0) {}
     GsDisplay(const GsDisplay&);
     GsDisplay& operator=(const GsDisplay&);
 
-    bool ready_;
-    int  lcdW_;
-    int  lcdH_;
+    bool ready_;         // framebuffer + environment up
+    bool gameTexReady_;  // pillarbox game texture allocated
+    bool fsTexReady_;    // fullscreen UI texture allocated
 
     framebuffer_t frame_;
     zbuffer_t     z_;
-    texbuffer_t   texbuf_;
-    lod_t         lod_;
-    clutbuffer_t  clut_;
-    texrect_t     rect_;
+    lod_t         lod_;    // NEAREST sampling, shared by both textures
+    clutbuffer_t  clut_;   // no CLUT, shared
+
+    texbuffer_t   texbuf_;   // pillarbox game texture (256x512)
+    texrect_t     rect_;     // pillarbox destination rect
+
+    texbuffer_t   fsTexbuf_; // fullscreen UI texture (1024x512)
+    texrect_t     fsRect_;   // fullscreen destination rect (whole TV)
 
     packet_t* xfer_;   // texture-upload DMA chain
     packet_t* draw_;   // draw packet (clear + sprite)

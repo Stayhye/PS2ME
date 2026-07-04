@@ -10,7 +10,6 @@
 #define PS2_JAVACALL_PLATFORM_PS2FRAMEBUFFER_HPP
 
 #include "../hal/IFramebuffer.hpp"
-#include "GsDisplay.hpp"
 
 namespace ps2 {
 namespace platform {
@@ -27,10 +26,9 @@ public:
 
 private:
     javacall_pixel* raster_;   // RGB565, filled by the MIDP rasterizer
-    javacall_pixel* gsBuf_;    // RGBA5551, uploaded to the GS by gs_
+    javacall_pixel* gsBuf_;    // RGBA5551, uploaded to the GS
     int             width_;
     int             height_;
-    GsDisplay       gs_;
 };
 
 } // namespace platform
