@@ -135,7 +135,8 @@ bool GsDisplay::init() {
 // and draws @p rect, clearing the TV first.
 namespace {
 void blit(packet_t* xfer, packet_t* draw, const u16* raster, int w, int h,
-          texbuffer_t* tb, clutbuffer_t* clut, lod_t* lod, texrect_t* rect) {
+          texbuffer_t* tb, clutbuffer_t* clut, lod_t* lod, texrect_t* rect,
+          bool waitVsync) {
     // Cache coherency before the DMA reads the EE RAM.
     const u32 bytes = (u32)w * (u32)h * sizeof(u16);
     SyncDCache((void*)raster, (u8*)raster + bytes);
@@ -158,7 +159,9 @@ void blit(packet_t* xfer, packet_t* draw, const u16* raster, int w, int h,
     dma_wait_fast();
 
     draw_wait_finish();
-    graph_wait_vsync();
+    if (waitVsync) {
+        graph_wait_vsync();   // the fullscreen (menu) path paces on vsync itself
+    }
 }
 } // namespace
 
@@ -175,7 +178,7 @@ void GsDisplay::present(const u16* rgba5551, int w, int h) {
         setRect(&rect_, dx, 0.0f, dx + dw, dh, (float)w, (float)h);
         gameTexReady_ = true;
     }
-    blit(xfer_, draw_, rgba5551, w, h, &texbuf_, &clut_, &lod_, &rect_);
+    blit(xfer_, draw_, rgba5551, w, h, &texbuf_, &clut_, &lod_, &rect_, true);
 }
 
 void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
@@ -188,7 +191,7 @@ void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
         setRect(&fsRect_, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, (float)w, (float)h);
         fsTexReady_ = true;
     }
-    blit(xfer_, draw_, rgba5551, w, h, &fsTexbuf_, &clut_, &lod_, &fsRect_);
+    blit(xfer_, draw_, rgba5551, w, h, &fsTexbuf_, &clut_, &lod_, &fsRect_, false);
 }
 
 } // namespace platform
