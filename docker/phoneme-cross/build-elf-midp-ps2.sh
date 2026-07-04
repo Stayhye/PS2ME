@@ -98,7 +98,8 @@ done
 echo "+ [3/5] libjavacall (contract + hal + platform)"
 JC=/work/ps2/javacall
 JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti \
-    -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include -I$PS2SDK/ports/include"
+    -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include -I$PS2SDK/ports/include \
+    -I/work/vendors -I/work/assets"
 JC_SRCS="
     contract/javacall_logging.cpp
     contract/javacall_os.cpp
@@ -134,6 +135,8 @@ JC_SRCS="
     platform/NullEventLock.cpp
     platform/Ps2Pad.cpp
     platform/Ps2HostStorage.cpp
+    platform/MidletIcon.cpp
+    platform/Ps2Frontend.cpp
 "
 JC_OBJS=""
 for src in $JC_SRCS; do
