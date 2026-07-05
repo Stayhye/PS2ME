@@ -134,6 +134,7 @@ JC_SRCS="
     platform/Ps2Framebuffer.cpp
     platform/NullEventLock.cpp
     platform/Ps2Pad.cpp
+    platform/Ps2Storage.cpp
     platform/Ps2HostStorage.cpp
     platform/MidletIcon.cpp
     platform/IconCache.cpp

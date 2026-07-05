@@ -12,6 +12,7 @@
 // Backend for hal::GameStorage. Later devices (USB mass:, memory card mc0:) plug in
 // as sibling backends behind the same HAL (fileXio handles those prefixes).
 #include "../hal/GameStorage.hpp"
+#include "Ps2Storage.hpp"
 
 #include <sifrpc.h>
 #include <fcntl.h>      // open, O_RDONLY
@@ -23,7 +24,6 @@ namespace ps2 {
 namespace platform {
 
 namespace {
-const char* GAMES_DIR = "host:games";   // <hostfs-root>/games/
 const int   MAX_GAMES = 2048;           // large libraries / load testing
 const int   NAME_CAP  = 64;             // basename cap (fits a typical <suite>.jar)
 
@@ -43,7 +43,7 @@ public:
     virtual int list() {
         ensureReady();
         count_ = 0;
-        DIR* dir = ::opendir(GAMES_DIR);
+        DIR* dir = ::opendir(Ps2Storage::instance().gamesDir());
         if (dir == 0) {
             return -1;
         }
@@ -74,7 +74,7 @@ public:
         close();
         char path[128];
         int p = 0;
-        for (const char* d = GAMES_DIR; *d != '\0'; ++d) {
+        for (const char* d = Ps2Storage::instance().gamesDir(); *d != '\0'; ++d) {
             path[p++] = *d;
         }
         path[p++] = '/';

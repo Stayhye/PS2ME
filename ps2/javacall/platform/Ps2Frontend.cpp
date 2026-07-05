@@ -15,6 +15,7 @@
 #include "GsDisplay.hpp"
 #include "MidletIcon.hpp"
 #include "IconCache.hpp"
+#include "Ps2Storage.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
@@ -310,7 +311,29 @@ void render(int count, int selected, int topRow, int cellW, int rowStride,
     drawText(titleX, 10, "PS2ME", 40, 52, 84, TITLE_PX);
 
     if (count <= 0) {
-        drawText(MARGIN, gridY + 8, "Nenhum .jar em host:games/", 90, 96, 112, NAME_PX + 4);
+        // No games: show the storage-resolution trace on screen (the EE console is
+        // invisible on real hardware booted standalone from USB).
+        drawText(MARGIN, gridY + 2, "Nenhum jogo encontrado. Diagnostico:",
+                 150, 60, 60, NAME_PX + 2);
+        const char* p = Ps2Storage::instance().diagText();
+        int ly = gridY + 28;
+        char line[160];
+        int li = 0;
+        for (;; ++p) {
+            if (*p == '\n' || *p == '\0') {
+                line[li] = '\0';
+                if (li > 0) {
+                    drawText(MARGIN, ly, line, 40, 46, 70, 15.0f);
+                    ly += 19;
+                }
+                li = 0;
+                if (*p == '\0') {
+                    break;
+                }
+            } else if (li < (int)sizeof(line) - 1) {
+                line[li++] = *p;
+            }
+        }
         return;
     }
 

@@ -30,6 +30,7 @@ extern "C" {
 }
 
 #include "../javacall/platform/Ps2Frontend.hpp"
+#include "../javacall/platform/Ps2Storage.hpp"
 
 extern "C" {
 // MIDP / javacall entry points, all defined in libjvm.a (the merged MIDP archive).
@@ -43,10 +44,17 @@ void JavaTask(void);
 extern int ps2_chosen_game;
 }
 
-int main(int /*argc*/, char** /*argv*/) {
+int main(int argc, char** argv) {
     // Straight through our javacall layer, before anything else: proves libjavacall
     // and the print path linked and run on real hardware.
     javacall_print("j2me-ps2: booting phoneME Feature MIDP\n");
+
+    // Bring up USB mass storage (ps2_drivers) so the program can run from a USB stick,
+    // and anchor games + the icon cache to the ELF's own launch directory (argv[0]).
+    // Safe with no USB / unknown path (cache off, games fall back to host:). Done once,
+    // before the menu lists games.
+    const char* bootPath = (argc > 0 && argv != 0) ? argv[0] : 0;
+    ps2::platform::Ps2Storage::instance().mount(bootPath);
 
     for (;;) {
         // 1) Standalone native front-end. No VM is running here: it owns the screen,
