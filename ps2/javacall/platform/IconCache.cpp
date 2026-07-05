@@ -6,6 +6,7 @@
 
 #include "../hal/GameStorage.hpp"
 #include "MidletIcon.hpp"
+#include "Ps2Storage.hpp"
 
 extern "C" {
 #include <kernel.h>     // threads + semaphores
@@ -180,23 +181,35 @@ void IconCache::run() {
 
 unsigned char* IconCache::loadTile(int game) {
     hal::GameStorage& st = hal::GameStorage::instance();
+    Ps2Storage&       disk = Ps2Storage::instance();
+    const char* name = st.nameAt(game);
+    const int   n    = iconSize_;
 
-    // host: file I/O is SIF RPC: hold the SIF lock so it never runs concurrently
-    // with another thread's SIF (EE console, pad). malloc stays inside -- brief.
+    // All of this touches SIF (host:/mass: I/O): hold the SIF lock so it never runs
+    // concurrently with another thread's SIF (EE console, pad). Open the JAR only to
+    // learn its size (open + lseek, no content read yet), then try the on-disk cache
+    // first -- a hit skips both reading and decoding the JAR entirely.
     sifLock();
     const int size = st.openAt(game);
-    unsigned char* jar = (size > 0) ? (unsigned char*)malloc(size) : 0;
+    unsigned char* cached = (size > 0) ? disk.readTile(name, size, n) : 0;
+    unsigned char* jar = 0;
     int off = 0;
-    if (jar != 0) {
-        while (off < size) {
-            const int r = st.read(jar + off, size - off);
-            if (r <= 0) break;
-            off += r;
+    if (cached == 0 && size > 0) {              // cache miss: read the whole JAR
+        jar = (unsigned char*)malloc(size);
+        if (jar != 0) {
+            while (off < size) {
+                const int r = st.read(jar + off, size - off);
+                if (r <= 0) break;
+                off += r;
+            }
         }
     }
     st.close();
     sifUnlock();
 
+    if (cached != 0) {
+        return cached;                          // cache hit -- nothing to decode
+    }
     if (size <= 0 || jar == 0) {
         return 0;
     }
@@ -208,7 +221,6 @@ unsigned char* IconCache::loadTile(int game) {
         return 0;
     }
 
-    const int n = iconSize_;
     unsigned char* tile = (unsigned char*)malloc(n * n * 4);
     if (tile != 0) {
         for (int dy = 0; dy < n; ++dy) {
@@ -220,6 +232,10 @@ unsigned char* IconCache::loadTile(int game) {
                 d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
             }
         }
+        // Persist the decoded tile so the next boot is a cache hit (SIF: under lock).
+        sifLock();
+        disk.writeTile(name, size, n, tile);
+        sifUnlock();
     }
     MidletIcon::release(rgba);
     return tile;
