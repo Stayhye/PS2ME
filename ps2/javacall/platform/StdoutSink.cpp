@@ -1,6 +1,7 @@
 // PS2 JavaCall port — platform layer. StdoutSink implementation + registration.
 #include "StdoutSink.hpp"
 #include "../hal/Logger.hpp"
+#include "Ps2Frontend.hpp"
 
 #include <cstdio>
 
@@ -8,6 +9,13 @@ namespace ps2 {
 namespace platform {
 
 void StdoutSink::write(const char* data, int length) {
+    // Mirror to the native on-screen launch trace FIRST (a no-op unless the launcher
+    // enabled it): on real hardware the SIF/EE console is gone after the USB IOP reset,
+    // so this is the only place the VM's stdout (System.out incl. the [Launcher]
+    // milestones and exception traces) is visible while a game installs and starts.
+    // Doing it before the stdout write means a stalled console can't hide the trace.
+    Ps2Frontend::instance().logWrite(data, length);
+
     // ps2sdk's newlib routes stdout to the EE console (SIF/tty), which the
     // emulator surfaces in its log. fwrite handles embedded NULs and non-
     // terminated buffers correctly.

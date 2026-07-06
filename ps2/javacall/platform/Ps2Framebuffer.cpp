@@ -1,6 +1,7 @@
 // PS2 JavaCall port — platform layer. Ps2Framebuffer implementation + registration.
 #include "Ps2Framebuffer.hpp"
 #include "GsDisplay.hpp"
+#include "Ps2Frontend.hpp"
 #include "../hal/LcdDevice.hpp"
 
 #include <malloc.h>   // memalign / free (128-byte aligned for DMA)
@@ -43,6 +44,10 @@ void Ps2Framebuffer::present() {
     if (raster_ == 0 || gsBuf_ == 0) {
         return;
     }
+    // The game is now drawing its own frames: stop the native launch-trace overlay so
+    // it no longer clobbers the game's screen (no-op if it was never enabled).
+    Ps2Frontend::instance().logEnable(false);
+
     // Bring up the shared GS on first use (idempotent: the native front-end may have
     // already initialized it before the VM started).
     GsDisplay& gs = GsDisplay::instance();

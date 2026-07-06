@@ -85,6 +85,15 @@ int main(int argc, char** argv) {
         static char a1[] = "internal";
         static char a2[] = "com.j2meps2.loader.GameLoader";
         char* jargv[] = { a0, a1, a2 };
+
+        // Mirror the VM's stdout onto the native GS while it installs and starts the
+        // game. On real hardware the SIF/EE console is gone after the USB IOP reset, so
+        // this on-screen trace is the only way to see the [Launcher] milestones (and
+        // any crash) -- a freeze leaves the last milestone on screen. It turns itself
+        // off the moment the game draws its first frame (Ps2Framebuffer::present).
+        ps2::platform::Ps2Frontend::instance().logEnable(true);
+        javacall_print("=== launch trace (install + start) ===\n");
+
         javanotify_start_java_with_arbitrary_args(3, jargv);
 
         // 4) Run the VM until the chosen game (and the loader) finish.

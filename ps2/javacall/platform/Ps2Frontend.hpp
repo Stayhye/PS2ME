@@ -23,6 +23,17 @@ public:
     /// Self-contained: brings up video, input and storage as needed; touches no VM.
     int pick();
 
+    /// On-screen launch trace. On real hardware the SIF/EE console is gone after the
+    /// USB IOP reset, so there is no way to see the VM's stdout while it installs and
+    /// starts a game. When enabled, logWrite() mirrors those bytes (System.out incl.
+    /// the [Launcher] milestones and any exception traces) onto the native GS overlay,
+    /// so a freeze during launch leaves the last milestone visible. It reuses the menu
+    /// raster/font/GsDisplay that pick() already brought up, so it is only valid after
+    /// pick() has run. Disabled again the moment the game starts drawing (so its own
+    /// screen is not clobbered) -- see Ps2Framebuffer::present.
+    void logEnable(bool on);
+    void logWrite(const char* s, int len);
+
 private:
     Ps2Frontend() {}
     Ps2Frontend(const Ps2Frontend&);

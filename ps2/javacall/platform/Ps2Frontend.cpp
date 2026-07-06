@@ -406,6 +406,59 @@ bool ensureVideo() {
     return GsDisplay::instance().init();
 }
 
+// --- On-screen launch log (real-HW diagnostics) -----------------------------------
+// The VM's stdout (System.out via javacall_print -> StdoutSink) is teed here during
+// the launch window so the [Launcher] milestones + any exception traces render on the
+// native GS -- the only console left once the USB IOP reset kills the SIF tty. Bytes
+// are buffered into lines; each newline pushes a line and repaints. Bounded, no heap.
+const int LOG_MAX_LINES = 22;    // fits 640x448 below the title at 17px stride
+const int LOG_LINE_CAP  = 96;    // long lines just clip to the raster width
+
+char g_logLines[LOG_MAX_LINES][LOG_LINE_CAP];
+int  g_logCount = 0;             // completed lines stored
+char g_logBuild[LOG_LINE_CAP];   // line currently being assembled
+int  g_logCur   = 0;             // chars in g_logBuild
+bool g_logOn    = false;
+
+void logRender() {
+    if (g_ras == 0 || !g_fontOk) {
+        return;
+    }
+    fillRect(0, 0, g_w, g_h, rgba5551(16, 18, 28));
+    drawText(MARGIN, 8, "PS2ME - iniciando jogo", 210, 220, 235, TITLE_PX);
+    int ly = TITLE_H + 8;
+    for (int i = 0; i < g_logCount; ++i) {
+        drawText(MARGIN, ly, g_logLines[i], 190, 205, 225, 15.0f);
+        ly += 17;
+    }
+    if (g_logCur > 0 && g_logCount < LOG_MAX_LINES) {
+        g_logBuild[g_logCur] = '\0';          // show the partial line in flight too
+        drawText(MARGIN, ly, g_logBuild, 190, 205, 225, 15.0f);
+    }
+    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+}
+
+void logPushLine() {
+    g_logBuild[g_logCur] = '\0';
+    if (g_logCount >= LOG_MAX_LINES) {         // scroll: drop the oldest line
+        for (int i = 1; i < LOG_MAX_LINES; ++i) {
+            int k = 0;
+            for (; g_logLines[i][k] != '\0' && k < LOG_LINE_CAP - 1; ++k) {
+                g_logLines[i - 1][k] = g_logLines[i][k];
+            }
+            g_logLines[i - 1][k] = '\0';
+        }
+        g_logCount = LOG_MAX_LINES - 1;
+    }
+    int k = 0;
+    for (; g_logBuild[k] != '\0' && k < LOG_LINE_CAP - 1; ++k) {
+        g_logLines[g_logCount][k] = g_logBuild[k];
+    }
+    g_logLines[g_logCount][k] = '\0';
+    g_logCount++;
+    g_logCur = 0;
+}
+
 // Frame pacing: block until the next field. Uses the vsync-interrupt semaphore when
 // it is installed (so the icon worker runs meanwhile); falls back to a busy vsync.
 void waitFrame() {
@@ -423,7 +476,37 @@ Ps2Frontend& Ps2Frontend::instance() {
     return inst;
 }
 
+void Ps2Frontend::logEnable(bool on) {
+    g_logOn = on;
+    if (on) {                     // start each launch window with a clean trace
+        g_logCount = 0;
+        g_logCur   = 0;
+    }
+}
+
+void Ps2Frontend::logWrite(const char* s, int len) {
+    if (!g_logOn || s == 0) {
+        return;
+    }
+    bool sawNewline = false;
+    for (int i = 0; i < len; ++i) {
+        const char c = s[i];
+        if (c == '\n') {
+            logPushLine();
+            sawNewline = true;
+        } else if (c == '\r') {
+            // ignore CR
+        } else if (g_logCur < LOG_LINE_CAP - 1) {
+            g_logBuild[g_logCur++] = (c >= 32 && c < 127) ? c : ' ';
+        }
+    }
+    if (sawNewline) {
+        logRender();              // repaint once per completed line (bounded)
+    }
+}
+
 int Ps2Frontend::pick() {
+    logEnable(false);             // menu owns the screen again; stop the launch trace
     if (!initFont() || !ensureVideo()) {
         return -1;
     }
