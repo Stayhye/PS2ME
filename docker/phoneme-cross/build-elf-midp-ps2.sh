@@ -136,6 +136,7 @@ JC_SRCS="
     platform/Ps2Pad.cpp
     platform/Ps2Storage.cpp
     platform/Ps2HostStorage.cpp
+    platform/Ps2Audio.cpp
     platform/MidletIcon.cpp
     platform/IconCache.cpp
     platform/Ps2Frontend.cpp
@@ -173,7 +174,7 @@ $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
         "$PCSL_OUT/lib/libpcsl_network.a" \
         "$PCSL_OUT/lib/libpcsl_escfilenames.a" \
         -ldraw -lgraph -lpacket -ldma -lmath3d \
-        -lps2_drivers -lmtap -lpad -lpatches \
+        -lps2_drivers -laudsrv -lmtap -lpad -lpatches \
         -lkernel -lc -lm -lgcc \
     -Wl,--end-group
 

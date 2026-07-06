@@ -31,6 +31,7 @@ extern "C" {
 
 #include "../javacall/platform/Ps2Frontend.hpp"
 #include "../javacall/platform/Ps2Storage.hpp"
+#include "../javacall/platform/Ps2Audio.hpp"
 
 extern "C" {
 // MIDP / javacall entry points, all defined in libjvm.a (the merged MIDP archive).
@@ -55,6 +56,14 @@ int main(int argc, char** argv) {
     // before the menu lists games.
     const char* bootPath = (argc > 0 && argv != 0) ? argv[0] : 0;
     ps2::platform::Ps2Storage::instance().mount(bootPath);
+
+    // Bring up audio (ps2_drivers libsd + audsrv) AFTER storage: the audio IOP modules
+    // must load after Ps2Storage's USB-boot IOP reset, and this is still single-threaded
+    // (before the menu / icon worker), so no SIF lock is needed. A short startup chime
+    // both confirms the SPU2/audsrv chain is live and gives the launcher a bit of life.
+    if (ps2::platform::Ps2Audio::instance().init()) {
+        ps2::platform::Ps2Audio::instance().beep(880, 250);
+    }
 
     for (;;) {
         // 1) Standalone native front-end. No VM is running here: it owns the screen,
