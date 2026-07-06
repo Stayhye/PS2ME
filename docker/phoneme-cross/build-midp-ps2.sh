@@ -118,7 +118,8 @@ fi
 # resolve them as platform classes (e.g. games extending com.nokia.mid.ui.FullCanvas).
 NOKIA_API="ps2/vm/api/nokia/FullCanvas.java ps2/vm/api/nokia/DeviceControl.java \
 ps2/vm/api/nokia/DirectGraphics.java ps2/vm/api/nokia/DirectUtils.java \
-ps2/vm/api/nokia/DirectGraphicsImp.java"
+ps2/vm/api/nokia/DirectGraphicsImp.java \
+ps2/vm/api/nokia/sound/SoundListener.java ps2/vm/api/nokia/sound/Sound.java"
 APP_JAVA=${APP_JAVA:-"ps2/vm/apps/GameLoader.java ps2/vm/apps/HelloCanvas.java $NOKIA_API"}
 if [ -n "$APP_JAVA" ]; then
     echo "+ romizing MIDlet suite(s): $APP_JAVA"
