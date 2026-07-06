@@ -111,7 +111,15 @@ fi
 # After the MIDP class library exists, compile+preverify our MIDlet against it,
 # stage it into the romizer input, and re-run the ROM step so ROMImage.cpp picks
 # it up. Launched by class name from the internal suite (see Ps2MidpMain.cpp).
-APP_JAVA=${APP_JAVA:-"ps2/vm/apps/GameLoader.java ps2/vm/apps/HelloCanvas.java"}
+#
+# APP_JAVA also carries vendor-API compatibility classes that phoneME Feature does not
+# ship but many commercial games require -- the Nokia UI API (com.nokia.mid.ui.*),
+# implemented on top of MIDP 2.0. They romize into the system classpath so game MIDlets
+# resolve them as platform classes (e.g. games extending com.nokia.mid.ui.FullCanvas).
+NOKIA_API="ps2/vm/api/nokia/FullCanvas.java ps2/vm/api/nokia/DeviceControl.java \
+ps2/vm/api/nokia/DirectGraphics.java ps2/vm/api/nokia/DirectUtils.java \
+ps2/vm/api/nokia/DirectGraphicsImp.java"
+APP_JAVA=${APP_JAVA:-"ps2/vm/apps/GameLoader.java ps2/vm/apps/HelloCanvas.java $NOKIA_API"}
 if [ -n "$APP_JAVA" ]; then
     echo "+ romizing MIDlet suite(s): $APP_JAVA"
     MIDP_OUTPUT_DIR="$MIDP_OUT" CLDC_DIST_DIR="$CLDC_DIST" JDK_DIR="$JDK_DIR" \
