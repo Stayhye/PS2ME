@@ -7,6 +7,7 @@
 #include "../hal/GameStorage.hpp"
 #include "MidletIcon.hpp"
 #include "Ps2Storage.hpp"
+#include "SifLock.hpp"
 
 extern "C" {
 #include <kernel.h>     // threads + semaphores
@@ -22,10 +23,6 @@ namespace platform {
 namespace {
 
 const int STACK_SIZE = 64 * 1024;   // worker stack (JAR read + PNG decode)
-
-// Binary semaphore serializing all SIF RPC use (see IconCache::sifLock). -1 until
-// the worker is armed; while it's -1 there is only one thread, so lock is a no-op.
-int g_sifSema = -1;
 
 // GS-native RGBA5551 (R low, G, B, alpha top) -- same layout as the raster.
 inline unsigned short rgba5551(int r, int g, int b) {
@@ -65,21 +62,14 @@ IconCache::IconCache()
       workerId_(0), mutex_(0), workSema_(0), stack_(0),
       frame_(0), slotCount_(0), qHead_(0), qTail_(0) {}
 
-void IconCache::sifLock() {
-    if (g_sifSema >= 0) {
-        WaitSema(g_sifSema);
-    }
-}
-void IconCache::sifUnlock() {
-    if (g_sifSema >= 0) {
-        SignalSema(g_sifSema);
-    }
-}
+// Kept for the existing call sites; the actual lock now lives in the shared SifLock so
+// the audio mixer thread and the controller reads serialize against the same lock.
+void IconCache::sifLock()   { SifLock::acquire(); }
+void IconCache::sifUnlock() { SifLock::release(); }
 
 void IconCache::ensureWorker() {
     mutex_    = makeSema(1, 1);
     workSema_ = makeSema(0, 1);
-    g_sifSema = makeSema(1, 1);   // arm the SIF lock before the worker can run
     stack_    = memalign(16, STACK_SIZE);
 
     // Run below the render thread so the worker only gets the CPU while the render

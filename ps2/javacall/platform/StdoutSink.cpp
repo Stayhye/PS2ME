@@ -2,6 +2,7 @@
 #include "StdoutSink.hpp"
 #include "../hal/Logger.hpp"
 #include "Ps2Frontend.hpp"
+#include "SifLock.hpp"
 
 #include <cstdio>
 
@@ -16,9 +17,11 @@ void StdoutSink::write(const char* data, int length) {
     // Doing it before the stdout write means a stalled console can't hide the trace.
     Ps2Frontend::instance().logWrite(data, length);
 
-    // ps2sdk's newlib routes stdout to the EE console (SIF/tty), which the
-    // emulator surfaces in its log. fwrite handles embedded NULs and non-
-    // terminated buffers correctly.
+    // ps2sdk's newlib routes stdout to the EE console (SIF/tty), which the emulator
+    // surfaces in its log. fwrite handles embedded NULs and non-terminated buffers
+    // correctly. The write reaches the IOP over SIF, so serialize it against the audio
+    // mixer thread and controller reads on the shared lock.
+    SifGuard guard;
     std::fwrite(data, 1, static_cast<size_t>(length), stdout);
     std::fflush(stdout);
 }

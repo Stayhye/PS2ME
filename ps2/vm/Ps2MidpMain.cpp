@@ -32,6 +32,7 @@ extern "C" {
 #include "../javacall/platform/Ps2Frontend.hpp"
 #include "../javacall/platform/Ps2Storage.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
+#include "../javacall/platform/SifLock.hpp"
 
 extern "C" {
 // MIDP / javacall entry points, all defined in libjvm.a (the merged MIDP archive).
@@ -46,6 +47,12 @@ extern int ps2_chosen_game;
 }
 
 int main(int argc, char** argv) {
+    // Arm the shared SIF lock before anything touches SIF or spawns a thread: from here
+    // on every SIF user (controller, host:/mass: I/O, EE-console prints, audio, icon
+    // worker) serializes through it, so the audio mixer thread can't collide with the
+    // controller reads / file I/O on the non-reentrant SIF bus.
+    ps2::platform::SifLock::init();
+
     // Straight through our javacall layer, before anything else: proves libjavacall
     // and the print path linked and run on real hardware.
     javacall_print("j2me-ps2: booting phoneME Feature MIDP\n");
@@ -62,7 +69,8 @@ int main(int argc, char** argv) {
     // (before the menu / icon worker), so no SIF lock is needed. A short startup chime
     // both confirms the SPU2/audsrv chain is live and gives the launcher a bit of life.
     if (ps2::platform::Ps2Audio::instance().init()) {
-        ps2::platform::Ps2Audio::instance().beep(880, 250);
+        ps2::platform::Ps2Audio::instance().beep(880, 250);   // chime: boot, single-threaded
+        ps2::platform::Ps2Audio::instance().startMixer();     // then the SIF-locked ring feeder
     }
 
     for (;;) {

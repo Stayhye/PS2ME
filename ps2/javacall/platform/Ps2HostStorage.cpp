@@ -13,6 +13,7 @@
 // as sibling backends behind the same HAL (fileXio handles those prefixes).
 #include "../hal/GameStorage.hpp"
 #include "Ps2Storage.hpp"
+#include "SifLock.hpp"
 
 #include <sifrpc.h>
 #include <fcntl.h>      // open, O_RDONLY
@@ -41,6 +42,7 @@ public:
     Ps2HostStorage() : ready_(false), count_(0), fd_(-1) {}
 
     virtual int list() {
+        SifGuard guard;   // opendir/readdir/closedir go to the IOP over SIF (fileXio)
         ensureReady();
         count_ = 0;
         DIR* dir = ::opendir(Ps2Storage::instance().gamesDir());
@@ -71,6 +73,7 @@ public:
         if (i < 0 || i >= count_) {
             return -1;
         }
+        SifGuard guard;   // open/lseek go to the IOP over SIF (recursive: close() too)
         close();
         char path[128];
         int p = 0;
@@ -96,10 +99,12 @@ public:
         if (fd_ < 0) {
             return -1;
         }
+        SifGuard guard;   // ::read goes to the IOP over SIF (fileXio)
         return (int)::read(fd_, buf, max);
     }
 
     virtual void close() {
+        SifGuard guard;   // ::close goes to the IOP over SIF (fileXio)
         if (fd_ >= 0) {
             ::close(fd_);
             fd_ = -1;

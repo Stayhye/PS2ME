@@ -9,6 +9,7 @@
 #include "Ps2Pad.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/EventQueue.hpp"
+#include "SifLock.hpp"
 
 #include <tamtypes.h>
 #include <sifrpc.h>
@@ -28,6 +29,7 @@ char g_padBuf[256] __attribute__((aligned(64)));
 } // namespace
 
 bool Ps2Pad::open() {
+    SifGuard guard;   // pad bring-up loads IRX over SIF
     SifInitRpc(0);
     // Allow SifExecModuleBuffer to load the IRX embedded in ps2_drivers.
     sbv_patch_enable_lmb();
@@ -45,6 +47,7 @@ bool Ps2Pad::open() {
 }
 
 bool Ps2Pad::stableState() {
+    SifGuard guard;   // padGetState is a padman SIF call
     const int state = padGetState(PORT, SLOT);
     return state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1;
 }
@@ -58,7 +61,11 @@ bool Ps2Pad::ensureReady() {
 }
 
 bool Ps2Pad::read(hal::PadButtons* out) {
-    if (out == 0 || !stableState()) {
+    if (out == 0) {
+        return false;
+    }
+    SifGuard guard;   // recursive: covers the nested stableState() below + padRead
+    if (!stableState()) {
         return false;
     }
     struct padButtonStatus b;

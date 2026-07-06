@@ -126,6 +126,7 @@ JC_SRCS="
     hal/Keypad.cpp
     hal/GameStorage.cpp
     platform/StdoutSink.cpp
+    platform/SifLock.cpp
     platform/Ps2CpuCache.cpp
     platform/Ps2AlarmTimer.cpp
     platform/Ps2Clock.cpp

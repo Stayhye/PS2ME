@@ -42,7 +42,15 @@ public:
     void playPcmMonoBlocking(const short* pcm, int samples);
 
     /// Synthesize and play a square-wave tone (freq Hz, duration ms) -- the boot beep.
+    /// Boot-only (single-threaded, before startMixer): does not take the SIF lock.
     void beep(int freq, int ms);
+
+    /// Start the background mixer thread. It keeps the audsrv ring fed so audio never
+    /// underruns; for now it streams silence (Phase 2 mixes queued game sounds here).
+    /// Every ring feed goes through the shared SifLock, so it serializes against the
+    /// controller reads / file I/O / prints on the non-reentrant SIF bus. Call once,
+    /// after init() and after the boot chime (so the chime doesn't race the thread).
+    void startMixer();
 
 private:
     Ps2Audio();
@@ -51,7 +59,13 @@ private:
 
     static const int SAMPLE_RATE = 22050;
 
-    bool ready_;
+    static void mixerTrampoline(void* arg);
+    void mixerRun();   // never returns
+
+    bool  ready_;
+    bool  mixerStarted_;
+    int   mixerId_;
+    void* mixerStack_;
 };
 
 } // namespace platform
