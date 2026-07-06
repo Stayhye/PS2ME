@@ -238,4 +238,22 @@ grep -q 'ps2-rmfs-iter-reset' "$RMFS_ALLOC_C" || \
   prevFilename = NULL; /* ps2-rmfs-iter-reset: a delete invalidates the stateful startWith iterator */' \
       "$RMFS_ALLOC_C"
 
+# 21) rmfs backing-store use-after-free (ps2-ramfs-finalize-null). The RAM filesystem's
+#     backing buffer (RamfsMemory, ~4 MB) is malloc'd once by pcsl_file_init() guarded by
+#     "if (RamfsMemory == NULL)". pcsl_file_finalize() frees it with pcsl_mem_free() but
+#     LEAVES RamfsMemory pointing at the freed block. On the PS2 launcher we run one game
+#     per VM cycle and midpFinalize()->storageFinalize()->pcsl_file_finalize() runs at the
+#     end of every cycle, so on the SECOND game pcsl_file_init() sees RamfsMemory != NULL,
+#     skips the malloc, and hands the DANGLING freed pointer to rmfsInitialize(). The rmfs
+#     header re-inits (free space logically resets to full), but the physical buffer is
+#     memory newlib has already handed back out (e.g. gsEventQueues lands inside it), so
+#     seeding the next JAR (~680 KB of rmfs writes) stomps live heap -> gsEventQueues gets
+#     garbage and the newlib free list corrupts (crash in _malloc_r). Null the pointer on
+#     finalize so the next init re-allocates a fresh, exclusive buffer. Idempotent (marker).
+RMFS_PCSL_C="$PHONEME/pcsl/file/ram/pcsl_rmfs.c"
+grep -q 'ps2-ramfs-finalize-null' "$RMFS_PCSL_C" || \
+  sed -i '/pcsl_mem_free(RamfsMemory);/a\
+        RamfsMemory = NULL; /* ps2-ramfs-finalize-null: else next pcsl_file_init reuses a freed buffer */' \
+      "$RMFS_PCSL_C"
+
 echo "phoneME patches applied to: $PHONEME"
