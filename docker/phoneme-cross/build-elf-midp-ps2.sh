@@ -149,14 +149,16 @@ for src in $JC_SRCS; do
     JC_OBJS="$JC_OBJS $obj"
 done
 
-# --- 4) Ps2MidpMain.o + GameLoaderKni.o: our entrypoint + KNI bridge -----------
-echo "+ [4/5] Ps2MidpMain.o (entrypoint) + GameLoaderKni.o (KNI bridge)"
+# --- 4) Ps2MidpMain.o + KNI bridges: our entrypoint + native method impls -------
+echo "+ [4/5] Ps2MidpMain.o (entrypoint) + GameLoaderKni.o + NokiaSoundKni.o (KNI bridges)"
 MAIN_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti \
     -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include"
 $EE_CXX $MAIN_FLAGS -c /work/ps2/vm/Ps2MidpMain.cpp -o "$OUT/Ps2MidpMain.o"
-# The KNI bridge needs the VM's kni.h (from the CLDC dist). Its C symbols are what
-# the generated nativeFunctionTable.cpp references for GameLoader's native methods.
+# The KNI bridges need the VM's kni.h (from the CLDC dist). Their C symbols are what
+# the generated nativeFunctionTable.cpp references for the romized classes' natives.
 $EE_CXX $MAIN_FLAGS -I$CLDC_DIST/include -c /work/ps2/vm/GameLoaderKni.cpp -o "$OUT/GameLoaderKni.o"
+# NokiaSoundKni also pulls in Ps2Audio.hpp (platform layer) via ../javacall/platform.
+$EE_CXX $MAIN_FLAGS -I$CLDC_DIST/include -c /work/ps2/vm/NokiaSoundKni.cpp -o "$OUT/NokiaSoundKni.o"
 
 # --- 5) Link the ELF ----------------------------------------------------------
 echo "+ [5/5] link j2me-midp.elf"
@@ -164,7 +166,7 @@ LINKFILE=$PS2SDK/ee/startup/linkfile
 $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
     -L$PS2SDK/ee/lib -L$PS2SDK/ports/lib -Wl,-zmax-page-size=128 \
     -Wl,--start-group \
-        "$OUT/Ps2MidpMain.o" "$OUT/GameLoaderKni.o" \
+        "$OUT/Ps2MidpMain.o" "$OUT/GameLoaderKni.o" "$OUT/NokiaSoundKni.o" \
         "$OUT/ROMImage.o" "$OUT/nativeFunctionTable.o" \
         $JC_OBJS $SHARE_OBJS \
         "$LIBJVM" \
