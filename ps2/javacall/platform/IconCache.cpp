@@ -176,24 +176,36 @@ unsigned char* IconCache::loadTile(int game) {
     const int   n    = iconSize_;
 
     // All of this touches SIF (host:/mass: I/O): hold the SIF lock so it never runs
-    // concurrently with another thread's SIF (EE console, pad). Open the JAR only to
-    // learn its size (open + lseek, no content read yet), then try the on-disk cache
+    // concurrently with another thread's SIF (EE console, pad, audio). Open the JAR only
+    // to learn its size (open + lseek, no content read yet), then try the on-disk cache
     // first -- a hit skips both reading and decoding the JAR entirely.
     sifLock();
     const int size = st.openAt(game);
     unsigned char* cached = (size > 0) ? disk.readTile(name, size, n) : 0;
+    sifUnlock();
+
     unsigned char* jar = 0;
     int off = 0;
-    if (cached == 0 && size > 0) {              // cache miss: read the whole JAR
-        jar = (unsigned char*)malloc(size);
-        if (jar != 0) {
-            while (off < size) {
-                const int r = st.read(jar + off, size - off);
-                if (r <= 0) break;
+    if (cached == 0 && size > 0) {              // cache miss: read the whole JAR in chunks,
+        jar = (unsigned char*)malloc(size);    // RELEASING the SIF lock between chunks so
+        if (jar != 0) {                        // the real-time audio mixer can grab it and
+            const int CHUNK = 32 * 1024;       // feed the ring -- a single big read under
+            while (off < size) {               // the lock would starve audio (~JAR ms).
+                int want = size - off;
+                if (want > CHUNK) {
+                    want = CHUNK;
+                }
+                sifLock();
+                const int r = st.read(jar + off, want);
+                sifUnlock();
+                if (r <= 0) {
+                    break;
+                }
                 off += r;
             }
         }
     }
+    sifLock();
     st.close();
     sifUnlock();
 
