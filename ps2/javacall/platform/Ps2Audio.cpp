@@ -64,6 +64,11 @@ const short AMP = 6000;
 // the real-time mixer can't peak-normalize, so scale down for headroom against clipping.
 const float WAVE_MASTER = 0.55f;
 
+// Brightness: HL4MGM's per-voice low-pass filters are dark (cutoffs 0.8-1.7 kHz), which
+// sounded too muffled faithfully applied. Shift every cutoff up by this factor so the
+// filter still tames the harsh top but keeps presence (the "filt30" preview).
+const float WAVE_FC_SCALE = 3.0f;
+
 // --- Nokia OTA ringing-tone (Smart Messaging 2.0.0, sec 3.8) tables ----------------
 // Note-value 1..12 -> frequency (Hz) at scale-1 (A = 440). Index 0 = pause.
 const int NOTE_HZ[13] = { 0, 262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494 };
@@ -959,19 +964,6 @@ int Ps2Audio::decodeMidi(const unsigned char* data, int len, MidiEv* out, int ma
         }
     }
 
-    // TEMP diag: per-channel note-on tally + parse stats (before dropping drums).
-    int chOn[16];
-    for (int i = 0; i < 16; ++i) {
-        chOn[i] = 0;
-    }
-    int rawOn = 0;
-    for (int i = 0; i < count; ++i) {
-        if (out[i].type == MEV_ON) {
-            ++chOn[out[i].chan & 15];
-            ++rawOn;
-        }
-    }
-
     // Compact: keep note on/off + program-change (drop only the tempo events; percussion
     // on channel 10 = index 9 is kept, synthesized from the drum kit / noise in the mixer).
     // Only note events extend the song length; a trailing program-change must not.
@@ -987,16 +979,6 @@ int Ps2Audio::decodeMidi(const unsigned char* data, int len, MidiEv* out, int ma
         ++w;
     }
     *songSamplesOut = last + SAMPLE_RATE / 2;   // half-second tail for the final releases
-
-    char m[256];   // TEMP diag
-    snprintf(m, sizeof m, "[midi] tracks=%d rawEv=%d capped=%d noteOn=%d notes=%d songMs=%d\n",
-             ntracks, count, (count >= maxEvents) ? 1 : 0, rawOn, w,
-             (int)((long long)*songSamplesOut * 1000 / SAMPLE_RATE));
-    javacall_print(m);
-    snprintf(m, sizeof m, "[midi] chOn %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
-             chOn[0], chOn[1], chOn[2], chOn[3], chOn[4], chOn[5], chOn[6], chOn[7],
-             chOn[8], chOn[9], chOn[10], chOn[11], chOn[12], chOn[13], chOn[14], chOn[15]);
-    javacall_print(m);
     return w;
 }
 
@@ -1145,6 +1127,30 @@ void Ps2Audio::startWaveOsc(Osc& o, const BankZone& z, int note, int vel, int ch
     o.stagePos = 0;
     o.envCur   = 0.0f;
     o.relFrom  = 0.0f;
+
+    // Per-voice low-pass filter (RBJ biquad). fc == 0 means the zone left it wide open.
+    // The SF2 Q is centibels of peak gain; FluidSynth uses Q = 10^(cB/200). Computed
+    // once here at note-on (sin/cos off the hot path); applied per sample in the mixer.
+    o.hasFilter = false;
+    const int fcEff = (int)(z.fc * WAVE_FC_SCALE);
+    if (z.fc > 0 && fcEff < (int)(SAMPLE_RATE * 0.49)) {
+        const double PI_ = 3.14159265358979323846;
+        const double w0   = 2.0 * PI_ * (double)fcEff / (double)SAMPLE_RATE;
+        const double cosw = cos(w0), sinw = sin(w0);
+        double Q = (z.fq > 0) ? pow(10.0, (double)z.fq / 200.0) : 0.70710678;
+        if (Q < 0.70710678) {
+            Q = 0.70710678;
+        }
+        const double alpha = sinw / (2.0 * Q);
+        const double a0 = 1.0 + alpha;
+        o.fb0 = (float)(((1.0 - cosw) / 2.0) / a0);
+        o.fb1 = (float)((1.0 - cosw) / a0);
+        o.fb2 = o.fb0;
+        o.fa1 = (float)((-2.0 * cosw) / a0);
+        o.fa2 = (float)((1.0 - alpha) / a0);
+        o.fx1 = o.fx2 = o.fy1 = o.fy2 = 0.0f;
+        o.hasFilter = true;
+    }
 }
 
 void Ps2Audio::midiReset() {
@@ -1376,7 +1382,16 @@ int Ps2Audio::midiRenderSample(bool* ended) {
             const float c0 = -0.5f * sm1 + 1.5f * s0 - 1.5f * s1 + 0.5f * s2;
             const float c1 = sm1 - 2.5f * s0 + 2.0f * s1 - 0.5f * s2;
             const float c2 = -0.5f * sm1 + 0.5f * s1;
-            const float interp = ((c0 * frac + c1) * frac + c2) * frac + s0;
+            float interp = ((c0 * frac + c1) * frac + c2) * frac + s0;
+
+            // per-voice low-pass biquad (Direct Form I)
+            if (o.hasFilter) {
+                const float y = o.fb0 * interp + o.fb1 * o.fx1 + o.fb2 * o.fx2
+                                - o.fa1 * o.fy1 - o.fa2 * o.fy2;
+                o.fx2 = o.fx1; o.fx1 = interp;
+                o.fy2 = o.fy1; o.fy1 = y;
+                interp = y;
+            }
             accf += interp * amp * o.wgain * WAVE_MASTER;
 
             // ---- advance position, handle loop / end ----

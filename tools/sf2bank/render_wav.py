@@ -190,6 +190,7 @@ def make_env(rate, held, aMs, hMs, dMs, sus, rMs, oneshot, note_len):
 # voice in this cut. On the PS2 this is a real 2-tap IIR biquad (a few mul/add
 # per sample per voice -- cheap); the FIR here is just the offline mirror.
 _IMPULSE_CACHE = {}
+_FC_SCALE = 1.0   # global low-pass cutoff multiplier (brightness); set by callers
 
 def _biquad_lpf_impulse(fc, q_cb, sr, n=256):
     import math
@@ -332,7 +333,8 @@ def _mk_voice(bank, z, note, vel, ch, pan127, cvol, cexpr, bendsemi, rate, onesh
     theta = (ppos + 1.0) * 0.25 * np.pi
     panL, panR = np.cos(theta), np.sin(theta)
     return dict(z=z, note=note, step=step, gain=gain, panL=panL, panR=panR,
-                oneshot=oneshot, on=0.0, off=None, interp=interp, filter=use_filter)
+                oneshot=oneshot, on=0.0, off=None, interp=interp, filter=use_filter,
+                fc_scale=_FC_SCALE)
 
 
 def _render_voice(bank, v, L, R, rate):
@@ -399,9 +401,11 @@ def _render_voice(bank, v, L, R, rate):
         a1 = sm1 - 2.5 * s0 + 2.0 * s1 - 0.5 * s2
         a2 = -0.5 * sm1 + 0.5 * s1
         interp = ((a0 * frac + a1) * frac + a2) * frac + s0
-    # per-voice low-pass filter (before envelope/gain), if the zone sets one
+    # per-voice low-pass filter (before envelope/gain), if the zone sets one. fc_scale
+    # shifts the cutoff up (>1 = brighter) to taste, since HL4MGM's filters are dark.
     if v.get("filter", True):
-        h = _biquad_lpf_impulse(z.get("fc", 0), z.get("fq", 0), rate)
+        fc = int(z.get("fc", 0) * v.get("fc_scale", 1.0))
+        h = _biquad_lpf_impulse(fc, z.get("fq", 0), rate)
         if h is not None:
             interp = np.convolve(interp, h)[:len(interp)].astype(np.float32)
     sig = interp * (env * v["gain"] / 32768.0)

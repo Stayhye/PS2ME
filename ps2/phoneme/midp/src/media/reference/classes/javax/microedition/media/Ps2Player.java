@@ -79,9 +79,6 @@ final class Ps2Player implements Player, ToneControl, VolumeControl {
                 voiceId = Ps2MediaNatives.nativePlayToneSeq(data, 0, data.length, vol, loop);
             }
         }
-        System.out.println("[mmapi] start kind=" + kind + " bytes="              // TEMP diag
-                + (data == null ? -1 : data.length) + " loop=" + loop + " vol=" + vol
-                + " -> voice=" + voiceId);
         state = STARTED;
         postEvent(PlayerListener.STARTED, new Long(0));
     }

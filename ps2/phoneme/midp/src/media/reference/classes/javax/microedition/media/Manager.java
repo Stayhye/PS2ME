@@ -63,12 +63,10 @@ public final class Manager {
         if (locator == null) {
             throw new IllegalArgumentException();
         }
-        System.out.println("[mmapi] createPlayer locator=" + locator);   // TEMP diag
         if (locator.startsWith(TONE_DEVICE_LOCATOR)) {
             // No sequence yet; set later via ToneControl.setSequence().
             return new Ps2Player(Ps2Player.KIND_TONESEQ, null, TONE_CT);
         }
-        System.out.println("[mmapi] REJECT locator=" + locator);          // TEMP diag
         throw new MediaException("Cannot create a Player for: " + locator);
     }
 
@@ -83,9 +81,6 @@ public final class Manager {
         }
         byte[] data = readFully(stream);
         int kind = classify(type, data);
-        int b0 = (data != null && data.length > 0) ? (data[0] & 0xFF) : -1;   // TEMP diag
-        System.out.println("[mmapi] createPlayer type=" + type + " bytes="       // TEMP diag
-                + (data == null ? -1 : data.length) + " b0=" + b0 + " kind=" + kind);
         if (kind == Ps2Player.KIND_WAV) {
             return new Ps2Player(Ps2Player.KIND_WAV, data, WAV_CT);
         }
@@ -95,7 +90,6 @@ public final class Manager {
         if (kind == Ps2Player.KIND_MIDI) {
             return new Ps2Player(Ps2Player.KIND_MIDI, data, MIDI_CT);
         }
-        System.out.println("[mmapi] REJECT type=" + type + " (unsupported)");   // TEMP diag
         throw new MediaException("Cannot create a Player for content type: " + type);
     }
 
@@ -112,8 +106,6 @@ public final class Manager {
         } else if (volume > 100) {
             volume = 100;
         }
-        System.out.println("[mmapi] playTone note=" + note + " dur=" + duration    // TEMP diag
-                + " vol=" + volume);
         Ps2MediaNatives.nativePlayTone(MIDI_HZ[note], duration, volume * 255 / 100, 1);
     }
 

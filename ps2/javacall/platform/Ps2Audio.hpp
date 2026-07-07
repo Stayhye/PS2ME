@@ -184,6 +184,10 @@ private:
         float         envCur;   // current envelope value (0..1)
         float         relFrom;  // envelope value when release began
         int           stagePos; // samples into the current envelope stage
+        // per-voice low-pass (SF2 initialFilterFc/Q) as an RBJ biquad, Direct Form I
+        bool          hasFilter;
+        float         fb0, fb1, fb2, fa1, fa2;  // coefficients (a0-normalized)
+        float         fx1, fx2, fy1, fy2;       // filter state
     };
 
     // One note of a sequence. phaseInc == 0 means a rest (silence). samples is the
