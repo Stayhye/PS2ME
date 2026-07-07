@@ -5,3 +5,7 @@ references/
 *.o
 *.elf
 /build/
+
+# Local audio tooling binaries (FluidSynth reference synth, download zips) — not versioned
+tools/bin/
+__pycache__/
