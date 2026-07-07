@@ -97,7 +97,14 @@ done
 # --- 3) libjavacall: our port, compiled for MIPS ------------------------------
 echo "+ [3/5] libjavacall (contract + hal + platform)"
 JC=/work/ps2/javacall
-JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti \
+# Debug knob: PS2ME_NO_IOP_RESET=1 builds an ELF that skips the USB-boot IOP reset,
+# keeping the SIF tty (EE console) alive on hardware for TTY tracing.
+JC_EXTRA=""
+if [ "${PS2ME_NO_IOP_RESET:-0}" != "0" ]; then
+    JC_EXTRA="-DPS2ME_NO_IOP_RESET"
+    echo "    (debug) PS2ME_NO_IOP_RESET set -> SIF tty kept alive, IOP reset skipped"
+fi
+JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti $JC_EXTRA \
     -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include -I$PS2SDK/ports/include \
     -I/work/vendors -I/work/assets"
 JC_SRCS="

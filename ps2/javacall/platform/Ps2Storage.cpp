@@ -161,12 +161,20 @@ void Ps2Storage::mount(const char* argv0) {
     // state so our modules load. This drops the SIF tty (EE console), but on real
     // hardware that's invisible and our diagnostics render on-screen. Skip it for host:
     // (PCSX2) so its console + HostFS survive. getcwd/__cwd is EE-side, unaffected.
+    // Debug build (PS2ME_NO_IOP_RESET): skip the reset so the SIF tty (EE console)
+    // survives on real hardware and we can capture the boot trace over TTY. The
+    // tradeoff is that our iomanX/usb modules may collide with the loader's resident
+    // ones (init fileXio/usb may fail) -- that's exactly what we're inspecting.
+#ifndef PS2ME_NO_IOP_RESET
     if (baseIsMass_) {
         while (!SifIopReset("", 0)) {}
         while (!SifIopSync()) {}
         SifInitRpc(0);
         note("iop reset (usb boot)");
     }
+#else
+    note("iop reset SKIPPED (tty debug build)");
+#endif
 
     // Load the storage IRX: needs the SBV "load module from buffer" patches applied
     // first. init_fileXio_driver() also installs the fileXio->newlib POSIX bridge
