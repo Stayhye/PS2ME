@@ -14,6 +14,9 @@ extern "C" {
 #include <stdlib.h>   // malloc / free
 #include <stdio.h>    // snprintf
 #include <string.h>   // (silence buffer is BSS-zeroed; no memset needed)
+#include <fcntl.h>    // open, O_RDONLY (bank load)
+#include <unistd.h>   // read, close, lseek (bank load)
+#include <math.h>     // pow (wavetable step / attenuation gain)
 
 // Linker-provided global pointer; EE threads must be created with it.
 extern "C" void* _gp;
@@ -56,6 +59,11 @@ inline int wavSample(const unsigned char* pcm, int k, int channels, int bits) {
 // Square-wave amplitude for synthesized tones (full scale is 32767).
 const short AMP = 6000;
 
+// Master gain for the wavetable MIDI mix. Each voice is a full-scale int16 sample, and
+// the offline render measured a summed mono peak around 1.4x full-scale on dense songs;
+// the real-time mixer can't peak-normalize, so scale down for headroom against clipping.
+const float WAVE_MASTER = 0.55f;
+
 // --- Nokia OTA ringing-tone (Smart Messaging 2.0.0, sec 3.8) tables ----------------
 // Note-value 1..12 -> frequency (Hz) at scale-1 (A = 440). Index 0 = pause.
 const int NOTE_HZ[13] = { 0, 262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494 };
@@ -63,6 +71,23 @@ const int NOTE_HZ[13] = { 0, 262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 4
 const int OTA_BPM[32] = {
     25,  28,  31,  35,  40,  45,  50,  56,  63,  70,  80,  90, 100, 112, 125, 140,
    160, 180, 200, 225, 250, 285, 320, 355, 400, 450, 500, 565, 635, 715, 800, 900 };
+
+// MIDI note number (0..127) -> frequency (Hz), rounded to the nearest integer:
+// freq = 440 * 2^((note-69)/12). Note 69 = A4 = 440, note 60 = C4 (ToneControl.C4).
+// Used by the MMAPI tone-sequence decoder (ToneControl) and Manager.playTone. Integer Hz
+// feeds the Q16 phase accumulator, which then produces the exact pitch (same as OTA).
+const int MIDI_HZ[128] = {
+        8,     9,     9,    10,    10,    11,    12,    12,    13,    14,    15,    15,
+       16,    17,    18,    19,    21,    22,    23,    24,    26,    28,    29,    31,
+       33,    35,    37,    39,    41,    44,    46,    49,    52,    55,    58,    62,
+       65,    69,    73,    78,    82,    87,    92,    98,   104,   110,   117,   123,
+      131,   139,   147,   156,   165,   175,   185,   196,   208,   220,   233,   247,
+      262,   277,   294,   311,   330,   349,   370,   392,   415,   440,   466,   494,
+      523,   554,   587,   622,   659,   698,   740,   784,   831,   880,   932,   988,
+     1047,  1109,  1175,  1245,  1319,  1397,  1480,  1568,  1661,  1760,  1865,  1976,
+     2093,  2217,  2349,  2489,  2637,  2794,  2960,  3136,  3322,  3520,  3729,  3951,
+     4186,  4435,  4699,  4978,  5274,  5588,  5920,  6272,  6645,  7040,  7459,  7902,
+     8372,  8870,  9397,  9956, 10548, 11175, 11840, 12544 };
 
 // MSB-first bit reader over the OTA byte stream. Reads past the end yield zero bits.
 struct BitReader {
@@ -89,6 +114,30 @@ struct BitReader {
 // Static voice PCM storage (BSS): the mixer only ever reads these; no heap involved.
 short Ps2Audio::storage_[Ps2Audio::VOICES][Ps2Audio::VOICE_SAMPLES];
 Ps2Audio::Note Ps2Audio::noteStore_[Ps2Audio::VOICES][Ps2Audio::MAX_NOTES];
+Ps2Audio::MidiEv Ps2Audio::midiEvents_[Ps2Audio::MAX_MIDI_EVENTS];
+
+namespace {
+// Big-endian readers for the Standard MIDI File header/chunk sizes.
+inline unsigned int be16(const unsigned char* p) {
+    return (unsigned int)((p[0] << 8) | p[1]);
+}
+inline unsigned int be32(const unsigned char* p) {
+    return (unsigned int)(((unsigned int)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+}
+// Read a MIDI variable-length quantity (7 bits/byte, MSB = continue). Advances *pos.
+inline int readVlq(const unsigned char* d, int* pos, int end) {
+    int v = 0, n = 0;
+    while (*pos < end && n < 4) {
+        unsigned char b = d[(*pos)++];
+        v = (v << 7) | (b & 0x7F);
+        ++n;
+        if (!(b & 0x80)) {
+            break;
+        }
+    }
+    return v;
+}
+} // namespace
 
 Ps2Audio& Ps2Audio::instance() {
     static Ps2Audio inst;
@@ -96,8 +145,94 @@ Ps2Audio& Ps2Audio::instance() {
 }
 
 Ps2Audio::Ps2Audio()
-    : ready_(false), mixerStarted_(false), mixerId_(0), mixerStack_(0),
-      voiceSema_(0), nextId_(0) {}
+    : bank_(0), bankSize_(0), bankRate_(0), bankZones_(0),
+      progDir_(0), drumDir_(0), zoneTab_(0), bankPcm_(0),
+      ready_(false), mixerStarted_(false), mixerId_(0), mixerStack_(0),
+      voiceSema_(0), nextId_(0),
+      midiCount_(0), midiEventIdx_(0), midiCurSample_(0), midiSongSamples_(0) {}
+
+bool Ps2Audio::loadBank(const char* path) {
+    if (bank_ != 0) {
+        return true;                              // already loaded (idempotent)
+    }
+    if (path == 0 || path[0] == '\0') {
+        return false;
+    }
+    const int fd = ::open(path, O_RDONLY);
+    if (fd < 0) {
+        javacall_print("[bank] not found (staying on square-wave synth)\n");
+        return false;
+    }
+    // Whole-file size from a seek; the block is small enough to slurp at once.
+    const long size = (long)::lseek(fd, 0, SEEK_END);
+    ::lseek(fd, 0, SEEK_SET);
+    if (size < 24 || size > 12 * 1024 * 1024) {   // header present, not absurd
+        ::close(fd);
+        javacall_print("[bank] bad size\n");
+        return false;
+    }
+    // Allocate OUTSIDE the Java pool (plain newlib malloc; the pool is a separate
+    // JVM_Start chunk that doesn't exist yet at boot). 64-byte aligned for the DMA-
+    // friendly access the synth will do later. Never freed -> lives the whole run.
+    unsigned char* buf = (unsigned char*)memalign(64, (size_t)size);
+    if (buf == 0) {
+        ::close(fd);
+        javacall_print("[bank] out of memory\n");
+        return false;
+    }
+    long off = 0;
+    while (off < size) {
+        const long want = (size - off > 262144) ? 262144 : (size - off);
+        const int r = (int)::read(fd, buf + off, (size_t)want);
+        if (r <= 0) break;
+        off += r;
+    }
+    ::close(fd);
+    if (off != size ||
+        buf[0] != 'P' || buf[1] != 'S' || buf[2] != '2' || buf[3] != 'B') {
+        free(buf);
+        javacall_print("[bank] read/verify failed\n");
+        return false;
+    }
+    const unsigned int rate   = le32(buf + 8);
+    const unsigned int nzones = le32(buf + 16);
+    const unsigned int npcm   = le32(buf + 20);
+    // Section pointers into the blob (EE is little-endian, so the on-disk structs map
+    // directly -- no byte swapping). Verify the computed layout matches the file size
+    // before trusting the counts.
+    const unsigned char* progDir = buf + 24;
+    const unsigned char* drumDir = progDir + 128 * 4;
+    const unsigned char* zoneTab = drumDir + 128 * 4;
+    const long expect = 24 + 128 * 4 + 128 * 4 +
+                        (long)nzones * ZONE_BYTES + (long)npcm * 2;
+    if (expect != size) {
+        free(buf);
+        char m[96];
+        snprintf(m, sizeof(m), "[bank] layout mismatch expect=%ld size=%ld\n",
+                 expect, size);
+        javacall_print(m);
+        return false;
+    }
+    bank_      = buf;
+    bankSize_  = (int)size;
+    bankRate_  = (int)rate;
+    bankZones_ = (int)nzones;
+    progDir_   = progDir;
+    drumDir_   = drumDir;
+    zoneTab_   = zoneTab;
+    bankPcm_   = (const short*)(zoneTab + (long)nzones * ZONE_BYTES);
+    char m[128];
+    snprintf(m, sizeof(m), "[bank] loaded %ld bytes, %u Hz, %u zones, %u pcm\n",
+             size, rate, nzones, npcm);
+    javacall_print(m);
+    if (rate != (unsigned)SAMPLE_RATE) {
+        // Not fatal for Stage 1 (we only load here); the synth expects SAMPLE_RATE.
+        snprintf(m, sizeof(m), "[bank] WARNING rate %u != output %d\n",
+                 rate, SAMPLE_RATE);
+        javacall_print(m);
+    }
+    return true;
+}
 
 bool Ps2Audio::init() {
     if (ready_) {
@@ -243,6 +378,8 @@ void Ps2Audio::mixerRun() {
                         if (ended) {
                             vc.pos = 0;
                         }
+                    } else if (vc.kind == KIND_MIDI) {   // polyphonic MIDI synth
+                        s = midiRenderSample(&ended);
                     } else {   // KIND_SEQ: synthesize the current note's square wave
                         Note& nt = vc.notes[vc.noteIdx];
                         int gate = (nt.samples * vc.gatePercent) / 100;   // sounded portion
@@ -264,9 +401,12 @@ void Ps2Audio::mixerRun() {
                     }
                     acc += (s * vc.vol) >> 8;
 
-                    if (ended) {                    // one full pass done (PCM or sequence)
+                    if (ended) {                    // one full pass done (PCM/seq/MIDI)
+                        if (vc.kind == KIND_MIDI && (vc.infinite || vc.loopsLeft > 1)) {
+                            midiReset();            // rewind the song for the next loop
+                        }
                         if (vc.infinite) {
-                            /* keep playing from the top (pos/noteIdx already reset) */
+                            /* keep playing from the top (cursors already reset) */
                         } else if (vc.loopsLeft > 1) {
                             vc.loopsLeft--;
                         } else {
@@ -550,6 +690,761 @@ int Ps2Audio::submitWav(const unsigned char* data, int len, int vol, int loop) {
     return activateVoice(v, vol, loop);
 }
 
+int Ps2Audio::decodeToneSeq(const unsigned char* data, int len, Note* out, int maxNotes,
+                            int* gateOut) {
+    // MMAPI ToneControl tags (all negative; notes are 0..127, SILENCE = -1).
+    const int VERSION = -2, TEMPO = -3, RESOLUTION = -4;
+    const int BLOCK_START = -5, BLOCK_END = -6, PLAY_BLOCK = -7;
+    const int SET_VOLUME = -8, REPEAT = -9;   // SILENCE (-1) falls through to the note branch
+
+    if (len < 2 || (signed char)data[0] != VERSION) {
+        return 0;                       // must start with {VERSION, 1}
+    }
+    int pos   = 2;                       // past VERSION + version number
+    int tempo = 30;                      // default tempo byte (BPM = tempo * 4 = 120)
+    int reso  = 64;                      // default resolution (pulses per whole note)
+    if (pos + 1 < len && (signed char)data[pos] == TEMPO) {
+        tempo = data[pos + 1];
+        pos += 2;
+    }
+    if (pos + 1 < len && (signed char)data[pos] == RESOLUTION) {
+        reso = data[pos + 1];
+        pos += 2;
+    }
+    if (tempo < 1) {
+        tempo = 30;
+    }
+    if (reso < 1) {
+        reso = 64;
+    }
+
+    // note duration (pulses) -> samples: ms = dur*60000/(reso*tempo); samples = SR*ms/1000
+    // = SR*dur*60/(reso*tempo). 64-bit to avoid overflow; notes sustain full (gate 100).
+    int blockPos[128];
+    for (int i = 0; i < 128; ++i) {
+        blockPos[i] = -1;
+    }
+    int retStack[32], retSp = 0;
+    int count = 0, guard = 0;
+    const int GUARD_MAX = maxNotes * 8 + 4096;   // bound PLAY_BLOCK / malformed loops
+
+    while (pos + 1 < len && count < maxNotes && guard++ < GUARD_MAX) {
+        int t = (signed char)data[pos];        // tag or note (signed)
+        int d = data[pos + 1];                 // duration / block id / multiplier (0..127)
+
+        if (t == BLOCK_START) {
+            blockPos[d & 127] = pos;           // remember where this block begins
+            pos += 2;
+        } else if (t == BLOCK_END) {
+            if (retSp > 0) {
+                pos = retStack[--retSp];       // came here via PLAY_BLOCK: return
+            } else {
+                pos += 2;                       // inline definition end: fall through
+            }
+        } else if (t == PLAY_BLOCK) {
+            int bp = blockPos[d & 127];
+            if (bp >= 0 && retSp < 32) {
+                retStack[retSp++] = pos + 2;   // resume after PLAY_BLOCK
+                pos = bp + 2;                   // jump past the BLOCK_START marker
+            } else {
+                pos += 2;                       // undefined block: skip
+            }
+        } else if (t == REPEAT) {
+            int mult = d;
+            pos += 2;
+            if (pos + 1 < len) {
+                int nv = (signed char)data[pos];
+                int nd = data[pos + 1];
+                pos += 2;
+                long samples = (long)SAMPLE_RATE * nd * 60 / ((long)reso * tempo);
+                if (samples < 1) {
+                    samples = 1;
+                }
+                unsigned int inc = (nv >= 0 && nv <= 127)
+                    ? (unsigned int)((unsigned long long)MIDI_HZ[nv] * 65536ULL
+                                     / (unsigned)SAMPLE_RATE)
+                    : 0;                        // SILENCE / out of range -> rest
+                for (int k = 0; k < mult && count < maxNotes; ++k) {
+                    out[count].phaseInc = inc;
+                    out[count].samples  = (int)samples;
+                    ++count;
+                }
+            }
+        } else if (t == SET_VOLUME || t == TEMPO || t == RESOLUTION || t == VERSION) {
+            if (t == TEMPO) {
+                tempo = (d < 1) ? tempo : d;   // tolerate a mid-stream tempo change
+            } else if (t == RESOLUTION) {
+                reso = (d < 1) ? reso : d;
+            }
+            pos += 2;                           // SET_VOLUME ignored (player-level volume)
+        } else {
+            // A note (0..127) or SILENCE (-1): emit one tone/rest.
+            long samples = (long)SAMPLE_RATE * d * 60 / ((long)reso * tempo);
+            if (samples < 1) {
+                samples = 1;
+            }
+            out[count].phaseInc = (t >= 0 && t <= 127)
+                ? (unsigned int)((unsigned long long)MIDI_HZ[t] * 65536ULL
+                                 / (unsigned)SAMPLE_RATE)
+                : 0;                            // SILENCE (t == -1) -> rest
+            out[count].samples = (int)samples;
+            ++count;
+            pos += 2;
+        }
+    }
+
+    *gateOut = 100;   // tone sequences sustain the full note (like the MIDI reference)
+    return count;
+}
+
+int Ps2Audio::submitToneSeq(const unsigned char* data, int len, int vol, int loop) {
+    if (!mixerStarted_ || data == 0 || len < 2) {
+        return -1;
+    }
+
+    const int v = 0;
+    // Offline before touching this voice's note list (decode writes into it).
+    WaitSema(voiceSema_);
+    voices_[v].active = false;
+    SignalSema(voiceSema_);
+
+    int gate = 100;
+    int count = decodeToneSeq(data, len, noteStore_[v], MAX_NOTES, &gate);
+    if (count <= 0) {
+        return -1;                  // not a valid tone sequence / no notes -> stay silent
+    }
+    voices_[v].kind        = KIND_SEQ;
+    voices_[v].notes       = noteStore_[v];
+    voices_[v].noteCount   = count;
+    voices_[v].gatePercent = gate;
+    return activateVoice(v, vol, loop);
+}
+
+int Ps2Audio::midiEvCmp(const void* a, const void* b) {
+    const MidiEv* x = (const MidiEv*)a;
+    const MidiEv* y = (const MidiEv*)b;
+    if (x->atTick != y->atTick) {
+        return (x->atTick < y->atTick) ? -1 : 1;
+    }
+    return (x->seq < y->seq) ? -1 : (x->seq > y->seq ? 1 : 0);
+}
+
+int Ps2Audio::decodeMidi(const unsigned char* data, int len, MidiEv* out, int maxEvents,
+                         int* songSamplesOut) {
+    *songSamplesOut = 0;
+    if (len < 14 || data[0] != 'M' || data[1] != 'T' || data[2] != 'h' || data[3] != 'd') {
+        return 0;
+    }
+    unsigned int headerLen = be32(data + 4);
+    int ntracks           = (int)be16(data + 10);
+    unsigned int division = be16(data + 12);
+    // PPQN division (bit 15 clear). SMPTE (bit 15 set) is rare in games -> approximate.
+    int ticksPerQ = (division & 0x8000) ? 96 : (int)(division & 0x7FFF);
+    if (ticksPerQ < 1) {
+        ticksPerQ = 96;
+    }
+
+    int pos   = 8 + (int)headerLen;   // first MTrk (headerLen is normally 6 -> pos 14)
+    int count = 0, seq = 0;
+
+    for (int tr = 0; tr < ntracks && pos + 8 <= len && count < maxEvents; ++tr) {
+        if (!(data[pos] == 'M' && data[pos + 1] == 'T' &&
+              data[pos + 2] == 'r' && data[pos + 3] == 'k')) {
+            break;                          // not a track chunk -> stop
+        }
+        int trkEnd = pos + 8 + (int)be32(data + pos + 4);
+        if (trkEnd > len) {
+            trkEnd = len;
+        }
+        pos += 8;
+        int absTick = 0;
+        int running = 0;
+        while (pos < trkEnd && count < maxEvents) {
+            absTick += readVlq(data, &pos, trkEnd);
+            if (pos >= trkEnd) {
+                break;
+            }
+            int status = data[pos];
+            if (status < 0x80) {
+                status = running;           // running status: reuse previous
+            } else {
+                ++pos;
+            }
+            int hi = status & 0xF0;
+
+            if (status == 0xFF) {           // meta event
+                if (pos >= trkEnd) {
+                    break;
+                }
+                int metaType = data[pos++];
+                int mlen = readVlq(data, &pos, trkEnd);
+                if (metaType == 0x51 && mlen == 3 && pos + 3 <= trkEnd) {   // set tempo
+                    out[count].atTick = absTick;
+                    out[count].seq    = seq++;
+                    out[count].type   = MEV_TEMPO;
+                    out[count].tempo  = ((unsigned int)data[pos] << 16)
+                                        | (data[pos + 1] << 8) | data[pos + 2];
+                    out[count].note = 0; out[count].vel = 0; out[count].chan = 0;
+                    ++count;
+                }
+                pos += mlen;
+                running = 0;
+                if (metaType == 0x2F) {     // end of track
+                    break;
+                }
+            } else if (status == 0xF0 || status == 0xF7) {   // sysex: skip
+                pos += readVlq(data, &pos, trkEnd);
+                running = 0;
+            } else {                        // channel voice message
+                running = status;
+                if (hi == 0x80 || hi == 0x90) {
+                    if (pos + 2 > trkEnd) {
+                        break;
+                    }
+                    int note = data[pos++];
+                    int vel  = data[pos++];
+                    out[count].atTick = absTick;
+                    out[count].seq    = seq++;
+                    out[count].type   = (hi == 0x90 && vel > 0) ? MEV_ON : MEV_OFF;
+                    out[count].note   = (unsigned char)(note & 0x7F);
+                    out[count].vel    = (unsigned char)(vel & 0x7F);
+                    out[count].chan   = (unsigned char)(status & 0x0F);
+                    out[count].tempo  = 0;
+                    ++count;
+                } else if (hi == 0xC0) {    // program change -> select the instrument
+                    if (pos + 1 > trkEnd) {
+                        break;
+                    }
+                    int prog = data[pos++];
+                    out[count].atTick = absTick;
+                    out[count].seq    = seq++;
+                    out[count].type   = MEV_PROG;
+                    out[count].note   = (unsigned char)(prog & 0x7F);
+                    out[count].vel    = 0;
+                    out[count].chan   = (unsigned char)(status & 0x0F);
+                    out[count].tempo  = 0;
+                    ++count;
+                } else if (hi == 0xD0) {
+                    pos += 1;               // channel pressure (ignored)
+                } else if (hi == 0xA0 || hi == 0xB0 || hi == 0xE0) {
+                    pos += 2;               // aftertouch / control change / pitch bend
+                } else {
+                    break;                  // unknown status -> bail this track
+                }
+            }
+        }
+        pos = trkEnd;                       // next chunk, wherever parsing stopped
+    }
+
+    if (count <= 0) {
+        return 0;
+    }
+
+    // Sort by (tick, seq), then one pass applying the tempo map to get sample times.
+    qsort(out, (size_t)count, sizeof(MidiEv), &Ps2Audio::midiEvCmp);
+    long long    anchorSample = 0;
+    int          anchorTick   = 0;
+    unsigned int usPerQ       = 500000;     // default 120 BPM
+    for (int i = 0; i < count; ++i) {
+        long long s = anchorSample
+            + (long long)(out[i].atTick - anchorTick) * usPerQ * SAMPLE_RATE
+              / ((long long)ticksPerQ * 1000000LL);
+        if (out[i].type == MEV_TEMPO) {
+            anchorSample = s;
+            anchorTick   = out[i].atTick;
+            usPerQ       = out[i].tempo ? out[i].tempo : usPerQ;
+            out[i].atSample = -1;           // consumed by the tempo map
+        } else {
+            out[i].atSample = (int)s;
+        }
+    }
+
+    // TEMP diag: per-channel note-on tally + parse stats (before dropping drums).
+    int chOn[16];
+    for (int i = 0; i < 16; ++i) {
+        chOn[i] = 0;
+    }
+    int rawOn = 0;
+    for (int i = 0; i < count; ++i) {
+        if (out[i].type == MEV_ON) {
+            ++chOn[out[i].chan & 15];
+            ++rawOn;
+        }
+    }
+
+    // Compact: keep note on/off + program-change (drop only the tempo events; percussion
+    // on channel 10 = index 9 is kept, synthesized from the drum kit / noise in the mixer).
+    // Only note events extend the song length; a trailing program-change must not.
+    int w = 0, last = 0;
+    for (int i = 0; i < count; ++i) {
+        if (out[i].type == MEV_TEMPO) {
+            continue;
+        }
+        out[w] = out[i];
+        if ((out[w].type == MEV_ON || out[w].type == MEV_OFF) && out[w].atSample > last) {
+            last = out[w].atSample;
+        }
+        ++w;
+    }
+    *songSamplesOut = last + SAMPLE_RATE / 2;   // half-second tail for the final releases
+
+    char m[256];   // TEMP diag
+    snprintf(m, sizeof m, "[midi] tracks=%d rawEv=%d capped=%d noteOn=%d notes=%d songMs=%d\n",
+             ntracks, count, (count >= maxEvents) ? 1 : 0, rawOn, w,
+             (int)((long long)*songSamplesOut * 1000 / SAMPLE_RATE));
+    javacall_print(m);
+    snprintf(m, sizeof m, "[midi] chOn %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+             chOn[0], chOn[1], chOn[2], chOn[3], chOn[4], chOn[5], chOn[6], chOn[7],
+             chOn[8], chOn[9], chOn[10], chOn[11], chOn[12], chOn[13], chOn[14], chOn[15]);
+    javacall_print(m);
+    return w;
+}
+
+int Ps2Audio::submitMidi(const unsigned char* data, int len, int vol, int loop) {
+    if (!mixerStarted_ || data == 0 || len < 14) {
+        return -1;
+    }
+
+    const int v = 0;
+    // Offline before rewriting the MIDI event list / cursors (mixer skips inactive voices).
+    WaitSema(voiceSema_);
+    voices_[v].active = false;
+    SignalSema(voiceSema_);
+
+    int songSamples = 0;
+    int count = decodeMidi(data, len, midiEvents_, MAX_MIDI_EVENTS, &songSamples);
+    if (count <= 0) {
+        return -1;                  // not valid MIDI / no notes -> stay silent
+    }
+    midiCount_       = count;
+    midiSongSamples_ = songSamples;
+    midiReset();
+    voices_[v].kind = KIND_MIDI;
+    return activateVoice(v, vol, loop);
+}
+
+// Decode bank zone #idx into z (little-endian on-disk record; EE is LE). Layout must
+// match tools/sf2bank ZONE_FMT: <IIII bB BB h H HHHH H B H B> = 38 bytes.
+void Ps2Audio::readZone(int idx, BankZone& z) const {
+    const unsigned char* p = zoneTab_ + (long)idx * ZONE_BYTES;
+    z.off    = le32(p + 0);
+    z.length = le32(p + 4);
+    z.ls     = le32(p + 8);
+    z.le     = le32(p + 12);
+    z.cents  = (int)(signed char)p[16];
+    z.root   = p[17];
+    z.klo    = p[18];
+    z.khi    = p[19];
+    z.pan    = (int)(short)le16(p + 20);
+    z.atten  = (int)le16(p + 22);
+    z.a      = (int)le16(p + 24);
+    z.h      = (int)le16(p + 26);
+    z.d      = (int)le16(p + 28);
+    z.r      = (int)le16(p + 30);
+    z.susp   = (int)le16(p + 32);
+    z.mode   = p[34];
+    z.fc     = (int)le16(p + 35);
+    z.fq     = p[37];
+}
+
+// Zone index for a melodic (prog, note): first zone whose key range covers note, else
+// the program's last zone (fall back rather than go silent). -1 if the program is empty.
+int Ps2Audio::bankMelodicZone(int prog, int note) const {
+    if (prog < 0 || prog > 127) {
+        prog = 0;
+    }
+    const unsigned char* d = progDir_ + prog * 4;
+    int start = (int)le16(d);
+    int count = d[2];
+    int best = -1;
+    for (int i = 0; i < count; ++i) {
+        const int idx = start + i;
+        const unsigned char* p = zoneTab_ + (long)idx * ZONE_BYTES;
+        const int klo = p[18], khi = p[19];
+        if (note >= klo && note <= khi) {
+            return idx;
+        }
+        best = idx;
+    }
+    return best;
+}
+
+// Zone index for a GM drum note (one zone per key), -1 if the kit lacks that key.
+int Ps2Audio::bankDrumZone(int note) const {
+    if (note < 0 || note > 127) {
+        return -1;
+    }
+    const unsigned char* d = drumDir_ + note * 4;
+    return d[2] > 0 ? (int)le16(d) : -1;
+}
+
+// A free oscillator slot, else steal the quietest active one (so a new note always
+// sounds). Amplitude is the wavetable env*gain or the square envelope level.
+int Ps2Audio::midiPickSlot() {
+    int quietest = -1, minAmp = 0x7FFFFFFF;
+    for (int i = 0; i < POLY; ++i) {
+        Osc& o = midiOsc_[i];
+        if (!o.active) {
+            return i;
+        }
+        const int amp = o.wave ? (int)(o.envCur * o.wgain * 32768.0f) : o.cur;
+        if (amp < minAmp) {
+            minAmp = amp;
+            quietest = i;
+        }
+    }
+    return quietest;
+}
+
+// Set up oscillator o to play bank zone z for (note, vel) on chan. Mirrors the offline
+// render_wav _mk_voice + make_env: Q16 resample step from the pitch, EMU-scaled
+// attenuation gain, and an ADSR (looped) or declick (one-shot) envelope.
+void Ps2Audio::startWaveOsc(Osc& o, const BankZone& z, int note, int vel, int chan) {
+    o.active  = true;
+    o.wave    = true;
+    o.drum    = 0;
+    o.note    = (unsigned char)note;
+    o.chan    = (unsigned char)chan;
+    o.sOff    = z.off;
+    o.sLen    = z.length;
+    o.sLs     = z.ls;
+    o.sLe     = z.le;
+    o.loop    = (z.mode == 1 || z.mode == 3) && (z.le > z.ls + 1);
+    o.oneshot = !o.loop;
+    o.wpos    = 0;
+
+    // step = 2^((note - root + cents/100) / 12), in Q16.
+    const double semis = (double)(note - z.root) + (double)z.cents / 100.0;
+    double st = pow(2.0, semis / 12.0) * 65536.0;
+    if (st < 1.0) {
+        st = 1.0;
+    } else if (st > (double)0x7FFFFFFF) {
+        st = (double)0x7FFFFFFF;
+    }
+    o.wstep = (unsigned int)(st + 0.5);
+
+    // gain = velocity * attenuation. SF2 initialAttenuation is centibels, scaled by the
+    // EMU 0.4 factor (as FluidSynth does); raw cB made high-atten voices near-silent.
+    const double attenGain = pow(10.0, -(double)z.atten * 0.4 / 200.0);
+    o.wgain = (float)((double)vel / 127.0 * attenGain);
+
+    // envelope stage lengths (samples). One-shot uses only a short declick.
+    if (o.oneshot) {
+        o.aLen = SAMPLE_RATE / 500;          // ~2 ms fade-in
+        o.rLen = SAMPLE_RATE / 166;          // ~6 ms fade-out at the sample end
+        if (o.rLen < 1) o.rLen = 1;
+    } else {
+        o.aLen = z.a * SAMPLE_RATE / 1000;
+        o.hLen = z.h * SAMPLE_RATE / 1000;
+        o.dLen = z.d * SAMPLE_RATE / 1000;
+        o.rLen = z.r * SAMPLE_RATE / 1000;
+        if (o.rLen < 1) o.rLen = 1;
+        o.susLvl = (float)z.susp / 1000.0f;
+    }
+    o.estage   = 0;
+    o.stagePos = 0;
+    o.envCur   = 0.0f;
+    o.relFrom  = 0.0f;
+}
+
+void Ps2Audio::midiReset() {
+    midiEventIdx_  = 0;
+    midiCurSample_ = 0;
+    for (int i = 0; i < POLY; ++i) {
+        midiOsc_[i].active = false;
+    }
+    for (int i = 0; i < 16; ++i) {
+        chanProg_[i] = 0;               // GM default: program 0 (piano) until a change
+    }
+}
+
+void Ps2Audio::midiAllocOsc(int note, int vel, int chan) {
+    if (note < 0 || note > 127) {
+        return;
+    }
+    // A re-trigger of a still-held note: release the old voice first, else it drones to
+    // song end (mush). Matters for dense lines that repeat the same pitch (mirrors the
+    // offline render's retrigger handling).
+    midiReleaseOsc(note, chan);
+
+    const int slot = midiPickSlot();
+    if (slot < 0) {
+        return;
+    }
+    Osc& o = midiOsc_[slot];
+
+    // Wavetable path: play the bank sample for this channel's program.
+    if (bank_ != 0) {
+        const int zi = bankMelodicZone(chanProg_[chan & 15], note);
+        if (zi >= 0) {
+            BankZone z;
+            readZone(zi, z);
+            startWaveOsc(o, z, note, vel, chan);
+            return;
+        }
+        // no zone for this program -> fall through to the square synth
+    }
+
+    // Square fallback (no bank loaded, or program has no sample).
+    o.active   = true;
+    o.wave     = false;
+    o.note     = (unsigned char)note;
+    o.env      = 0;                 // attack
+    o.drum     = 0;                 // melodic square
+    o.envPos   = 0;
+    o.phase    = 0;
+    o.phaseInc = (unsigned int)((unsigned long long)MIDI_HZ[note] * 65536ULL
+                                / (unsigned)SAMPLE_RATE);
+    o.peak     = (vel * 2600) / 127;   // velocity-scaled amplitude
+    o.cur      = 0;
+    o.relStart = 0;
+    o.relLen   = MIDI_RELEASE;
+}
+
+void Ps2Audio::midiAllocDrum(int note, int vel) {
+    // Percussion (GM drum map on channel 10): a one-shot that decays and frees itself
+    // (note-off is ignored).
+    const int slot = midiPickSlot();
+    if (slot < 0) {
+        return;
+    }
+    Osc& o = midiOsc_[slot];
+
+    // Wavetable path: play the kit sample for this drum key (builder forced root == key,
+    // so the step is 1.0 and it plays as a one-shot).
+    if (bank_ != 0) {
+        const int zi = bankDrumZone(note);
+        if (zi >= 0) {
+            BankZone z;
+            readZone(zi, z);
+            startWaveOsc(o, z, note, vel, 9);
+            return;
+        }
+        // no kit sample for this key -> fall through to the noise/low-tone synth
+    }
+
+    // Square/noise fallback: map the drum note to a rough character.
+    int kind   = 1;                 // 1 = noise, 2 = kick (low square)
+    int decay  = SAMPLE_RATE / 8;   // default ~125 ms
+    int freqHz = 0;
+    if (note == 35 || note == 36) {                 // acoustic / bass kick
+        kind = 2; freqHz = 62; decay = SAMPLE_RATE / 12;      // ~83 ms low thump
+    } else if (note == 38 || note == 40 || note == 37 || note == 39) {  // snare / clap
+        kind = 1; decay = SAMPLE_RATE / 7;                    // ~140 ms
+    } else if (note == 42 || note == 44) {          // closed hi-hat
+        kind = 1; decay = SAMPLE_RATE / 24;                   // ~40 ms
+    } else if (note == 46) {                        // open hi-hat
+        kind = 1; decay = SAMPLE_RATE / 6;                    // ~165 ms
+    } else if (note == 49 || note == 51 || note == 52 || note == 53 ||
+               note == 55 || note == 57 || note == 59) {      // cymbals
+        kind = 1; decay = SAMPLE_RATE / 2;                    // ~500 ms
+    } else if (note >= 41 && note <= 50) {          // toms
+        kind = 2; freqHz = 90 + (note - 41) * 12; decay = SAMPLE_RATE / 9;
+    }
+
+    o.active   = true;
+    o.wave     = false;
+    o.note     = (unsigned char)note;
+    o.env      = 2;                 // straight to decay (percussive, no sustain)
+    o.drum     = (unsigned char)kind;
+    o.envPos   = 0;
+    o.phase    = 0;
+    o.phaseInc = freqHz ? (unsigned int)((unsigned long long)freqHz * 65536ULL
+                                         / (unsigned)SAMPLE_RATE) : 0;
+    o.peak     = (vel * 2800) / 127;
+    o.cur      = (vel * 2800) / 127;
+    o.relStart = o.cur;
+    o.relLen   = decay;
+    o.lfsr     = (unsigned int)(midiCurSample_ ^ (note * 2654435761u) ^ (slot << 13)) | 1u;
+}
+
+void Ps2Audio::midiReleaseOsc(int note, int chan) {
+    // Release the first held (non-releasing) oscillator of this pitch on this channel.
+    // Wavetable voices switch to the ADSR release stage; square voices to their decay.
+    for (int i = 0; i < POLY; ++i) {
+        Osc& o = midiOsc_[i];
+        if (!o.active || o.note != note) {
+            continue;
+        }
+        if (o.wave) {
+            if (o.oneshot || o.estage >= 4 || o.chan != chan) {
+                continue;           // one-shots ignore note-off; skip already-releasing
+            }
+            o.relFrom  = o.envCur;
+            o.estage   = 4;         // release
+            o.stagePos = 0;
+            return;
+        }
+        if (o.env != 2) {
+            o.env      = 2;         // square: release
+            o.relStart = o.cur;
+            o.envPos   = 0;
+            return;
+        }
+    }
+}
+
+int Ps2Audio::wrapIdx(const Osc& o, int j) {
+    if (o.loop) {
+        const int loopLen = (int)o.sLe - (int)o.sLs;
+        if (loopLen > 0 && j >= (int)o.sLs) {
+            j = (int)o.sLs + (j - (int)o.sLs) % loopLen;
+        }
+    }
+    if (j < 0) {
+        j = 0;
+    } else if (j >= (int)o.sLen) {
+        j = (int)o.sLen - 1;
+    }
+    return j;
+}
+
+int Ps2Audio::midiRenderSample(bool* ended) {
+    // Dispatch every event scheduled at or before the current sample.
+    while (midiEventIdx_ < midiCount_ &&
+           midiEvents_[midiEventIdx_].atSample <= midiCurSample_) {
+        MidiEv& e = midiEvents_[midiEventIdx_++];
+        if (e.type == MEV_PROG) {       // program change: pick the channel's instrument
+            chanProg_[e.chan & 15] = e.note;
+        } else if (e.chan == 9) {       // percussion: one-shot, note-off ignored
+            if (e.type == MEV_ON) {
+                midiAllocDrum(e.note, e.vel);
+            }
+        } else if (e.type == MEV_ON) {
+            midiAllocOsc(e.note, e.vel, e.chan);
+        } else {
+            midiReleaseOsc(e.note, e.chan);
+        }
+    }
+
+    // Mix the active oscillators: wavetable voices (bank samples, cubic-interpolated,
+    // ADSR/declick) plus any square/noise fallback voices (linear envelope).
+    float accf = 0.0f;
+    for (int i = 0; i < POLY; ++i) {
+        Osc& o = midiOsc_[i];
+        if (!o.active) {
+            continue;
+        }
+        if (o.wave) {
+            // ---- envelope (0..1) ----
+            float amp;
+            if (o.oneshot) {
+                amp = (o.stagePos < o.aLen && o.aLen > 0)
+                          ? (float)o.stagePos / (float)o.aLen : 1.0f;
+                const int left = (int)o.sLen - (int)(o.wpos >> 16);
+                if (left < o.rLen) {
+                    float f = (o.rLen > 0) ? (float)left / (float)o.rLen : 0.0f;
+                    if (f < 0.0f) f = 0.0f;
+                    amp *= f;
+                }
+                ++o.stagePos;
+            } else {
+                switch (o.estage) {
+                case 0:                                     // attack
+                    amp = (o.aLen > 0) ? (float)o.stagePos / (float)o.aLen : 1.0f;
+                    if (++o.stagePos >= o.aLen) { o.estage = 1; o.stagePos = 0; }
+                    break;
+                case 1:                                     // hold
+                    amp = 1.0f;
+                    if (++o.stagePos >= o.hLen) { o.estage = 2; o.stagePos = 0; }
+                    break;
+                case 2:                                     // decay 1 -> sustain
+                    amp = 1.0f + (o.susLvl - 1.0f) *
+                          ((o.dLen > 0) ? (float)o.stagePos / (float)o.dLen : 1.0f);
+                    if (++o.stagePos >= o.dLen) { o.estage = 3; o.stagePos = 0; }
+                    break;
+                case 3:                                     // sustain
+                    amp = o.susLvl;
+                    break;
+                default:                                    // release
+                    amp = o.relFrom *
+                          (1.0f - ((o.rLen > 0) ? (float)o.stagePos / (float)o.rLen : 1.0f));
+                    if (++o.stagePos >= o.rLen) { o.active = false; continue; }
+                    break;
+                }
+                o.envCur = amp;                             // for a later note-off release
+            }
+
+            // ---- sample read: Catmull-Rom cubic with loop wrap ----
+            const short* pool = bankPcm_ + o.sOff;
+            const int   i0   = (int)(o.wpos >> 16);
+            const float frac = (float)(o.wpos & 0xFFFF) * (1.0f / 65536.0f);
+            const float sm1 = pool[wrapIdx(o, i0 - 1)];
+            const float s0  = pool[wrapIdx(o, i0)];
+            const float s1  = pool[wrapIdx(o, i0 + 1)];
+            const float s2  = pool[wrapIdx(o, i0 + 2)];
+            const float c0 = -0.5f * sm1 + 1.5f * s0 - 1.5f * s1 + 0.5f * s2;
+            const float c1 = sm1 - 2.5f * s0 + 2.0f * s1 - 0.5f * s2;
+            const float c2 = -0.5f * sm1 + 0.5f * s1;
+            const float interp = ((c0 * frac + c1) * frac + c2) * frac + s0;
+            accf += interp * amp * o.wgain * WAVE_MASTER;
+
+            // ---- advance position, handle loop / end ----
+            o.wpos += o.wstep;
+            if (o.loop) {
+                const unsigned long long leQ = (unsigned long long)o.sLe << 16;
+                const unsigned long long lenQ =
+                    (unsigned long long)((int)o.sLe - (int)o.sLs) << 16;
+                while (lenQ > 0 && o.wpos >= leQ) {
+                    o.wpos -= lenQ;
+                }
+            } else if ((unsigned int)(o.wpos >> 16) >= o.sLen) {
+                o.active = false;
+            }
+            continue;
+        }
+
+        // ---- square/noise fallback voice ----
+        if (o.env == 0) {                       // attack (melodic only)
+            o.cur = (o.peak * o.envPos) / MIDI_ATTACK;
+            if (++o.envPos >= MIDI_ATTACK) {
+                o.env = 1;
+                o.cur = o.peak;
+            }
+        } else if (o.env == 1) {                // sustain (melodic only)
+            o.cur = o.peak;
+        } else {                                // release / percussive decay
+            o.cur = (o.relStart * (o.relLen - o.envPos)) / o.relLen;
+            if (++o.envPos >= o.relLen) {
+                o.active = false;
+                continue;
+            }
+        }
+        int sv;
+        if (o.drum == 1) {                      // noise (snare / hat / cymbal)
+            o.lfsr ^= o.lfsr << 13;
+            o.lfsr ^= o.lfsr >> 17;
+            o.lfsr ^= o.lfsr << 5;
+            sv = (o.lfsr & 0x8000u) ? o.cur : -o.cur;
+        } else {                                // square wave (melodic / kick)
+            sv = ((o.phase >> 15) & 1) ? o.cur : -o.cur;
+            o.phase += o.phaseInc;
+        }
+        accf += (float)sv;
+    }
+    int acc = (int)accf;
+    if (acc > 32767) {
+        acc = 32767;
+    } else if (acc < -32768) {
+        acc = -32768;
+    }
+
+    ++midiCurSample_;
+    if (midiCurSample_ >= midiSongSamples_ && midiEventIdx_ >= midiCount_) {
+        bool anyActive = false;
+        for (int i = 0; i < POLY; ++i) {
+            if (midiOsc_[i].active) {
+                anyActive = true;
+                break;
+            }
+        }
+        if (!anyActive) {
+            *ended = true;
+        }
+    }
+    return acc;
+}
+
 void Ps2Audio::stop(int id) {
     if (!mixerStarted_ || id <= 0) {
         return;
@@ -558,6 +1453,24 @@ void Ps2Audio::stop(int id) {
     for (int v = 0; v < VOICES; ++v) {
         if (voices_[v].active && voices_[v].id == id) {
             voices_[v].active = false;
+        }
+    }
+    SignalSema(voiceSema_);
+}
+
+void Ps2Audio::setVolume(int id, int vol) {
+    if (!mixerStarted_ || id <= 0) {
+        return;
+    }
+    if (vol < 0) {
+        vol = 0;
+    } else if (vol > 255) {
+        vol = 255;
+    }
+    WaitSema(voiceSema_);
+    for (int v = 0; v < VOICES; ++v) {
+        if (voices_[v].active && voices_[v].id == id) {
+            voices_[v].vol = vol;
         }
     }
     SignalSema(voiceSema_);

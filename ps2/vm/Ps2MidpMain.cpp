@@ -69,8 +69,14 @@ int main(int argc, char** argv) {
     // (before the menu / icon worker), so no SIF lock is needed. A short startup chime
     // both confirms the SPU2/audsrv chain is live and gives the launcher a bit of life.
     if (ps2::platform::Ps2Audio::instance().init()) {
-        ps2::platform::Ps2Audio::instance().beep(880, 250);   // chime: boot, single-threaded
-        ps2::platform::Ps2Audio::instance().startMixer();     // then the SIF-locked ring feeder
+        // Load the wavetable bank (beside games/) into RAM once, while still single-
+        // threaded and before the Java pool exists -- plenty of free RAM here. Optional:
+        // if it's missing the synth just stays on the square-wave path.
+        char bankPath[224];
+        if (ps2::platform::Ps2Storage::instance().bankPath(bankPath, sizeof(bankPath))) {
+            ps2::platform::Ps2Audio::instance().loadBank(bankPath);
+        }
+        ps2::platform::Ps2Audio::instance().startMixer();     // SIF-locked ring feeder
     }
 
     for (;;) {

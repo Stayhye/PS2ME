@@ -32,6 +32,18 @@ public:
 
     bool ready() const { return ready_; }
 
+    /// Load the wavetable sound bank (produced offline by tools/sf2bank) from @p path
+    /// into a single block OUTSIDE the Java heap pool, once at boot. Idempotent. The
+    /// block is never freed (it lives for the whole run, so it can't fragment). On any
+    /// failure -- missing file, bad magic, wrong layout, out of memory -- it leaves the
+    /// bank unloaded and returns false; the synth then stays on the square-wave path.
+    /// Only validates and pins the section pointers here (Phase-4 Stage 1); the mixer
+    /// starts using the samples in Stage 2. Logs one [bank] line via javacall_print.
+    bool loadBank(const char* path);
+
+    /// Whether a bank is loaded and available to the synth.
+    bool bankLoaded() const { return bank_ != 0; }
+
     /// Fixed output format: sample rate in Hz, 16-bit signed, mono.
     int sampleRate() const { return SAMPLE_RATE; }
 
@@ -79,8 +91,21 @@ public:
     /// a voice, and start it. Longer than a voice buffer is truncated. Returns id or -1.
     int submitWav(const unsigned char* data, int len, int vol, int loop);
 
+    /// Parse an MMAPI tone sequence (audio/x-tone-seq, ToneControl format) into a note
+    /// sequence and play it. Returns a voice id (>0) or -1 if it isn't a valid sequence.
+    int submitToneSeq(const unsigned char* data, int len, int vol, int loop);
+
+    /// Parse a Standard MIDI File (audio/midi, "MThd") and play it on the internal
+    /// polyphonic square-wave synth (up to POLY simultaneous notes). Percussion (channel
+    /// 10) is skipped in this cut. Returns a voice id (>0) or -1 if it isn't valid MIDI.
+    int submitMidi(const unsigned char* data, int len, int vol, int loop);
+
     /// Stop the voice with this id (no-op if it already ended / never existed).
     void stop(int id);
+
+    /// Set the volume (0..255) of the voice with this id (VolumeControl). No-op if it
+    /// already ended. Takes effect on the next mixed block.
+    void setVolume(int id, int vol);
 
     /// Number of concurrent voices the mixer supports (drives getConcurrentSoundCount).
     int voiceCount() const { return VOICES; }
@@ -96,7 +121,70 @@ private:
     static const int MAX_NOTES     = 1024;   // note-sequence capacity per voice (tone/OTA)
     static const int BLOCK         = 1024;   // samples fed to audsrv per mixer tick (~46 ms)
 
-    enum SourceKind { KIND_SEQ = 0, KIND_PCM = 1 };
+    // MIDI synth: a bank of square-wave oscillators driven by a time-sorted note event
+    // list, so the one active voice plays a whole polyphonic Standard MIDI File.
+    static const int POLY            = 24;     // simultaneous MIDI notes
+    static const int MAX_MIDI_EVENTS = 32768;  // note-on/off events per song (else truncated)
+    static const int MIDI_ATTACK     = 110;    // ~5 ms attack ramp (avoids note-on click)
+    static const int MIDI_RELEASE    = 660;    // ~30 ms release ramp (avoids note-off click)
+
+    enum SourceKind { KIND_SEQ = 0, KIND_PCM = 1, KIND_MIDI = 2 };
+
+    // One scheduled MIDI note event. During decode it carries the absolute tick + a stable
+    // sequence number (sort keys) and, for tempo meta events, the microseconds-per-quarter.
+    // After the tempo pass, note events carry an absolute sample time (atSample).
+    enum MidiEvType { MEV_OFF = 0, MEV_ON = 1, MEV_TEMPO = 2, MEV_PROG = 3 };
+    struct MidiEv {
+        int          atTick;    // absolute tick (decode sort key)
+        int          atSample;  // absolute sample time (filled by the tempo pass)
+        unsigned int tempo;     // microseconds per quarter note (MEV_TEMPO only)
+        int          seq;       // insertion order (stable secondary sort key)
+        unsigned char type;     // MEV_OFF / MEV_ON / MEV_TEMPO
+        unsigned char note;     // MIDI note 0..127
+        unsigned char vel;      // note-on velocity
+        unsigned char chan;     // MIDI channel 0..15 (9 = percussion, skipped)
+    };
+
+    // One playing MIDI oscillator. Two synthesis paths share this slot:
+    //   - square (wave == false): a square wave (melodic) or noise/low-tone burst
+    //     (percussion), shaped by a linear envelope. The fallback when no bank is loaded.
+    //   - wavetable (wave == true): a bank sample resampled by a Q16 step with a loop,
+    //     shaped by an ADSR (melodic) or a declick (one-shot / percussion). Phase 4.
+    struct Osc {
+        bool          active;
+        unsigned char note;
+        unsigned char env;      // square: 0 = attack, 1 = sustain, 2 = release/decay
+        unsigned char drum;     // square: 0 = melodic square, 1 = noise, 2 = kick
+        unsigned int  phase;    // square: Q16 phase accumulator
+        unsigned int  phaseInc;
+        unsigned int  lfsr;     // square: noise generator state (percussion)
+        int           peak;     // square: target amplitude (from velocity)
+        int           cur;      // square: current envelope amplitude
+        int           envPos;   // square: samples into the current envelope stage
+        int           relStart; // square: amplitude when the release/decay began
+        int           relLen;   // square: release/decay length in samples
+
+        // --- wavetable path (Phase 4 Stage 2) ------------------------------------
+        bool          wave;     // true = wavetable voice (uses the fields below)
+        unsigned char chan;     // source MIDI channel (to match note-off)
+        bool          loop;     // sample loops (melodic sustain)
+        bool          oneshot;  // plays once and frees itself (drum / unlooped)
+        unsigned int  sOff;     // sample start in the bank PCM pool (samples)
+        unsigned int  sLen;     // sample length (samples)
+        unsigned int  sLs;      // loop start (samples)
+        unsigned int  sLe;      // loop end (samples)
+        unsigned long long wpos; // Q16 position within the sample
+        unsigned int  wstep;    // Q16 resample step (freq ratio)
+        float         wgain;    // amplitude scale (velocity * attenuation)
+        // envelope: melodic ADSR (estage 0=att,1=hold,2=decay,3=sustain,4=release,
+        // 5=done) or one-shot declick (fade in, play, fade out at sample end)
+        unsigned char estage;
+        int           aLen, hLen, dLen, rLen;  // stage lengths in samples
+        float         susLvl;   // sustain level (0..1)
+        float         envCur;   // current envelope value (0..1)
+        float         relFrom;  // envelope value when release began
+        int           stagePos; // samples into the current envelope stage
+    };
 
     // One note of a sequence. phaseInc == 0 means a rest (silence). samples is the
     // note's total length; the last (100 - gatePercent)% is silenced (staccato/rest).
@@ -138,8 +226,68 @@ private:
     static int decodeOta(const unsigned char* data, int len, Note* out, int maxNotes,
                          int* gateOut);
 
+    // Decode an MMAPI tone sequence (ToneControl audio/x-tone-seq) into out[] (up to
+    // maxNotes), expanding REPEAT and PLAY_BLOCK. Returns the note count (0 if invalid).
+    // *gateOut gets the sounded % (notes sustain full, like the MIDI reference).
+    static int decodeToneSeq(const unsigned char* data, int len, Note* out, int maxNotes,
+                             int* gateOut);
+
+    // Parse a Standard MIDI File into a time-sorted note event list in out[] (up to
+    // maxEvents), with absolute sample times (tempo map applied). Drops tempo/meta and
+    // percussion. Returns the note-event count (0 if invalid); *songSamplesOut gets the
+    // total length in samples (including a short release tail).
+    static int decodeMidi(const unsigned char* data, int len, MidiEv* out, int maxEvents,
+                          int* songSamplesOut);
+
+    // qsort comparator: order events by absolute tick, then insertion order (stable).
+    static int midiEvCmp(const void* a, const void* b);
+
+    // Render one sample of the MIDI voice: dispatch any events due at the current sample,
+    // advance the oscillators + envelopes, and return the mixed sample. *ended is set true
+    // once the song has fully played out. Called per sample from the mixer for KIND_MIDI.
+    int  midiRenderSample(bool* ended);
+    void midiAllocOsc(int note, int vel, int chan);  // start a melodic note (bank or square)
+    void midiAllocDrum(int note, int vel);  // trigger a percussion hit (channel 10)
+    void midiReleaseOsc(int note, int chan);// begin the release of a held melodic note
+    void midiReset();                       // rewind to the song start, silence all osc
+
+    // One decoded bank zone (a sample + how to play it). Filled from the on-disk
+    // ZONE_BYTES record by readZone(); mirrors tools/sf2bank's Zone.
+    struct BankZone {
+        unsigned int off, length, ls, le;   // sample region in the PCM pool (samples)
+        int          cents;                 // fine tune (added to note-root)
+        int          root, klo, khi;        // root key, key range
+        int          pan, atten;            // pan (-500..500), attenuation (centibels)
+        int          a, h, d, r, susp;      // ADSR: attack/hold/decay/release ms, sustain permille
+        int          mode;                  // 0 = no loop (one-shot), 1/3 = loop
+        int          fc, fq;                // low-pass cutoff (Hz, 0=open) + resonance (cB)
+    };
+    int  midiPickSlot();                            // free osc slot, else steal quietest
+    // Sample index j clamped/loop-wrapped for oscillator o (for cubic interpolation).
+    static int wrapIdx(const Osc& o, int j);
+    void readZone(int idx, BankZone& z) const;      // decode zone #idx from zoneTab_
+    int  bankMelodicZone(int prog, int note) const; // zone index for (prog,note), -1 none
+    int  bankDrumZone(int note) const;              // zone index for a drum note, -1 none
+    // Fill oscillator @p o to play bank zone @p z for (note, vel) on @p chan.
+    void startWaveOsc(Osc& o, const BankZone& z, int note, int vel, int chan);
+
     // Commit a filled voice live under the table lock; returns its new id.
     int activateVoice(int v, int vol, int loop);
+
+    // --- Phase 4: wavetable bank (loaded once at boot, outside the Java pool) --------
+    // On-disk layout (little-endian, EE is LE so it maps directly): a 24-byte header
+    // ("PS2B", ver, flags, rate, nProg=128, nDrum=128, nZones, nPcm), then ProgramDir
+    // [128] and DrumDir[128] (4 bytes each: u16 zoneStart, u8 count, u8 pad), then
+    // Zone[nZones] (ZONE_BYTES each), then the PCM16 sample pool (nPcm samples).
+    static const int ZONE_BYTES = 38;   // must match tools/sf2bank ZONE_FMT
+    unsigned char* bank_;               // whole blob (memalign, never freed); 0 = none
+    int   bankSize_;
+    int   bankRate_;
+    int   bankZones_;
+    const unsigned char* progDir_;      // 128 * 4 bytes
+    const unsigned char* drumDir_;      // 128 * 4 bytes
+    const unsigned char* zoneTab_;      // bankZones_ * ZONE_BYTES
+    const short*         bankPcm_;      // sample pool
 
     bool  ready_;
     bool  mixerStarted_;
@@ -151,6 +299,17 @@ private:
     int   nextId_;
     static short storage_[VOICES][VOICE_SAMPLES];   // PCM buffers (WAV)
     static Note  noteStore_[VOICES][MAX_NOTES];     // note sequences (tone/OTA)
+
+    // MIDI synth state (single song at a time, since the mixer is last-wins). The event
+    // list is static; the playback cursors + oscillator bank live here and are driven by
+    // the mixer thread only (submitMidi fills the list while the voice is offline).
+    static MidiEv midiEvents_[MAX_MIDI_EVENTS];
+    int   midiCount_;               // number of note events in the current song
+    int   midiEventIdx_;            // next event to dispatch
+    int   midiCurSample_;           // playback position in samples
+    int   midiSongSamples_;         // total song length in samples
+    Osc   midiOsc_[POLY];
+    int   chanProg_[16];            // current GM program per channel (set by MEV_PROG)
 };
 
 } // namespace platform

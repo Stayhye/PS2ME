@@ -276,6 +276,15 @@ const char* Ps2Storage::gamesDir() {
     return gamesDir_;
 }
 
+bool Ps2Storage::bankPath(char* out, int cap) {
+    // The bank sits beside the games (same resolved boot dir). If the boot dir was
+    // never resolved (no games folder found), fall back to host: like gamesDir().
+    const int n = (baseDir_[0] != '\0')
+                      ? snprintf(out, cap, "%sbank.bin", baseDir_)
+                      : snprintf(out, cap, "host:bank.bin");
+    return n > 0 && n < cap;
+}
+
 bool Ps2Storage::cachePath(char* out, int cap, const char* jarName,
                            int jarSize, int iconSize) {
     char safe[96];

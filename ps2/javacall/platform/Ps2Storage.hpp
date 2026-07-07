@@ -34,6 +34,11 @@ public:
     /// otherwise "host:games" (dev fallback under PCSX2). Decided once, then cached.
     const char* gamesDir();
 
+    /// Path of the wavetable sound bank: "<bootdir>/bank.bin" (beside games/), or
+    /// "host:bank.bin" when the boot dir wasn't resolved (dev fallback under PCSX2).
+    /// Writes into @p out (capacity @p cap); returns false if it would not fit.
+    bool bankPath(char* out, int cap);
+
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }
 
