@@ -275,4 +275,39 @@ grep -q 'defined(__mips__)' "$OOP_HPP" || \
   sed -i 's/#if !HOST_LITTLE_ENDIAN/#if !HOST_LITTLE_ENDIAN || defined(__mips__)/g' \
       "$OOP_HPP"
 
+# 23) clean-build skin.bin optional (ps2-skin-optional). We pass SkinRomizationTool
+#     `-romizeall` (patch above, ps2-always-romize-skin) so the whole skin is baked into
+#     the C image ROM (lfj_image_rom.c) and NO skin.bin is emitted -- exactly so LCDUI
+#     init never tries to load it from the (fresh, empty) RAM filesystem. But with
+#     USE_FILE_SYSTEM=true the copy_themes recipe still unconditionally `cp -f`s
+#     $(GENERATED_DIR)/lib/skin.bin into LIBDIR. On an INCREMENTAL build a stale skin.bin
+#     from a pre-`-romizeall` run lingered in the volume so the cp found it; on a
+#     from-scratch build (after wiping MIDP_OUTPUT_DIR to force a recompile with new
+#     flags) it does not exist and `cp` aborts the build ("cannot stat .../skin.bin").
+#     Make that copy non-fatal -- the skin is already in the ROM, so a missing skin.bin
+#     is expected and harmless. Idempotent (marker).
+LCDLF_GMK="$PHONEME/midp/src/highlevelui/lcdlf/lfjava/lib.gmk"
+grep -q 'ps2-skin-optional' "$LCDLF_GMK" || \
+  sed -i '/cp -f $(SUBSYSTEM_LCDLF_GENERATED_SKIN_BIN_FILE)/ s@$@ 2>/dev/null || true # ps2-skin-optional@' \
+      "$LCDLF_GMK"
+
+# 24) EE unaligned wide framebuffer stores (ps2-safe-fill). gxj_putpixel.c's
+#     primDrawHorzLine and primDrawFilledRect each have an optimized fill path (the
+#     active `#else` branch) that writes the RGB565 framebuffer 8/16 bytes at a time via
+#     `*(jlong*)p = lcol` and `*(registers_4*)p = regs` (a 16-byte struct), aligning the
+#     pointer to only 4 bytes (`(uint)pPtr & 0x3`). On x86/ARM a 4-aligned 8-byte store is
+#     fine; on the R5900 the resulting `sd` traps ("Address store exception", EPC in
+#     primDrawHorzLine) because `sd` needs 8-byte alignment and RGB565 runs on odd x are
+#     only 2/4-aligned. Each routine also carries a simple, fully-portable fill in a
+#     disabled `#if 0` block that stores one 16-bit pixel at a time (always EE-safe). Flip
+#     those `#if 0` guards to `#if defined(__mips__)` so the EE takes the safe path while
+#     other targets keep the wide-store fast path. Paired with -fno-store-merging
+#     -fno-tree-vectorize in ps2_mips_gcc.gmk, which stop gcc from re-widening the simple
+#     loop's 16-bit stores back into `sd`. Only two `#if 0` exist in this file (both are
+#     these fill toggles). Idempotent (marker).
+GXJ_C="$PHONEME/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_putpixel.c"
+grep -q 'ps2-safe-fill' "$GXJ_C" || \
+  sed -i 's|^#if 0.*|#if defined(__mips__) /* ps2-safe-fill: EE traps unaligned sd, use 16-bit store path */|' \
+      "$GXJ_C"
+
 echo "phoneME patches applied to: $PHONEME"

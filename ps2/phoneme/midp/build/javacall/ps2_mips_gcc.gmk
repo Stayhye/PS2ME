@@ -45,6 +45,21 @@ GCC_LIBS =
 #                   conversions) back to warnings.
 EXTRA_CFLAGS += -std=gnu99 -fpermissive
 
+# EE unaligned 64-bit store guard. The R5900 traps `sd`/`ld` (64-bit) on any address
+# not 8-byte aligned; there is no hardware fixup (PCSX2 does it silently, so this only
+# bites on real hardware -> "Address store exception", EPC in primDrawHorzLine). The
+# MIDP graphics primitives (gxj_putpixel.c: primDrawHorzLine, primFillRect, blits) write
+# an RGB565 framebuffer (2 bytes/pixel), so a run starting at an odd x lands on a
+# 2/4-aligned address. At -O2 gcc emits 64-bit `sd` to that buffer via TWO passes:
+#   -fstore-merging : fuses adjacent 32-bit stores of the same value into one `sd`.
+#   auto-vectorizer : GCC 12 enables -ftree-loop-vectorize/-ftree-slp-vectorize at -O2,
+#                     which widen the constant-pixel fill loop into 64-bit stores
+#                     (pixel replicated 4x in a 64-bit reg, stored 8 bytes at a time).
+# Both assume 8-byte alignment that RGB565 runs do not have. Disable them so the stores
+# stay as 32-bit `sw`/`sh` (the EE handles those unaligned). Cf. the source-level
+# long/double field fix in Oop.hpp (patch-phoneme.sh #22).
+EXTRA_CFLAGS += -fno-store-merging -fno-tree-vectorize
+
 # Select the hard-coded (generic) security policy back-end instead of the dynamic
 # javacall one. The javacall path (javacall_policy_load.c) reads the permission
 # group/domain tables through javacall_permissions_* -- which are stubs in our port
