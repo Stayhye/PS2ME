@@ -256,4 +256,23 @@ grep -q 'ps2-ramfs-finalize-null' "$RMFS_PCSL_C" || \
         RamfsMemory = NULL; /* ps2-ramfs-finalize-null: else next pcsl_file_init reuses a freed buffer */' \
       "$RMFS_PCSL_C"
 
+# 22) EE unaligned 64-bit field access (ps2-oop-long-align). The R5900's `sd`/`ld`
+#     (store/load doubleword) TRAP on any address that is not 8-byte aligned -- unlike
+#     x86/ARM there is no hardware fixup. phoneME's C++ field accessors in Oop.hpp
+#     (long_field/_put, double_field/_put, ulong_field/_put) have TWO code paths: a
+#     safe two-word (2x 32-bit) split guarded by `#if !HOST_LITTLE_ENDIAN` (added for
+#     SPARC, another RISC that faults on misaligned 64-bit), and a fast single 64-bit
+#     `*addr = value` on little-endian hosts. Java `long`/`double` fields are only
+#     4-byte aligned in the object layout, so on the EE the fast path emits a bare `sd`
+#     to a 4-aligned address -> "Address store exception" (BadVAddr not 8-aligned, EPC
+#     in JVMBasicOop::long_field_put). PCSX2 silently fixes up the misaligned access, so
+#     it only bit us on real hardware. Force the safe split path on MIPS by OR-ing
+#     `defined(__mips__)` into the guard (defined by the EE cross-gcc, NOT by the i386
+#     host romgen, so host tools keep the fast path). The C interpreter is already safe
+#     (Interpreter_c.cpp long_from_addr/long_to_addr split by hand). Idempotent (marker).
+OOP_HPP="$PHONEME/cldc/src/vm/share/handles/Oop.hpp"
+grep -q 'defined(__mips__)' "$OOP_HPP" || \
+  sed -i 's/#if !HOST_LITTLE_ENDIAN/#if !HOST_LITTLE_ENDIAN || defined(__mips__)/g' \
+      "$OOP_HPP"
+
 echo "phoneME patches applied to: $PHONEME"
