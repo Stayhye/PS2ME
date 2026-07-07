@@ -68,8 +68,10 @@ TERMINAL_GENS = {GEN_SAMPLEID, GEN_INSTRUMENT}
 #   s16 pan(-500..500), u16 attenCb(*10... stored as raw cB 0..960),
 #   u16 attackMs, u16 holdMs, u16 decayMs, u16 releaseMs, u16 sustainPermille,
 #   u8 sampleMode, u8 pad
-ZONE_FMT = "<IIII bB BB h H HHHH H BB"
+ZONE_FMT = "<IIII bB BB h H HHHH H B H B"
 ZONE_SIZE = struct.calcsize(ZONE_FMT)
+GEN_INITFILTERFC   = 8    # initial low-pass cutoff (absolute cents)
+GEN_INITFILTERQ    = 9    # low-pass resonance (centibels)
 
 
 def _walk_riff(data):
@@ -314,24 +316,39 @@ def build(sf2_path, out_path, rate=22050, max_seconds=4.0,
         coarse = g.get(GEN_COARSETUNE, 0)
         fine = g.get(GEN_FINETUNE, 0)
         root = max(0, min(127, root - coarse))
-        # Wavetable loop tuning: for a single-cycle WAVETABLE (square/saw lead) the
-        # loop IS the waveform, so its integer length -- not the sample content --
-        # sets the pitch. After resampling to the bank rate the loop no longer spans
-        # an exact number of periods, so note==root plays a few cents sharp/flat
-        # (e.g. a 21.07-sample period stored as 20 = +90 cents). Force it in tune:
-        # make note==root_orig sound at exactly f(root_orig) by correcting cents to
-        # the true period. Only for loops that DOMINATE the sample (recorded
-        # instruments have a short sustain loop whose length must NOT drive pitch).
+        # Wavetable loop tuning: when the sustain loop spans a whole number of
+        # periods (a synthetic wavetable of N cycles), its INTEGER length -- not the
+        # sample content -- sets the pitch. After resampling to the bank rate the
+        # length no longer spans an exact N periods, so note==root plays sharp/flat
+        # (e.g. a 1-cycle 15.8-sample loop stored as 15 = ~+90 cents). Correct cents
+        # to the true period so note==root_orig sounds at exactly f(root_orig).
+        #
+        # The test is "loop length ~= an integer multiple of the period", NOT "loop
+        # dominates the sample": HL4MGM's flute/guitar/violin are a recorded attack
+        # plus a tiny 1-cycle sustain loop, so the old 0.5*length gate skipped them
+        # and they played tens of cents off. Recorded multi-cycle loops (piano/
+        # strings: hundreds of cycles, length not period-aligned) either land on
+        # corr~=0 or fail the integer test, so their pitch stays in the content.
         corr = 0.0
+        use_pcorr = True
         actual_loop = le - ls
-        if mode in (1, 3) and actual_loop > 1 and actual_loop > 0.5 * length:
+        if mode in (1, 3) and actual_loop > 1:
             root_hz = 440.0 * (2.0 ** ((root_orig - 69) / 12.0))
             period = rate / root_hz
-            cycles = max(1, int(round(actual_loop / period)))
-            # produced pitch = rate*cycles/actual_loop; corr < 0 when the loop is too
-            # short (note plays sharp). Adding corr to cents lowers it to f(root_orig).
-            corr = 1200.0 * float(np.log2(actual_loop / (cycles * period)))
-        cents = max(-127, min(127, int(round(fine + shdr["pcorr"] + corr))))
+            if period > 0:
+                cyc = actual_loop / period
+                cycles = max(1, int(round(cyc)))
+                if abs(cyc - cycles) <= 0.25:
+                    # produced pitch = rate*cycles/actual_loop; corr < 0 when the loop
+                    # is too short (note plays sharp). Adding corr lowers it in tune.
+                    corr = 1200.0 * float(np.log2(actual_loop / (cycles * period)))
+                    # This loop-length tuning is ABSOLUTE (it lands note==root on
+                    # f(root) by construction). The shdr pitch-correction was the
+                    # author's fix for the SAME loop at the SOURCE rate, so adding it
+                    # would double-count -- drop it here (keep the deliberate fine).
+                    use_pcorr = False
+        pcorr = shdr["pcorr"] if use_pcorr else 0
+        cents = max(-127, min(127, int(round(fine + pcorr + corr))))
         pan = max(-500, min(500, g.get(GEN_PAN, 0)))
         atten = max(0, min(960, g.get(GEN_INITATTEN, 0)))
         klo, khi = g.get(GEN_KEYRANGE, (0, 127))
@@ -345,10 +362,19 @@ def build(sf2_path, out_path, rate=22050, max_seconds=4.0,
         # if no loop, force a small release so one-shots ring out naturally
         if mode == 0 and r == 0:
             r = 40
+        # SF2 per-voice low-pass filter: initialFilterFc is an absolute pitch in
+        # cents (Hz = 8.176*2^(c/1200)); default 13500c ~= 20 kHz = wide open. Most
+        # HL4MGM instruments set it far lower (1-5 kHz) and rely on it for timbre --
+        # without it every voice is too bright/harsh. Store the cutoff in Hz (0 =
+        # open) and the resonance in centibels (0 = none).
+        fc_cents = g.get(GEN_INITFILTERFC, 13500)
+        fc_hz = int(round(8.176 * (2.0 ** (fc_cents / 1200.0))))
+        fc_hz = 0 if fc_hz >= 18000 else max(0, min(20000, fc_hz))
+        fq = max(0, min(255, g.get(GEN_INITFILTERQ, 0)))
         return dict(off=off, length=length, ls=ls, le=le, root=root, cents=cents,
                     klo=klo, khi=khi, pan=pan, atten=atten,
                     a=min(a, 65000), h=min(h, 65000), d=min(d, 65000),
-                    r=min(r, 65000), susp=susp, mode=mode)
+                    r=min(r, 65000), susp=susp, mode=mode, fc=fc_hz, fq=fq)
 
     def pick_loud_layer(zone_gens_list):
         """Collapse velocity layers: keep zones whose velRange covers 127."""
@@ -416,7 +442,7 @@ def build(sf2_path, out_path, rate=22050, max_seconds=4.0,
                                  z["cents"], z["root"], z["klo"], z["khi"],
                                  z["pan"], z["atten"],
                                  z["a"], z["h"], z["d"], z["r"], z["susp"],
-                                 z["mode"], 0))
+                                 z["mode"], z["fc"], z["fq"]))
     parts.append(pcm_all.tobytes())
     blob = b"".join(parts)
     open(out_path, "wb").write(blob)

@@ -14,7 +14,7 @@
 import struct, sys, wave
 import numpy as np
 
-ZONE_FMT = "<IIII bB BB h H HHHH H BB"
+ZONE_FMT = "<IIII bB BB h H HHHH H B H B"
 ZONE_SIZE = struct.calcsize(ZONE_FMT)
 
 
@@ -37,7 +37,8 @@ class Bank:
             self.zones.append(dict(off=z[0], length=z[1], ls=z[2], le=z[3],
                                    cents=z[4], root=z[5], klo=z[6], khi=z[7],
                                    pan=z[8], atten=z[9], a=z[10], h=z[11],
-                                   d=z[12], r=z[13], susp=z[14], mode=z[15]))
+                                   d=z[12], r=z[13], susp=z[14], mode=z[15],
+                                   fc=z[16], fq=z[17]))
         p += nzones * ZONE_SIZE
         self.pcm = np.frombuffer(b, dtype="<i2", count=npcm, offset=p).astype(np.float32)
         print(f"bank: rate={rate}Hz zones={nzones} pcm={npcm} "
@@ -182,10 +183,44 @@ def make_env(rate, held, aMs, hMs, dMs, sus, rMs, oneshot, note_len):
     return np.concatenate([pre, rel])
 
 
+# ------------------------------------------------------------------- LP filter
+# SF2 per-voice low-pass (initialFilterFc/Q). FluidSynth applies an RBJ biquad;
+# here we realize the same biquad as a truncated impulse response and convolve
+# (no scipy needed, and it vectorizes). Cached per (fc,q) since fc is static per
+# voice in this cut. On the PS2 this is a real 2-tap IIR biquad (a few mul/add
+# per sample per voice -- cheap); the FIR here is just the offline mirror.
+_IMPULSE_CACHE = {}
+
+def _biquad_lpf_impulse(fc, q_cb, sr, n=256):
+    import math
+    if fc <= 0 or fc >= sr * 0.49:
+        return None                       # wide open -> no filtering
+    key = (fc, q_cb, sr)
+    h = _IMPULSE_CACHE.get(key)
+    if h is not None:
+        return h
+    w0 = 2.0 * math.pi * fc / sr
+    cosw, sinw = math.cos(w0), math.sin(w0)
+    # resonance: SF2 Q is in centibels of peak gain; FluidSynth uses Q = 10^(cB/200)
+    Q = max(0.7071, 10.0 ** (q_cb / 200.0)) if q_cb > 0 else 0.7071
+    alpha = sinw / (2.0 * Q)
+    b0 = (1.0 - cosw) / 2.0; b1 = 1.0 - cosw; b2 = (1.0 - cosw) / 2.0
+    a0 = 1.0 + alpha; a1 = -2.0 * cosw; a2 = 1.0 - alpha
+    b0, b1, b2, a1, a2 = b0/a0, b1/a0, b2/a0, a1/a0, a2/a0
+    h = np.zeros(n, dtype=np.float32)
+    x1 = x2 = y1 = y2 = 0.0
+    for i in range(n):
+        x = 1.0 if i == 0 else 0.0
+        y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2
+        h[i] = y; x2 = x1; x1 = x; y2 = y1; y1 = y
+    _IMPULSE_CACHE[key] = h
+    return h
+
+
 # --------------------------------------------------------------------------- synth
 def render(bank, events_s, rate, mono, bend_range, poly, seconds,
            force_prog=-1, no_drums=False, debug=False, drums_only=False,
-           only_chan=-1):
+           only_chan=-1, interp="cubic", use_filter=True):
     # channel state
     prog = [0] * 16
     vol = [100] * 16          # CC7
@@ -223,7 +258,7 @@ def render(bank, events_s, rate, mono, bend_range, poly, seconds,
                 if z is None:
                     dbg["no_zone"] += 1; continue
                 v = _mk_voice(bank, z, note, vel, ch, pan[ch], vol[ch], expr[ch],
-                              0.0, rate, oneshot=True)
+                              0.0, rate, oneshot=True, interp=interp, use_filter=use_filter)
                 if v: v["on"] = samp; voices.append(v)
             else:
                 if drums_only:
@@ -240,7 +275,8 @@ def render(bank, events_s, rate, mono, bend_range, poly, seconds,
                 if old is not None and old["off"] is None:
                     old["off"] = samp; dbg["stuck"] += 1
                 v = _mk_voice(bank, z, note, vel, ch, pan[ch], vol[ch], expr[ch],
-                              bend[ch], rate, oneshot=(z["mode"] == 0))
+                              bend[ch], rate, oneshot=(z["mode"] == 0), interp=interp,
+                              use_filter=use_filter)
                 if v:
                     v["on"] = samp
                     active[(ch, note)] = v
@@ -277,7 +313,8 @@ def render(bank, events_s, rate, mono, bend_range, poly, seconds,
     return L, R, max_conc, total
 
 
-def _mk_voice(bank, z, note, vel, ch, pan127, cvol, cexpr, bendsemi, rate, oneshot):
+def _mk_voice(bank, z, note, vel, ch, pan127, cvol, cexpr, bendsemi, rate, oneshot,
+              interp="cubic", use_filter=True):
     root = z["root"]
     step = 2.0 ** ((note - root + z["cents"] / 100.0 + bendsemi) / 12.0)
     if z["length"] < 2:
@@ -295,7 +332,7 @@ def _mk_voice(bank, z, note, vel, ch, pan127, cvol, cexpr, bendsemi, rate, onesh
     theta = (ppos + 1.0) * 0.25 * np.pi
     panL, panR = np.cos(theta), np.sin(theta)
     return dict(z=z, note=note, step=step, gain=gain, panL=panL, panR=panR,
-                oneshot=oneshot, on=0.0, off=None)
+                oneshot=oneshot, on=0.0, off=None, interp=interp, filter=use_filter)
 
 
 def _render_voice(bank, v, L, R, rate):
@@ -337,11 +374,37 @@ def _render_voice(bank, v, L, R, rate):
             if n <= 0:
                 return
     i0 = np.floor(pos).astype(np.int64)
-    i0 = np.clip(i0, 0, length - 2)
     frac = (pos - i0).astype(np.float32)
-    s0 = bank.pcm[base + i0]
-    s1 = bank.pcm[base + i0 + 1]
-    sig = (s0 * (1.0 - frac) + s1 * frac) * (env * v["gain"] / 32768.0)
+
+    def gather(idx):
+        # Fetch pcm[base+idx] with loop wrap on the loop region (indices in the
+        # attack, before ls, are just clamped -- their exact neighbour matters far
+        # less than the continuously-looping sustain, esp. for tiny 1-cycle loops).
+        idx = idx.copy()
+        if looping:
+            loop_len = le - ls
+            past = idx >= ls
+            idx[past] = ls + np.mod(idx[past] - ls, loop_len)
+        np.clip(idx, 0, length - 1, out=idx)
+        return bank.pcm[base + idx].astype(np.float32)
+
+    if v.get("interp", "cubic") == "linear":
+        s0 = gather(i0); s1 = gather(i0 + 1)
+        interp = s0 * (1.0 - frac) + s1 * frac
+    else:
+        # Catmull-Rom cubic (4-tap): far less imaging/aliasing than linear on the
+        # highs, approaching FluidSynth's higher-order interpolator.
+        sm1 = gather(i0 - 1); s0 = gather(i0); s1 = gather(i0 + 1); s2 = gather(i0 + 2)
+        a0 = -0.5 * sm1 + 1.5 * s0 - 1.5 * s1 + 0.5 * s2
+        a1 = sm1 - 2.5 * s0 + 2.0 * s1 - 0.5 * s2
+        a2 = -0.5 * sm1 + 0.5 * s1
+        interp = ((a0 * frac + a1) * frac + a2) * frac + s0
+    # per-voice low-pass filter (before envelope/gain), if the zone sets one
+    if v.get("filter", True):
+        h = _biquad_lpf_impulse(z.get("fc", 0), z.get("fq", 0), rate)
+        if h is not None:
+            interp = np.convolve(interp, h)[:len(interp)].astype(np.float32)
+    sig = interp * (env * v["gain"] / 32768.0)
     end = min(on + n, len(L))
     m = end - on
     if m <= 0:
@@ -409,10 +472,13 @@ def main(argv):
     bank_path, mid_path, out_path = argv[1], argv[2], argv[3]
     rate, mono, poly, bend_range, seconds = None, False, 0, 2.0, 0.0
     force_prog, no_drums, debug, drums_only, only_chan = -1, False, False, False, -1
+    interp = "cubic"; use_filter = True
     i = 4
     while i < len(argv):
         a = argv[i]
         if a == "--rate": rate = int(argv[i+1]); i += 2
+        elif a == "--interp": interp = argv[i+1]; i += 2
+        elif a == "--no-filter": use_filter = False; i += 1
         elif a == "--mono": mono = True; i += 1
         elif a == "--poly": poly = int(argv[i+1]); i += 2
         elif a == "--bend-range": bend_range = float(argv[i+1]); i += 2
@@ -437,7 +503,7 @@ def main(argv):
     events_s = tempo_map_to_samples(events, div, rate)
     L, R, max_conc, total = render(bank, events_s, rate, mono, bend_range, poly,
                                    seconds, force_prog, no_drums, debug, drums_only,
-                                   only_chan)
+                                   only_chan, interp, use_filter)
     peak = write_wav(out_path, L, R, rate)
     print(f"wav: {out_path}  {total/rate:.1f}s @ {rate}Hz {'mono' if mono else 'stereo'}"
           f"  maxPolyphony={max_conc}  preNormPeak={peak:.2f}")
