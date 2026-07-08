@@ -1,11 +1,11 @@
 // PS2 JavaCall port — HAL layer.
 //
 // LcdDevice: the display facade the MIDP LCDUI subsystem talks to through the
-// javacall_lcd contract. It owns the logical screen (a fixed 240x320 portrait
-// "phone" LCD), hands the MIDP rasterizer the RGB565 off-screen buffer it must
-// have (jcapp_export.c aborts if get_screen returns anything else), and forwards
-// flushes to an injected IFramebuffer. All geometry/state lives here; nothing in
-// this class touches hardware.
+// javacall_lcd contract. It owns the logical screen (a "phone" LCD whose resolution is
+// set per game by the launcher -- default 240x320 portrait), hands the MIDP rasterizer
+// the RGB565 off-screen buffer it must have (jcapp_export.c aborts if get_screen returns
+// anything else), and forwards flushes to an injected IFramebuffer. All geometry/state
+// lives here; nothing in this class touches hardware.
 #ifndef PS2_JAVACALL_HAL_LCDDEVICE_HPP
 #define PS2_JAVACALL_HAL_LCDDEVICE_HPP
 
@@ -18,11 +18,19 @@ class IFramebuffer;
 
 class LcdDevice {
 public:
-    /// The virtual phone screen: portrait QVGA, matching the M0 video path.
-    static const int WIDTH  = 240;
-    static const int HEIGHT = 320;
+    /// The virtual phone screen's default: portrait QVGA, matching the M0 video path.
+    static const int DEFAULT_WIDTH  = 240;
+    static const int DEFAULT_HEIGHT = 320;
     /// The single built-in display's hardware id.
     static const int PRIMARY_ID = 0;
+
+    /// Set the logical screen resolution the game will see (getWidth/getHeight and the
+    /// RGB565 raster geometry). Call before launching a game. If the framebuffer is
+    /// already mapped it is re-mapped to the new size in place (see Ps2Framebuffer, which
+    /// keeps one max-size backing store so the pointer stays valid). No-op for a
+    /// non-positive size. The MIDP screen buffer must be re-synced separately (the caller
+    /// forces jcapp_get_screen_buffer once the VM's LCD is up).
+    void setResolution(int w, int h);
 
     /// Process-wide instance. Constructed on first use (safe static init order
     /// with the platform framebuffer that registers itself at startup).
@@ -45,8 +53,8 @@ public:
     void flush();
     void flushPartial(int ystart, int yend);
 
-    int width()  const { return WIDTH; }
-    int height() const { return HEIGHT; }
+    int width()  const { return width_; }
+    int height() const { return height_; }
 
     /// LCDUI feature bits the MIDP DisplayDevice queries via
     /// javacall_lcd_get_display_capabilities. Mirror
@@ -73,12 +81,16 @@ public:
     void setFullScreenMode(bool on) { fullScreen_ = on; }
 
 private:
-    LcdDevice() : framebuffer_(0), raster_(0), fullScreen_(false) {}
+    LcdDevice()
+        : framebuffer_(0), raster_(0),
+          width_(DEFAULT_WIDTH), height_(DEFAULT_HEIGHT), fullScreen_(false) {}
     LcdDevice(const LcdDevice&);
     LcdDevice& operator=(const LcdDevice&);
 
     IFramebuffer*   framebuffer_;
     javacall_pixel* raster_;
+    int             width_;
+    int             height_;
     bool            fullScreen_;
 };
 

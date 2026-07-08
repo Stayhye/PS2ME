@@ -25,11 +25,14 @@ struct PadButtons {
     bool r1;         // right soft key / next tab
     bool l2;         // alphabet jump (prev section)
     bool r2;         // alphabet jump (next section)
+    bool select;     // per-game options (native menu: screen size panel)
+    bool start;      // reserved (native menu)
 
     PadButtons()
         : up(false), down(false), left(false), right(false),
           cross(false), circle(false), triangle(false), square(false),
-          l1(false), r1(false), l2(false), r2(false) {}
+          l1(false), r1(false), l2(false), r2(false),
+          select(false), start(false) {}
 };
 
 class IPad {

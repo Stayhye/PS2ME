@@ -53,6 +53,11 @@ public:
     /// "host:settings.txt" (dev fallback). Writes into @p out (cap); false if too long.
     bool settingsPath(char* out, int cap);
 
+    /// Path of the per-game resolution overrides file: "<bootdir>resolutions.txt" (beside
+    /// games/), or "host:resolutions.txt" (dev fallback). Writes @p out (cap); false if
+    /// too long.
+    bool resolutionsPath(char* out, int cap);
+
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }
 

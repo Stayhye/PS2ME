@@ -14,8 +14,22 @@ bool LcdDevice::init() {
     if (framebuffer_ == 0) {
         return false;
     }
-    raster_ = framebuffer_->map(WIDTH, HEIGHT);
+    raster_ = framebuffer_->map(width_, height_);
     return raster_ != 0;
+}
+
+void LcdDevice::setResolution(int w, int h) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    width_  = w;
+    height_ = h;
+    if (framebuffer_ != 0) {
+        // Re-map to the new geometry. Ps2Framebuffer keeps one max-size backing store, so
+        // this only updates the reported dimensions -- the raster pointer stays valid, so
+        // the MIDP screen buffer that points into it does not dangle.
+        raster_ = framebuffer_->map(w, h);
+    }
 }
 
 void LcdDevice::finalize() {
@@ -26,8 +40,8 @@ void LcdDevice::finalize() {
 }
 
 javacall_pixel* LcdDevice::screen(int* width, int* height) {
-    if (width  != 0) *width  = WIDTH;
-    if (height != 0) *height = HEIGHT;
+    if (width  != 0) *width  = width_;
+    if (height != 0) *height = height_;
     return raster_;
 }
 

@@ -22,8 +22,9 @@ namespace {
 // TV output. NTSC 640x448; displays fine on PAL consoles too (PAL could use 512).
 const int SCR_W = 640;
 const int SCR_H = 448;
-// Power-of-two VRAM texture for the pillarboxed game screen (<= 240x320 source).
-const int GAME_TEX_W = 256;
+// Power-of-two VRAM texture for the aspect-fit game screen. 512x512 covers every launcher
+// resolution preset (each dimension <= 512), portrait or landscape.
+const int GAME_TEX_W = 512;
 const int GAME_TEX_H = 512;
 // Power-of-two VRAM texture for the fullscreen UI (holds the 640x448 native raster).
 const int FS_TEX_W = 1024;
@@ -158,18 +159,24 @@ void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t
 }
 
 void GsDisplay::present(const u16* rgba5551, int w, int h) {
-    if (!ready_) {
+    if (!ready_ || w <= 0 || h <= 0) {
         return;
     }
     if (!gameTexReady_) {
         initTexbuf(&texbuf_, GAME_TEX_W, GAME_TEX_H);
-        // Fit the portrait screen into the TV preserving aspect (pillarboxed).
-        const float dh = (float)SCR_H;
-        const float dw = dh * (float)w / (float)h;
-        const float dx = ((float)SCR_W - dw) * 0.5f;
-        setRect(&rect_, dx, 0.0f, dx + dw, dh, (float)w, (float)h);
         gameTexReady_ = true;
     }
+    // Contain-fit: scale by the limiting dimension so the whole screen is visible,
+    // centred and letter/pillar-boxed. Recomputed every frame so a per-game resolution
+    // change (portrait <-> landscape, different aspect) is applied without stale geometry.
+    const float sx = (float)SCR_W / (float)w;
+    const float sy = (float)SCR_H / (float)h;
+    const float s  = sx < sy ? sx : sy;
+    const float dw = (float)w * s;
+    const float dh = (float)h * s;
+    const float dx = ((float)SCR_W - dw) * 0.5f;
+    const float dy = ((float)SCR_H - dh) * 0.5f;
+    setRect(&rect_, dx, dy, dx + dw, dy + dh, (float)w, (float)h);
     blit(rgba5551, w, h, &texbuf_, &rect_);
 }
 

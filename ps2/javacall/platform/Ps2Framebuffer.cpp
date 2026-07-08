@@ -10,23 +10,35 @@ namespace ps2 {
 namespace platform {
 
 javacall_pixel* Ps2Framebuffer::map(int width, int height) {
-    if (raster_ != 0 && width == width_ && height == height_) {
-        return raster_;             // idempotent for the same geometry
-    }
-    unmap();
-    const size_t count = static_cast<size_t>(width) * height;
-    const size_t bytes = count * sizeof(javacall_pixel);
-    // 128-byte aligned: gsBuf_ is DMA'd to the GS; align raster_ the same way.
-    raster_ = static_cast<javacall_pixel*>(memalign(128, bytes));
-    gsBuf_  = static_cast<javacall_pixel*>(memalign(128, bytes));
-    if (raster_ == 0 || gsBuf_ == 0) {
-        unmap();
-        return 0;
-    }
-    // Define the initial frames: black raster, opaque-black GS buffer.
-    for (size_t i = 0; i < count; ++i) {
-        raster_[i] = 0;
-        gsBuf_[i]  = 0x8000;        // RGBA5551 black with alpha set
+    // Clamp the logical size to what the pipeline supports.
+    if (width  > MAX_W) width  = MAX_W;
+    if (height > MAX_H) height = MAX_H;
+    if (width  < 1) width  = 1;
+    if (height < 1) height = 1;
+
+    if (raster_ == 0) {
+        // Allocate the backing store once at the max size and never reallocate: the MIDP
+        // screen buffer points straight into raster_, so the pointer must stay stable
+        // across per-game resolution changes. 128-byte aligned (gsBuf_ is DMA'd; match).
+        const size_t count = static_cast<size_t>(MAX_W) * MAX_H;
+        const size_t bytes = count * sizeof(javacall_pixel);
+        raster_ = static_cast<javacall_pixel*>(memalign(128, bytes));
+        gsBuf_  = static_cast<javacall_pixel*>(memalign(128, bytes));
+        if (raster_ == 0 || gsBuf_ == 0) {
+            unmap();
+            return 0;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            raster_[i] = 0;
+            gsBuf_[i]  = 0x8000;    // RGBA5551 black with alpha set
+        }
+    } else if (width != width_ || height != height_) {
+        // Resolution change: clear the (stable) backing store so a smaller game does not
+        // show the previous game's leftovers around its image.
+        const size_t count = static_cast<size_t>(MAX_W) * MAX_H;
+        for (size_t i = 0; i < count; ++i) {
+            raster_[i] = 0;
+        }
     }
     width_  = width;
     height_ = height;

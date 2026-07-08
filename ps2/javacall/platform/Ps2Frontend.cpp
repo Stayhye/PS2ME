@@ -26,6 +26,7 @@
 #include "Favorites.hpp"
 #include "Recent.hpp"
 #include "Settings.hpp"
+#include "Resolutions.hpp"
 #include "Ps2Storage.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
@@ -325,6 +326,19 @@ void glyphSquare(int cx, int cy, int R, int r, int g, int b) {
         plotA(cx - R + 1, cy + t, r, g, b, 255);
         plotA(cx + R,     cy + t, r, g, b, 255);
         plotA(cx + R - 1, cy + t, r, g, b, 255);
+    }
+}
+
+// The SELECT button, as a small horizontal rounded-rectangle outline (footer legend).
+void glyphSelect(int cx, int cy, int r, int g, int b) {
+    const int hw = 8, hh = 4;   // half width / height of the badge
+    for (int i = -hw + 1; i <= hw - 1; ++i) {
+        plotA(cx + i, cy - hh, r, g, b, 255);
+        plotA(cx + i, cy + hh, r, g, b, 255);
+    }
+    for (int j = -hh + 1; j <= hh - 1; ++j) {
+        plotA(cx - hw, cy + j, r, g, b, 255);
+        plotA(cx + hw, cy + j, r, g, b, 255);
     }
 }
 
@@ -939,7 +953,7 @@ void drawGrid(int viewCount, int selected, int topRow, const int* view, bool gri
     }
 }
 
-void drawDetails(int viewCount, int selected, const int* view) {
+void drawDetails(int viewCount, int selected, const int* view, bool detailsFocus) {
     const int px = DET_X, py = CONTENT_Y, pw = DET_W, ph = CONTENT_BOTTOM - CONTENT_Y;
     panel(px, py, pw, ph, 10);
     drawText(px + 10, py + 8, "GAME DETAILS", 150, 185, 220, 12.0f);
@@ -948,11 +962,11 @@ void drawDetails(int viewCount, int selected, const int* view) {
     }
     const int game = view[selected];
 
-    // Vertically centre the preview + name + counter block in the panel body (below
-    // the "GAME DETAILS" caption), so the panel reads balanced rather than top-heavy.
+    // Vertically centre the preview + name + counter + screen-size block in the panel body
+    // (below the "GAME DETAILS" caption), so the panel reads balanced rather than top-heavy.
     const int prev = pw - 26;
-    const int gap1 = 12, nameH = 16, gap2 = 8, infoH = 14;
-    const int blockH = prev + gap1 + nameH + gap2 + infoH;
+    const int gap1 = 12, nameH = 16, gap2 = 8, infoH = 14, gap3 = 12, screenH = 24;
+    const int blockH = prev + gap1 + nameH + gap2 + infoH + gap3 + screenH;
     const int regTop = py + 26, regBot = py + ph - 8;
     int top = regTop + ((regBot - regTop) - blockH) / 2;
     if (top < regTop) top = regTop;
@@ -984,19 +998,47 @@ void drawDetails(int viewCount, int selected, const int* view) {
     snprintf(info, (int)sizeof(info), "%d / %d", pos, total);
     const int iw = textWidth(info, 13.0f);
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
+
+    // Per-game screen size, editable when the panel is focused (up/down cycle presets).
+    int rw = 0, rh = 0;
+    Resolutions::instance().get(game, &rw, &rh);
+    char res[16];
+    snprintf(res, (int)sizeof(res), "%dx%d", rw, rh);
+    const int scy = prevY + prev + gap1 + nameH + gap2 + infoH + gap3;
+    const int pillX = px + 12, pillW = pw - 24;
+    if (detailsFocus) {
+        roundRectFillA(pillX - 2, scy - 2, pillW + 4, screenH + 4, 7, 90, 215, 255, 255);
+        roundRectVGrad(pillX, scy, pillW, screenH, 6, 46, 88, 148, 30, 54, 100);
+    } else {
+        roundRectVGrad(pillX, scy, pillW, screenH, 6, 34, 52, 92, 22, 36, 68);
+    }
+    const int scmy = scy + screenH / 2;
+    drawTextVC(pillX + 8, scmy, "SCREEN", detailsFocus ? 235 : 150,
+               detailsFocus ? 245 : 185, 255, 12.0f);
+    int valRight = pillX + pillW - 8;
+    if (detailsFocus) {
+        // Up/down chevrons at the right edge; the value sits to their left.
+        const int ax = pillX + pillW - 10, ay = scmy;
+        fillTriangle(ax, ay - 7, ax - 5, ay - 1, ax + 5, ay - 1, 210, 235, 255);
+        fillTriangle(ax - 5, ay + 1, ax + 5, ay + 1, ax, ay + 7, 210, 235, 255);
+        valRight = ax - 12;
+    }
+    const int vw = textWidth(res, 13.0f);
+    drawTextVC(valRight - vw, scmy, res, detailsFocus ? 255 : 210,
+               detailsFocus ? 255 : 220, 255, 13.0f);
 }
 
 // Context-aware button legend: only the actions available in the current context are
 // shown (e.g. no BACK at the root, no FAVORITE/SORT on SETTINGS or while the alphabet
 // column is focused). Glyph kind: 0=cross, 1=circle, 2=triangle, 3=square.
-void drawFooter(int activeTab, bool sidebarFocus) {
+void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
     rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
     for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
     const int cy = FOOTER_Y + FOOTER_H / 2;
 
-    const bool canBack = sidebarFocus || activeTab != 0;   // somewhere to go back to
-    int kinds[4];
-    const char* labels[4];
+    const bool canBack = sidebarFocus || detailsFocus || activeTab != 0;
+    int kinds[6];   // glyph kind: 0=cross 1=circle 2=triangle 3=square 4=up/down 5=select
+    const char* labels[6];
     int n = 0;
     if (activeTab == 2) {                       // SETTINGS
         kinds[n] = 0; labels[n] = "SELECT"; ++n;
@@ -1004,11 +1046,16 @@ void drawFooter(int activeTab, bool sidebarFocus) {
     } else if (sidebarFocus) {                  // alphabet column focused
         kinds[n] = 0; labels[n] = "JUMP"; ++n;
         kinds[n] = 1; labels[n] = "BACK"; ++n;
+    } else if (detailsFocus) {                  // details panel focused (screen size)
+        kinds[n] = 4; labels[n] = "SCREEN SIZE"; ++n;
+        kinds[n] = 0; labels[n] = "LAUNCH"; ++n;
+        kinds[n] = 1; labels[n] = "BACK"; ++n;
     } else {                                     // ALL GAMES / FAVORITES grid
         kinds[n] = 0; labels[n] = "LAUNCH"; ++n;
         if (canBack) { kinds[n] = 1; labels[n] = "BACK"; ++n; }
         kinds[n] = 2; labels[n] = "FAVORITE"; ++n;
-        kinds[n] = 3; labels[n] = "SORT BY..."; ++n;
+        kinds[n] = 3; labels[n] = "SORT"; ++n;
+        kinds[n] = 5; labels[n] = "OPTIONS"; ++n;
     }
 
     const int glyphW = 16;   // glyph column (centre at +7) before the label
@@ -1029,6 +1076,10 @@ void drawFooter(int activeTab, bool sidebarFocus) {
             case 1: glyphCircle(gcx,   cy, 7, 235,  92,  92); break;
             case 2: glyphTriangle(gcx, cy, 7,  92, 216, 150); break;
             case 3: glyphSquare(gcx,   cy, 7, 230, 112, 190); break;
+            case 4: fillTriangle(gcx, cy - 7, gcx - 5, cy - 1, gcx + 5, cy - 1, 150, 210, 245);
+                    fillTriangle(gcx - 5, cy + 1, gcx + 5, cy + 1, gcx, cy + 7, 150, 210, 245);
+                    break;
+            case 5: glyphSelect(gcx, cy, 150, 210, 245); break;
         }
         drawTextVC(x + glyphW, cy, labels[i], 232, 240, 250, 15.0f);
         x += glyphW + textWidth(labels[i], 15.0f) + itemGap;
@@ -1096,13 +1147,13 @@ void drawSettings(int sel) {
 }
 
 void render(int viewCount, int selected, int topRow, int activeTab, const int* view,
-            bool sidebarFocus, int sidebarSel, int settingsSel) {
+            bool sidebarFocus, int sidebarSel, int settingsSel, bool detailsFocus) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
     const int curGame = viewCount > 0 ? view[selected] : -1;
     drawSidebar(curGame, sidebarFocus, sidebarSel);
-    drawFooter(activeTab, sidebarFocus);
+    drawFooter(activeTab, sidebarFocus, detailsFocus);
 
     if (activeTab == 2) {                       // SETTINGS
         drawSettings(settingsSel);
@@ -1137,8 +1188,8 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
     }
 
     drawScrollbar(viewCount, topRow);
-    drawDetails(viewCount, selected, view);
-    drawGrid(viewCount, selected, topRow, view, !sidebarFocus);
+    drawDetails(viewCount, selected, view, detailsFocus);
+    drawGrid(viewCount, selected, topRow, view, !sidebarFocus && !detailsFocus);
 }
 
 // Bake the static background (vertical gradient + radial vignette) into g_bg once, so
@@ -1574,6 +1625,7 @@ int Ps2Frontend::pick() {
     buildInitials(count);         // alphabet sidebar contents (once)
     Favorites::instance().load(count);   // persisted favourites -> game indices
     Recent::instance().load(count);      // recently-launched games -> game indices
+    Resolutions::instance().load(count); // per-game canvas resolution overrides
     Settings::instance().load();         // launcher preferences
     g_sortMode = Settings::instance().defaultSort();   // startup sort order
 
@@ -1609,6 +1661,8 @@ int Ps2Frontend::pick() {
     int  sidebarSel = 0;          // highlighted letter while focused
     bool lastSbFocus = false;
     int  lastSbSel = -1;
+    bool detailsFocus = false;    // d-pad moved into the details panel (screen size)
+    bool lastDetailsFocus = false;
     int  settingsSel = 0;         // highlighted SETTINGS row
     int  lastSettingsSel = -1;
     bool firstFrame = true;
@@ -1621,22 +1675,25 @@ int Ps2Frontend::pick() {
         bool favToggled = false;
         bool sortChanged = false;
         bool settingsChanged = false;
+        bool resChanged = false;
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
-            // Tab switching (L1/R1): resets the view + selection + sidebar/settings focus.
+            // Tab switching (L1/R1): resets the view + selection + sidebar/details/settings focus.
             if (b.r1 && !prev.r1 && activeTab < 2) {
                 activeTab++; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false; settingsSel = 0;
+                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = false; settingsSel = 0;
             }
             if (b.l1 && !prev.l1 && activeTab > 0) {
                 activeTab--; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false; settingsSel = 0;
+                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = false; settingsSel = 0;
             }
-            // Back (Circle): unfocus the sidebar, else return to ALL GAMES. At the root
-            // (ALL GAMES with nothing focused) it does nothing.
+            // Back (Circle): unfocus the sidebar or details panel, else return to ALL GAMES.
+            // At the root (ALL GAMES with nothing focused) it does nothing.
             if (b.circle && !prev.circle) {
                 if (sidebarFocus) {
                     sidebarFocus = false;
+                } else if (detailsFocus) {
+                    detailsFocus = false;
                 } else if (activeTab != 0) {
                     activeTab = 0; rebuildView(activeTab, count);
                     selected = 0; topRow = 0; settingsSel = 0;
@@ -1664,6 +1721,11 @@ int Ps2Frontend::pick() {
                     settingsChanged = true;
                 }
             } else if (g_viewCount > 0 && (activeTab == 0 || activeTab == 1)) {
+                // Select toggles the details panel (per-game screen size). Dedicated button
+                // so focusing it never moves the grid selection.
+                if (b.select && !prev.select && !sidebarFocus) {
+                    detailsFocus = !detailsFocus;
+                }
                 if (sidebarFocus) {
                     // Alphabet column focused: up/down pick a letter; cross/right jumps
                     // to it and returns to the grid; left cancels.
@@ -1677,6 +1739,13 @@ int Ps2Frontend::pick() {
                     if (b.left && !prev.left) {
                         sidebarFocus = false;   // cancel back to the grid
                     }
+                } else if (detailsFocus) {
+                    // Details panel focused: up/down cycle the selected game's screen size
+                    // preset (persisted); left/cross-to-launch handled below; back unfocuses.
+                    if (b.up   && !prev.up)   { Resolutions::instance().cycle(g_view[selected], -1); resChanged = true; }
+                    if (b.down && !prev.down) { Resolutions::instance().cycle(g_view[selected], +1); resChanged = true; }
+                    if (b.left && !prev.left) { detailsFocus = false; }   // back to the grid
+                    if (b.cross && !prev.cross) { chosen = g_view[selected]; }
                 } else {
                     // Grid navigation (skips the recent row's empty pad cells).
                     if (b.right && !prev.right) {
@@ -1762,7 +1831,8 @@ int Ps2Frontend::pick() {
         // Does the active item's name overflow its cell? Only then must we keep
         // redrawing every field to animate the marquee (grid tabs only).
         bool marquee = false;
-        if (g_viewCount > 0 && !moved && !sidebarFocus && (activeTab == 0 || activeTab == 1)) {
+        if (g_viewCount > 0 && !moved && !sidebarFocus && !detailsFocus &&
+            (activeTab == 0 || activeTab == 1)) {
             const char* nm = hal::GameStorage::instance().nameAt(g_view[selected]);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
@@ -1770,31 +1840,33 @@ int Ps2Frontend::pick() {
         }
 
         // Render on demand: only when something changed -- navigation, a tab switch, a
-        // sidebar-focus change, a favourite toggle, a marquee, a decoded icon, or a
-        // new clock second.
+        // sidebar/details-focus change, a favourite toggle, a screen-size change, a
+        // marquee, a decoded icon, or a new clock second.
         const bool tabChanged = (activeTab != lastTab);
         const bool sbChanged  = (sidebarFocus != lastSbFocus) || (sidebarSel != lastSbSel);
+        const bool detChanged = (detailsFocus != lastDetailsFocus) || resChanged;
         const bool setChanged = (settingsSel != lastSettingsSel) || settingsChanged;
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || tabChanged || sbChanged || setChanged ||
+        if (firstFrame || moved || tabChanged || sbChanged || detChanged || setChanged ||
             favToggled || sortChanged || marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
             IconCache::instance().tick();
             render(g_viewCount, selected, topRow, activeTab, g_view,
-                   sidebarFocus, sidebarSel, settingsSel);
+                   sidebarFocus, sidebarSel, settingsSel, detailsFocus);
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-            lastSel         = selected;
-            lastTop         = topRow;
-            lastTab         = activeTab;
-            lastSbFocus     = sidebarFocus;
-            lastSbSel       = sidebarSel;
-            lastSettingsSel = settingsSel;
-            lastClockSec    = nowSec;
-            firstFrame      = false;
+            lastSel          = selected;
+            lastTop          = topRow;
+            lastTab          = activeTab;
+            lastSbFocus      = sidebarFocus;
+            lastSbSel        = sidebarSel;
+            lastDetailsFocus = detailsFocus;
+            lastSettingsSel  = settingsSel;
+            lastClockSec     = nowSec;
+            firstFrame       = false;
         }
         waitFrame();
     }

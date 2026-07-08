@@ -33,7 +33,9 @@ extern "C" {
 #include "../javacall/platform/Ps2Storage.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
 #include "../javacall/platform/Settings.hpp"
+#include "../javacall/platform/Resolutions.hpp"
 #include "../javacall/platform/SifLock.hpp"
+#include "../javacall/hal/LcdDevice.hpp"
 
 extern "C" {
 // MIDP / javacall entry points, all defined in libjvm.a (the merged MIDP archive).
@@ -41,6 +43,11 @@ int  javacall_events_init(void);
 int  javacall_create_event_queue_lock(void);
 void javanotify_start_java_with_arbitrary_args(int argc, char* argv[]);
 void JavaTask(void);
+
+// MIDP screen-buffer bridge (jcapp_export.c): re-reads javacall_lcd_get_screen into
+// gxj_system_screen_buffer. We call it to re-sync the MIDP rasterizer to a new canvas
+// size when a later game changes resolution (the VM's LCD is init'd only once).
+int  jcapp_get_screen_buffer(int hardwareId);
 
 // The game the native front-end picked, handed to GameLoader.chosenGame() (KNI in
 // GameLoaderKni.cpp). Defined there so the KNI TU owns the storage.
@@ -88,6 +95,23 @@ int main(int argc, char** argv) {
             break;   // user quit the launcher
         }
         ps2_chosen_game = idx;
+
+        // 1b) Apply this game's canvas resolution/orientation BEFORE the VM sizes it, so
+        //     getWidth/getHeight and the RGB565 raster match what the game expects (many
+        //     landscape titles are clipped by the default portrait canvas otherwise).
+        {
+            int rw = 0, rh = 0;
+            ps2::platform::Resolutions::instance().get(idx, &rw, &rh);
+            ps2::hal::LcdDevice::instance().setResolution(rw, rh);
+            // The VM's LCD is brought up only once (the VM persists across games). For the
+            // first game jcapp_init reads the size itself; for later games force the MIDP
+            // screen buffer to re-read our new geometry so its Canvas is sized correctly.
+            static bool lcdUp = false;
+            if (lcdUp) {
+                jcapp_get_screen_buffer(ps2::hal::LcdDevice::PRIMARY_ID);
+            }
+            lcdUp = true;
+        }
 
         // 2) Bring up MIDP once, lazily, only after a game has been chosen.
         static bool vmInitialized = false;
