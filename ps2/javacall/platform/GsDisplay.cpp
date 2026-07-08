@@ -86,22 +86,18 @@ bool GsDisplay::init() {
     dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
     dma_channel_fast_waits(DMA_CHANNEL_GIF);
 
-    // --- GS framebuffer + 2D draw environment ---
-    // Must hold draw_setup_environment (GIFTAG + 15 GS regs = 16 qwords) followed by
-    // draw_finish (GIFTAG + FINISH = 2 qwords) = 18 qwords. 20 matches the ps2sdk
-    // draw samples' environment packet and leaves margin (a 16-qword packet overran
-    // env->data and smashed the next heap chunk header -> a later free crashed).
-    packet_t* env = packet_init(20, PACKET_NORMAL);
-    if (env == 0) {
-        return false;
+    // --- GS framebuffers (double-buffered) ---
+    // Two identical TV framebuffers for tear-free double buffering. Each frame draws
+    // into the back buffer (frame_[drawIdx_]) while the CRTC scans out the front one;
+    // the 2D draw environment (FRAME/XYOFFSET/SCISSOR) is emitted per-frame in blit()
+    // targeting the current back buffer, so no one-time environment packet is needed.
+    for (int i = 0; i < 2; ++i) {
+        frame_[i].width   = SCR_W;
+        frame_[i].height  = SCR_H;
+        frame_[i].psm     = GS_PSM_32;
+        frame_[i].mask    = 0;
+        frame_[i].address = graph_vram_allocate(SCR_W, SCR_H, GS_PSM_32, GRAPH_ALIGN_PAGE);
     }
-    qword_t* q = env->data;
-
-    frame_.width   = SCR_W;
-    frame_.height  = SCR_H;
-    frame_.psm     = GS_PSM_32;
-    frame_.mask    = 0;
-    frame_.address = graph_vram_allocate(SCR_W, SCR_H, GS_PSM_32, GRAPH_ALIGN_PAGE);
 
     z_.enable  = 0;               // no z-buffer for 2D
     z_.method  = ZTEST_METHOD_GREATER;
@@ -109,15 +105,10 @@ bool GsDisplay::init() {
     z_.mask    = 1;
     z_.zsm     = 0;
 
-    // Tie the framebuffer to the TV read circuits.
-    graph_initialize(frame_.address, SCR_W, SCR_H, GS_PSM_32, 0, 0);
-
-    // Draw env: sets XYOFFSET so screen coords are plain 0..W / 0..H.
-    q = draw_setup_environment(q, 0, &frame_, &z_);
-    q = draw_finish(q);
-    dma_channel_send_normal(DMA_CHANNEL_GIF, env->data, q - env->data, 0, 0);
-    dma_wait_fast();
-    packet_free(env);
+    // Show buffer 0 first; draw into buffer 1 this frame, then flip. The draw target
+    // (FRAME) is (re)set to the current back buffer per-frame in blit().
+    graph_initialize(frame_[0].address, SCR_W, SCR_H, GS_PSM_32, 0, 0);
+    drawIdx_ = 1;
 
     initSampling(&lod_, &clut_);
 
@@ -131,39 +122,40 @@ bool GsDisplay::init() {
     return true;
 }
 
-// Shared upload + textured-sprite draw. Uploads a w x h RGBA5551 raster into @p tb
-// and draws @p rect, clearing the TV first.
-namespace {
-void blit(packet_t* xfer, packet_t* draw, const u16* raster, int w, int h,
-          texbuffer_t* tb, clutbuffer_t* clut, lod_t* lod, texrect_t* rect,
-          bool waitVsync) {
+// Shared upload + textured-sprite draw + tear-free flip. Uploads a w x h RGBA5551
+// raster into @p tb and draws @p rect over a cleared BACK buffer, then swaps that
+// buffer to the CRTC on the next vblank.
+void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect) {
     // Cache coherency before the DMA reads the EE RAM.
     const u32 bytes = (u32)w * (u32)h * sizeof(u16);
     SyncDCache((void*)raster, (u8*)raster + bytes);
 
     // Upload the raster -> VRAM texture.
-    qword_t* q = xfer->data;
+    qword_t* q = xfer_->data;
     q = draw_texture_transfer(q, (void*)raster, w, h, GS_PSM_16, tb->address, tb->width);
     q = draw_texture_flush(q);
-    dma_channel_send_chain(DMA_CHANNEL_GIF, xfer->data, q - xfer->data, 0, 0);
+    dma_channel_send_chain(DMA_CHANNEL_GIF, xfer_->data, q - xfer_->data, 0, 0);
     dma_wait_fast();
 
-    // Clear the TV and draw the textured sprite.
-    q = draw->data;
+    // Retarget drawing at the off-screen back buffer, clear it, draw the sprite.
+    q = draw_->data;
+    q = draw_setup_environment(q, 0, &frame_[drawIdx_], &z_);
     q = draw_clear(q, 0, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, 0x00, 0x00, 0x20);
-    q = draw_texture_sampling(q, 0, lod);
-    q = draw_texturebuffer(q, 0, tb, clut);
+    q = draw_texture_sampling(q, 0, &lod_);
+    q = draw_texturebuffer(q, 0, tb, &clut_);
     q = draw_rect_textured(q, 0, rect);
     q = draw_finish(q);
-    dma_channel_send_normal(DMA_CHANNEL_GIF, draw->data, q - draw->data, 0, 0);
+    dma_channel_send_normal(DMA_CHANNEL_GIF, draw_->data, q - draw_->data, 0, 0);
     dma_wait_fast();
-
     draw_wait_finish();
-    if (waitVsync) {
-        graph_wait_vsync();   // the fullscreen (menu) path paces on vsync itself
-    }
+
+    // Flip: point the read circuit at the freshly drawn buffer. DISPFB latches at the
+    // next vblank, so waiting for it makes the swap atomic (no visible tear), and the
+    // OTHER buffer becomes the target for the next frame.
+    graph_set_framebuffer_filtered(frame_[drawIdx_].address, SCR_W, GS_PSM_32, 0, 0);
+    graph_wait_vsync();
+    drawIdx_ ^= 1;
 }
-} // namespace
 
 void GsDisplay::present(const u16* rgba5551, int w, int h) {
     if (!ready_) {
@@ -178,7 +170,7 @@ void GsDisplay::present(const u16* rgba5551, int w, int h) {
         setRect(&rect_, dx, 0.0f, dx + dw, dh, (float)w, (float)h);
         gameTexReady_ = true;
     }
-    blit(xfer_, draw_, rgba5551, w, h, &texbuf_, &clut_, &lod_, &rect_, true);
+    blit(rgba5551, w, h, &texbuf_, &rect_);
 }
 
 void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
@@ -191,7 +183,7 @@ void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
         setRect(&fsRect_, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, (float)w, (float)h);
         fsTexReady_ = true;
     }
-    blit(xfer_, draw_, rgba5551, w, h, &fsTexbuf_, &clut_, &lod_, &fsRect_, false);
+    blit(rgba5551, w, h, &fsTexbuf_, &fsRect_);
 }
 
 } // namespace platform

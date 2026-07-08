@@ -7,8 +7,9 @@
 // is the only class the LCD path uses that touches ps2sdk.
 //
 // Reuses the Milestone-0 video path (src/main.c): graph_initialize + a GS_PSM_16
-// texture + draw_texture_transfer + draw_rect_textured, NEAREST-filtered. Single
-// buffered for now (the tear-free flip is roadmap M1.5).
+// texture + draw_texture_transfer + draw_rect_textured, NEAREST-filtered. Double
+// buffered: each present draws into the off-screen back buffer and flips it to the
+// CRTC on vblank, so the TV never scans out a half-drawn frame (no tearing).
 #ifndef PS2_JAVACALL_PLATFORM_GSDISPLAY_HPP
 #define PS2_JAVACALL_PLATFORM_GSDISPLAY_HPP
 
@@ -51,15 +52,20 @@ public:
 private:
     GsDisplay()
         : ready_(false), gameTexReady_(false), fsTexReady_(false),
-          xfer_(0), draw_(0) {}
+          drawIdx_(0), xfer_(0), draw_(0) {}
     GsDisplay(const GsDisplay&);
     GsDisplay& operator=(const GsDisplay&);
+
+    /// Upload @p raster into @p tb, draw @p rect over a cleared back buffer, then flip
+    /// that buffer to the CRTC on vblank. Shared by both present paths.
+    void blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect);
 
     bool ready_;         // framebuffer + environment up
     bool gameTexReady_;  // pillarbox game texture allocated
     bool fsTexReady_;    // fullscreen UI texture allocated
 
-    framebuffer_t frame_;
+    int  drawIdx_;       // back-buffer index (the one we draw into this frame)
+    framebuffer_t frame_[2];  // double-buffered TV framebuffers (draw back, show front)
     zbuffer_t     z_;
     lod_t         lod_;    // NEAREST sampling, shared by both textures
     clutbuffer_t  clut_;   // no CLUT, shared
