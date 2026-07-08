@@ -32,6 +32,9 @@ public:
     /// How many present games are favourited.
     int count() const;
 
+    /// Unfavourite everything and persist the (now empty) list.
+    void clear();
+
     /// Fill @p out (capacity @p cap) with the favourited game indices in ascending
     /// order; returns how many were written.
     int list(int* out, int cap) const;

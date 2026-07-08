@@ -100,6 +100,13 @@ int Favorites::count() const {
     return n;
 }
 
+void Favorites::clear() {
+    for (int i = 0; i < MAX_GAMES; ++i) {
+        fav_[i] = false;
+    }
+    save();
+}
+
 int Favorites::list(int* out, int cap) const {
     int n = 0;
     for (int g = 0; g < gameCount_ && n < cap; ++g) {

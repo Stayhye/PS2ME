@@ -26,6 +26,12 @@ public:
     /// Record that game @p game was just launched (moves it to the front) and persist.
     void push(int game);
 
+    /// How many recent games are currently remembered (present ones).
+    int count() const { return count_; }
+
+    /// Forget all recent games and persist the (now empty) list.
+    void clear();
+
 private:
     Recent();
     Recent(const Recent&);

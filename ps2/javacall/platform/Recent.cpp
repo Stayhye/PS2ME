@@ -105,6 +105,11 @@ void Recent::push(int game) {
     save();
 }
 
+void Recent::clear() {
+    count_ = 0;
+    save();
+}
+
 void Recent::save() const {
     char path[256];
     if (!Ps2Storage::instance().recentPath(path, (int)sizeof(path))) {

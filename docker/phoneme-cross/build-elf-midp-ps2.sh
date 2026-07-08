@@ -149,6 +149,7 @@ JC_SRCS="
     platform/IconCache.cpp
     platform/Favorites.cpp
     platform/Recent.cpp
+    platform/Settings.cpp
     platform/Ps2Frontend.cpp
 "
 JC_OBJS=""

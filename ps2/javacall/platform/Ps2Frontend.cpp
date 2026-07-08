@@ -25,6 +25,7 @@
 #include "IconCache.hpp"
 #include "Favorites.hpp"
 #include "Recent.hpp"
+#include "Settings.hpp"
 #include "Ps2Storage.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
@@ -636,7 +637,8 @@ void rebuildView(int activeTab, int count) {
 
     // ALL GAMES.
     int recent[COLS];
-    const int rc = Recent::instance().list(recent, COLS);
+    const int rc = Settings::instance().showRecent()
+                       ? Recent::instance().list(recent, COLS) : 0;
     g_recentBand = rc;
 
     int w = 0;
@@ -984,13 +986,15 @@ void drawDetails(int viewCount, int selected, const int* view) {
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
 }
 
-void drawFooter() {
+void drawFooter(int activeTab) {
     rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
     for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
     const int cy = FOOTER_Y + FOOTER_H / 2;
 
-    // One legend entry: a face-button glyph (drawn by kind) + its label.
-    static const char* labels[4] = { "LAUNCH", "BACK", "FAVORITE", "SORT BY..." };
+    // One legend entry: a face-button glyph (drawn by kind) + its label. The cross
+    // action reads "SELECT" on the SETTINGS tab, "LAUNCH" on the grid tabs.
+    const char* labels[4] = { activeTab == 2 ? "SELECT" : "LAUNCH",
+                              "BACK", "FAVORITE", "SORT BY..." };
     const int glyphW = 16;   // glyph column (centre at +7) before the label
     const int itemGap = 26;
 
@@ -1022,17 +1026,66 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
+const int SETTINGS_COUNT = 4;
+
+// The SETTINGS tab: a vertical list of options (two actions + two toggles). @p sel is
+// the highlighted row.
+void drawSettings(int sel) {
+    const int left  = GRID_X0;
+    const int right = DET_X + DET_W;
+    const int rowH = 42, gap = 12;
+    const int totalH = SETTINGS_COUNT * rowH + (SETTINGS_COUNT - 1) * gap;
+    int y = CONTENT_Y + ((CONTENT_BOTTOM - CONTENT_Y) - totalH) / 2;
+
+    for (int i = 0; i < SETTINGS_COUNT; ++i) {
+        const bool s = (i == sel);
+        if (s) {
+            roundRectFillA(left - 2, y - 2, (right - left) + 4, rowH + 4, 10, 90, 215, 255, 255);
+            roundRectVGrad(left, y, right - left, rowH, 9, 46, 88, 148, 30, 54, 100);
+        } else {
+            roundRectVGrad(left, y, right - left, rowH, 9, 40, 60, 104, 26, 42, 78);
+        }
+
+        const char* label = "";
+        char value[24];
+        value[0] = '\0';
+        switch (i) {
+            case 0: label = "Clear recent games";
+                    snprintf(value, sizeof(value), "%d saved", Recent::instance().count());
+                    break;
+            case 1: label = "Clear favorites";
+                    snprintf(value, sizeof(value), "%d saved", Favorites::instance().count());
+                    break;
+            case 2: label = "Show recent row";
+                    snprintf(value, sizeof(value), "%s", Settings::instance().showRecent() ? "On" : "Off");
+                    break;
+            case 3: label = "Default sort";
+                    snprintf(value, sizeof(value), "%s", Settings::instance().defaultSort() == 1 ? "Z-A" : "A-Z");
+                    break;
+        }
+        const int cy = y + rowH / 2;
+        drawTextVC(left + 14, cy, label, s ? 255 : 220, s ? 255 : 228, 255, 17.0f);
+        const int vw = textWidth(value, 15.0f);
+        drawTextVC(right - 14 - vw, cy, value, s ? 235 : 150, s ? 245 : 185, 255, 15.0f);
+        y += rowH + gap;
+    }
+
+    const char* hint = "X: select / toggle";
+    const int hw = textWidth(hint, 13.0f);
+    drawText(left + (right - left - hw) / 2, y + 2, hint, 150, 180, 215, 13.0f);
+}
+
 void render(int viewCount, int selected, int topRow, int activeTab, const int* view,
-            bool sidebarFocus, int sidebarSel) {
+            bool sidebarFocus, int sidebarSel, int settingsSel) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
     const int curGame = viewCount > 0 ? view[selected] : -1;
     drawSidebar(curGame, sidebarFocus, sidebarSel);
-    drawFooter();
+    drawFooter(activeTab);
 
-    if (activeTab == 2) {                       // SETTINGS: not implemented yet
-        drawContentMessage("Settings -- coming soon");
+    if (activeTab == 2) {                       // SETTINGS
+        drawSettings(settingsSel);
         return;
     }
     if (activeTab == 1 && viewCount <= 0) {     // FAVORITES: empty
@@ -1233,6 +1286,8 @@ int Ps2Frontend::pick() {
     buildInitials(count);         // alphabet sidebar contents (once)
     Favorites::instance().load(count);   // persisted favourites -> game indices
     Recent::instance().load(count);      // recently-launched games -> game indices
+    Settings::instance().load();         // launcher preferences
+    g_sortMode = Settings::instance().defaultSort();   // startup sort order
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
     // the controller exactly once; reading it here drives no VM code path. Do the
@@ -1266,6 +1321,8 @@ int Ps2Frontend::pick() {
     int  sidebarSel = 0;          // highlighted letter while focused
     bool lastSbFocus = false;
     int  lastSbSel = -1;
+    int  settingsSel = 0;         // highlighted SETTINGS row
+    int  lastSettingsSel = -1;
     bool firstFrame = true;
     hal::PadButtons prev;         // all-false initial snapshot
     rebuildView(activeTab, count);   // initial view (all games)
@@ -1275,18 +1332,38 @@ int Ps2Frontend::pick() {
         // (expensive) redraw below.
         bool favToggled = false;
         bool sortChanged = false;
+        bool settingsChanged = false;
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
-            // Tab switching (L1/R1): resets the view + selection + sidebar focus.
+            // Tab switching (L1/R1): resets the view + selection + sidebar/settings focus.
             if (b.r1 && !prev.r1 && activeTab < 2) {
                 activeTab++; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false;
+                selected = 0; topRow = 0; sidebarFocus = false; settingsSel = 0;
             }
             if (b.l1 && !prev.l1 && activeTab > 0) {
                 activeTab--; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false;
+                selected = 0; topRow = 0; sidebarFocus = false; settingsSel = 0;
             }
-            if (g_viewCount > 0 && (activeTab == 0 || activeTab == 1)) {
+            if (activeTab == 2) {
+                // Settings navigation: up/down move; cross activates the row.
+                if (b.up   && !prev.up   && settingsSel > 0)                   { settingsSel--; }
+                if (b.down && !prev.down && settingsSel < SETTINGS_COUNT - 1)  { settingsSel++; }
+                if (b.cross && !prev.cross) {
+                    switch (settingsSel) {
+                        case 0: Recent::instance().clear(); break;
+                        case 1: Favorites::instance().clear(); break;
+                        case 2: Settings::instance().setShowRecent(
+                                    !Settings::instance().showRecent()); break;
+                        case 3: {
+                            const int m = Settings::instance().defaultSort() ^ 1;
+                            Settings::instance().setDefaultSort(m);
+                            g_sortMode = m;
+                            break;
+                        }
+                    }
+                    settingsChanged = true;
+                }
+            } else if (g_viewCount > 0 && (activeTab == 0 || activeTab == 1)) {
                 if (sidebarFocus) {
                     // Alphabet column focused: up/down pick a letter; cross/right jumps
                     // to it and returns to the grid; left cancels.
@@ -1397,24 +1474,27 @@ int Ps2Frontend::pick() {
         // new clock second.
         const bool tabChanged = (activeTab != lastTab);
         const bool sbChanged  = (sidebarFocus != lastSbFocus) || (sidebarSel != lastSbSel);
+        const bool setChanged = (settingsSel != lastSettingsSel) || settingsChanged;
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || tabChanged || sbChanged || favToggled || sortChanged ||
-            marquee || dirty || clockTick) {
+        if (firstFrame || moved || tabChanged || sbChanged || setChanged ||
+            favToggled || sortChanged || marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
             IconCache::instance().tick();
-            render(g_viewCount, selected, topRow, activeTab, g_view, sidebarFocus, sidebarSel);
+            render(g_viewCount, selected, topRow, activeTab, g_view,
+                   sidebarFocus, sidebarSel, settingsSel);
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-            lastSel      = selected;
-            lastTop      = topRow;
-            lastTab      = activeTab;
-            lastSbFocus  = sidebarFocus;
-            lastSbSel    = sidebarSel;
-            lastClockSec = nowSec;
-            firstFrame   = false;
+            lastSel         = selected;
+            lastTop         = topRow;
+            lastTab         = activeTab;
+            lastSbFocus     = sidebarFocus;
+            lastSbSel       = sidebarSel;
+            lastSettingsSel = settingsSel;
+            lastClockSec    = nowSec;
+            firstFrame      = false;
         }
         waitFrame();
     }

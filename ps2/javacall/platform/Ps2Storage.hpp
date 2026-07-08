@@ -49,6 +49,10 @@ public:
     /// returns false if it would not fit.
     bool recentPath(char* out, int cap);
 
+    /// Path of the launcher settings file: "<bootdir>settings.txt" (beside games/), or
+    /// "host:settings.txt" (dev fallback). Writes into @p out (cap); false if too long.
+    bool settingsPath(char* out, int cap);
+
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }
 
