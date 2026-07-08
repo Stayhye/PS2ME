@@ -31,6 +31,7 @@ extern "C" {
 
 #include "../javacall/platform/Ps2Frontend.hpp"
 #include "../javacall/platform/Ps2Storage.hpp"
+#include "../javacall/platform/Ps2MemCard.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
 #include "../javacall/platform/Settings.hpp"
 #include "../javacall/platform/Resolutions.hpp"
@@ -71,6 +72,14 @@ int main(int argc, char** argv) {
     // before the menu lists games.
     const char* bootPath = (argc > 0 && argv != 0) ? argv[0] : 0;
     ps2::platform::Ps2Storage::instance().mount(bootPath);
+
+    // Bring up the memory card (ps2_drivers mcman/mcserv + libmc) right after storage, so
+    // the launcher's own state -- favourites, recents, settings, per-game resolutions --
+    // persists on the card rather than the USB stick. This is what lets the program boot
+    // from a read-only CDVD disc and still remember the user's choices. Must follow mount()
+    // (SIF up, IOP reset done on USB boot) and stay single-threaded (before the icon
+    // worker). With no card present the config classes fall back to the boot directory.
+    ps2::platform::Ps2MemCard::instance().init();
 
     // Bring up audio (ps2_drivers libsd + audsrv) AFTER storage: the audio IOP modules
     // must load after Ps2Storage's USB-boot IOP reset, and this is still single-threaded

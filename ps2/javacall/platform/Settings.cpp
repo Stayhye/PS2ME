@@ -1,14 +1,11 @@
 // PS2 JavaCall port — platform layer. Settings implementation.
 //
-// A tiny key=value file (<bootdir>settings.txt): "recent=0|1", "sort=0|1",
-// "debug=0|1". See Settings.hpp for the model.
+// A tiny key=value file "settings.txt" ("recent=0|1", "sort=0|1", "debug=0|1"), persisted
+// on the memory card (falling back to the boot directory) via Ps2MemCard. See Settings.hpp.
 #include "Settings.hpp"
 
-#include "Ps2Storage.hpp"
-#include "SifLock.hpp"
+#include "Ps2MemCard.hpp"
 
-#include <fcntl.h>      // open, O_RDONLY / O_WRONLY / O_CREAT / O_TRUNC
-#include <unistd.h>     // read, write, close
 #include <stdio.h>      // snprintf
 #include <string.h>     // strncmp
 
@@ -28,22 +25,11 @@ void Settings::load() {
     debugMode_   = false;
     loaded_ = true;
 
-    char path[256];
-    if (!Ps2Storage::instance().settingsPath(path, (int)sizeof(path))) {
-        return;
-    }
-    SifGuard guard;
-    const int fd = ::open(path, O_RDONLY);
-    if (fd < 0) {
+    char buf[512];
+    int total = Ps2MemCard::instance().configRead("settings.txt", buf, (int)sizeof(buf) - 1);
+    if (total <= 0) {
         return;             // no file -> defaults
     }
-    char buf[512];
-    int total = 0, r = 0;
-    while (total < (int)sizeof(buf) - 1 &&
-           (r = (int)::read(fd, buf + total, sizeof(buf) - 1 - total)) > 0) {
-        total += r;
-    }
-    ::close(fd);
     buf[total] = '\0';
 
     // Parse "key=value" lines.
@@ -81,23 +67,12 @@ void Settings::setDebugMode(bool on) {
 }
 
 void Settings::save() const {
-    char path[256];
-    if (!Ps2Storage::instance().settingsPath(path, (int)sizeof(path))) {
-        return;
+    char buf[96];
+    const int n = snprintf(buf, (int)sizeof(buf), "recent=%d\nsort=%d\ndebug=%d\n",
+                           showRecent_ ? 1 : 0, defaultSort_, debugMode_ ? 1 : 0);
+    if (n > 0) {
+        Ps2MemCard::instance().configWrite("settings.txt", buf, n);
     }
-    SifGuard guard;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        return;
-    }
-    char line[32];
-    int n = snprintf(line, (int)sizeof(line), "recent=%d\n", showRecent_ ? 1 : 0);
-    ::write(fd, line, n);
-    n = snprintf(line, (int)sizeof(line), "sort=%d\n", defaultSort_);
-    ::write(fd, line, n);
-    n = snprintf(line, (int)sizeof(line), "debug=%d\n", debugMode_ ? 1 : 0);
-    ::write(fd, line, n);
-    ::close(fd);
 }
 
 } // namespace platform

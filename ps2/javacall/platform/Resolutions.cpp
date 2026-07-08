@@ -1,16 +1,14 @@
 // PS2 JavaCall port — platform layer. Resolutions implementation.
 //
-// Per-game canvas size, stored by JAR name (one "name=WxH" line) in
-// <bootdir>resolutions.txt, resolved to game indices at load(). See Resolutions.hpp.
+// Per-game canvas size, stored by JAR name (one "name=WxH" line) in "resolutions.txt",
+// persisted on the memory card (falling back to the boot directory) via Ps2MemCard,
+// resolved to game indices at load(). See Resolutions.hpp.
 #include "Resolutions.hpp"
 
-#include "Ps2Storage.hpp"
-#include "SifLock.hpp"
+#include "Ps2MemCard.hpp"
 #include "../hal/GameStorage.hpp"
 
-#include <fcntl.h>      // open, O_RDONLY / O_WRONLY / O_CREAT / O_TRUNC
-#include <unistd.h>     // read, write, close
-#include <stdio.h>      // snprintf
+#include <stdio.h>      // snprintf, sscanf
 #include <string.h>     // strcmp, strlen
 
 namespace ps2 {
@@ -115,22 +113,11 @@ void Resolutions::load(int gameCount) {
         idx_[g] = def_[g];
     }
 
-    char path[256];
-    if (!Ps2Storage::instance().resolutionsPath(path, (int)sizeof(path))) {
-        return;
-    }
-    SifGuard guard;   // file I/O touches SIF
-    const int fd = ::open(path, O_RDONLY);
-    if (fd < 0) {
+    static char buf[64 * 1024];
+    int total = Ps2MemCard::instance().configRead("resolutions.txt", buf, (int)sizeof(buf) - 1);
+    if (total <= 0) {
         return;       // no overrides yet -> auto-defaults stand
     }
-    static char buf[64 * 1024];
-    int total = 0, r = 0;
-    while (total < (int)sizeof(buf) - 1 &&
-           (r = (int)::read(fd, buf + total, sizeof(buf) - 1 - total)) > 0) {
-        total += r;
-    }
-    ::close(fd);
     buf[total] = '\0';
 
     // Lines "name=WxH": split on the LAST '=' (names may contain '='), resolve the name
@@ -190,16 +177,10 @@ void Resolutions::cycle(int game, int delta) {
 }
 
 void Resolutions::save() const {
-    char path[256];
-    if (!Ps2Storage::instance().resolutionsPath(path, (int)sizeof(path))) {
-        return;
-    }
-    SifGuard guard;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        return;
-    }
-    // Persist only games that deviate from their filename auto-default.
+    // Build the whole file, then persist it in one write. Only games that deviate from
+    // their filename auto-default are stored.
+    static char buf[64 * 1024];
+    int len = 0;
     for (int g = 0; g < gameCount_; ++g) {
         if (idx_[g] == def_[g]) {
             continue;
@@ -212,11 +193,13 @@ void Resolutions::save() const {
         preset(idx_[g], &w, &h);
         char line[320];
         const int n = snprintf(line, (int)sizeof(line), "%s=%dx%d\n", nm, w, h);
-        if (n > 0) {
-            ::write(fd, line, n < (int)sizeof(line) ? n : (int)sizeof(line) - 1);
+        if (n <= 0 || len + n > (int)sizeof(buf)) {
+            break;
         }
+        memcpy(buf + len, line, n);
+        len += n;
     }
-    ::close(fd);
+    Ps2MemCard::instance().configWrite("resolutions.txt", buf, len);
 }
 
 } // namespace platform

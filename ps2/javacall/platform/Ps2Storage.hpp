@@ -39,24 +39,12 @@ public:
     /// Writes into @p out (capacity @p cap); returns false if it would not fit.
     bool bankPath(char* out, int cap);
 
-    /// Path of the favourites list file: "<bootdir>favorites.txt" (beside games/), or
-    /// "host:favorites.txt" when the boot dir wasn't resolved (dev fallback under
-    /// PCSX2). Writes into @p out (capacity @p cap); returns false if it would not fit.
-    bool favoritesPath(char* out, int cap);
-
-    /// Path of the recently-launched list file: "<bootdir>recent.txt" (beside games/),
-    /// or "host:recent.txt" (dev fallback). Writes into @p out (capacity @p cap);
-    /// returns false if it would not fit.
-    bool recentPath(char* out, int cap);
-
-    /// Path of the launcher settings file: "<bootdir>settings.txt" (beside games/), or
-    /// "host:settings.txt" (dev fallback). Writes into @p out (cap); false if too long.
-    bool settingsPath(char* out, int cap);
-
-    /// Path of the per-game resolution overrides file: "<bootdir>resolutions.txt" (beside
-    /// games/), or "host:resolutions.txt" (dev fallback). Writes @p out (cap); false if
-    /// too long.
-    bool resolutionsPath(char* out, int cap);
+    /// Path of a boot-directory data file named @p name: "<bootdir><name>" (beside games/),
+    /// or "host:<name>" when the boot dir wasn't resolved (dev fallback under PCSX2). Used
+    /// as the disk fallback for launcher config (favorites.txt / recent.txt / settings.txt
+    /// / resolutions.txt) when no memory card is present -- see Ps2MemCard. Writes into
+    /// @p out (capacity @p cap); returns false if it would not fit.
+    bool diskPath(const char* name, char* out, int cap);
 
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }

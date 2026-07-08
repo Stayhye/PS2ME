@@ -293,32 +293,11 @@ bool Ps2Storage::bankPath(char* out, int cap) {
     return n > 0 && n < cap;
 }
 
-bool Ps2Storage::favoritesPath(char* out, int cap) {
+bool Ps2Storage::diskPath(const char* name, char* out, int cap) {
     // Sits beside the games (same resolved boot dir); host: fallback like bankPath().
     const int n = (baseDir_[0] != '\0')
-                      ? snprintf(out, cap, "%sfavorites.txt", baseDir_)
-                      : snprintf(out, cap, "host:favorites.txt");
-    return n > 0 && n < cap;
-}
-
-bool Ps2Storage::recentPath(char* out, int cap) {
-    const int n = (baseDir_[0] != '\0')
-                      ? snprintf(out, cap, "%srecent.txt", baseDir_)
-                      : snprintf(out, cap, "host:recent.txt");
-    return n > 0 && n < cap;
-}
-
-bool Ps2Storage::settingsPath(char* out, int cap) {
-    const int n = (baseDir_[0] != '\0')
-                      ? snprintf(out, cap, "%ssettings.txt", baseDir_)
-                      : snprintf(out, cap, "host:settings.txt");
-    return n > 0 && n < cap;
-}
-
-bool Ps2Storage::resolutionsPath(char* out, int cap) {
-    const int n = (baseDir_[0] != '\0')
-                      ? snprintf(out, cap, "%sresolutions.txt", baseDir_)
-                      : snprintf(out, cap, "host:resolutions.txt");
+                      ? snprintf(out, cap, "%s%s", baseDir_, name)
+                      : snprintf(out, cap, "host:%s", name);
     return n > 0 && n < cap;
 }
 

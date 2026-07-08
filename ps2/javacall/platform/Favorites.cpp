@@ -1,15 +1,14 @@
 // PS2 JavaCall port — platform layer. Favorites implementation.
 //
-// A game is stored by JAR name (one per line) in <bootdir>favorites.txt, resolved to
-// game indices against the current list at load(). See Favorites.hpp for the model.
+// A game is stored by JAR name (one per line) in "favorites.txt", persisted on the memory
+// card (falling back to the boot directory) via Ps2MemCard, resolved to game indices
+// against the current list at load(). See Favorites.hpp for the model.
 #include "Favorites.hpp"
 
-#include "Ps2Storage.hpp"
-#include "SifLock.hpp"
+#include "Ps2MemCard.hpp"
 #include "../hal/GameStorage.hpp"
 
-#include <fcntl.h>      // open, O_RDONLY / O_WRONLY / O_CREAT / O_TRUNC
-#include <unistd.h>     // read, write, close
+#include <stdio.h>      // snprintf
 #include <string.h>     // strcmp, strlen
 
 namespace ps2 {
@@ -33,23 +32,11 @@ void Favorites::load(int gameCount) {
     }
     loaded_ = true;
 
-    char path[256];
-    if (!Ps2Storage::instance().favoritesPath(path, (int)sizeof(path))) {
-        return;
-    }
-
-    SifGuard guard;   // file I/O touches SIF
-    const int fd = ::open(path, O_RDONLY);
-    if (fd < 0) {
+    static char buf[64 * 1024];       // the list is small; read it whole
+    int total = Ps2MemCard::instance().configRead("favorites.txt", buf, (int)sizeof(buf) - 1);
+    if (total <= 0) {
         return;       // no file yet -> no favourites
     }
-    static char buf[64 * 1024];       // the list is small; read it whole
-    int total = 0, r = 0;
-    while (total < (int)sizeof(buf) - 1 &&
-           (r = (int)::read(fd, buf + total, sizeof(buf) - 1 - total)) > 0) {
-        total += r;
-    }
-    ::close(fd);
     buf[total] = '\0';
 
     // One JAR name per line; resolve each to a game index (linear -- few favourites).
@@ -118,15 +105,10 @@ int Favorites::list(int* out, int cap) const {
 }
 
 void Favorites::save() const {
-    char path[256];
-    if (!Ps2Storage::instance().favoritesPath(path, (int)sizeof(path))) {
-        return;
-    }
-    SifGuard guard;   // serialize with the icon worker's SIF I/O
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        return;
-    }
+    // Build the whole "name\n" list, then persist it in one write (the memory card has no
+    // streaming append; it also lets an empty list write a legitimately empty file).
+    static char buf[64 * 1024];
+    int len = 0;
     for (int g = 0; g < gameCount_; ++g) {
         if (!fav_[g]) {
             continue;
@@ -135,10 +117,15 @@ void Favorites::save() const {
         if (nm == 0 || nm[0] == '\0') {
             continue;
         }
-        ::write(fd, nm, (int)strlen(nm));
-        ::write(fd, "\n", 1);
+        const int nl = (int)strlen(nm);
+        if (len + nl + 1 > (int)sizeof(buf)) {
+            break;                              // out of room (pathological); keep what fits
+        }
+        memcpy(buf + len, nm, nl);
+        len += nl;
+        buf[len++] = '\n';
     }
-    ::close(fd);
+    Ps2MemCard::instance().configWrite("favorites.txt", buf, len);
 }
 
 } // namespace platform

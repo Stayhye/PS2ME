@@ -1,15 +1,14 @@
 // PS2 JavaCall port — platform layer. Recent implementation.
 //
 // Most-recently-launched games stored by JAR name (one per line, most-recent first) in
-// <bootdir>recent.txt, resolved to game indices at load(). See Recent.hpp.
+// "recent.txt", persisted on the memory card (falling back to the boot directory) via
+// Ps2MemCard, resolved to game indices at load(). See Recent.hpp.
 #include "Recent.hpp"
 
-#include "Ps2Storage.hpp"
-#include "SifLock.hpp"
+#include "Ps2MemCard.hpp"
 #include "../hal/GameStorage.hpp"
 
-#include <fcntl.h>      // open, O_RDONLY / O_WRONLY / O_CREAT / O_TRUNC
-#include <unistd.h>     // read, write, close
+#include <stdio.h>      // snprintf
 #include <string.h>     // strcmp, strlen
 
 namespace ps2 {
@@ -26,23 +25,11 @@ void Recent::load(int gameCount) {
     gameCount_ = gameCount < 0 ? 0 : gameCount;
     count_ = 0;
 
-    char path[256];
-    if (!Ps2Storage::instance().recentPath(path, (int)sizeof(path))) {
-        return;
-    }
-
-    SifGuard guard;   // file I/O touches SIF
-    const int fd = ::open(path, O_RDONLY);
-    if (fd < 0) {
+    static char buf[16 * 1024];
+    int total = Ps2MemCard::instance().configRead("recent.txt", buf, (int)sizeof(buf) - 1);
+    if (total <= 0) {
         return;       // no history yet
     }
-    static char buf[16 * 1024];
-    int total = 0, r = 0;
-    while (total < (int)sizeof(buf) - 1 &&
-           (r = (int)::read(fd, buf + total, sizeof(buf) - 1 - total)) > 0) {
-        total += r;
-    }
-    ::close(fd);
     buf[total] = '\0';
 
     // One JAR name per line, most-recent first; resolve each to a present game index.
@@ -111,24 +98,23 @@ void Recent::clear() {
 }
 
 void Recent::save() const {
-    char path[256];
-    if (!Ps2Storage::instance().recentPath(path, (int)sizeof(path))) {
-        return;
-    }
-    SifGuard guard;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        return;
-    }
+    // Build the whole "name\n" list (most-recent first), then persist it in one write.
+    char buf[16 * 1024];
+    int len = 0;
     for (int i = 0; i < count_; ++i) {
         const char* nm = hal::GameStorage::instance().nameAt(recent_[i]);
         if (nm == 0 || nm[0] == '\0') {
             continue;
         }
-        ::write(fd, nm, (int)strlen(nm));
-        ::write(fd, "\n", 1);
+        const int nl = (int)strlen(nm);
+        if (len + nl + 1 > (int)sizeof(buf)) {
+            break;
+        }
+        memcpy(buf + len, nm, nl);
+        len += nl;
+        buf[len++] = '\n';
     }
-    ::close(fd);
+    Ps2MemCard::instance().configWrite("recent.txt", buf, len);
 }
 
 } // namespace platform
