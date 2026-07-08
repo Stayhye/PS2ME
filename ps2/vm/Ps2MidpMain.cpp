@@ -32,6 +32,7 @@ extern "C" {
 #include "../javacall/platform/Ps2Frontend.hpp"
 #include "../javacall/platform/Ps2Storage.hpp"
 #include "../javacall/platform/Ps2MemCard.hpp"
+#include "../javacall/platform/Ps2SaveIcon.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
 #include "../javacall/platform/Settings.hpp"
 #include "../javacall/platform/Resolutions.hpp"
@@ -80,6 +81,12 @@ int main(int argc, char** argv) {
     // (SIF up, IOP reset done on USB boot) and stay single-threaded (before the icon
     // worker). With no card present the config classes fall back to the boot directory.
     ps2::platform::Ps2MemCard::instance().init();
+
+    // Give the launcher's /PS2ME directory a proper PS2 "save" appearance -- an icon.sys
+    // plus a 3D icon textured with the PS2ME logo -- so the console's OSD browser lists it
+    // with a real icon and title instead of flagging it as "Corrupted Data". No-op when no
+    // card is present; writes once per icon version (skips the rewrite once installed).
+    ps2::platform::Ps2SaveIcon::installAppIcon("PS2ME");
 
     // Bring up audio (ps2_drivers libsd + audsrv) AFTER storage: the audio IOP modules
     // must load after Ps2Storage's USB-boot IOP reset, and this is still single-threaded
