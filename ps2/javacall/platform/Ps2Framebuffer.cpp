@@ -44,6 +44,13 @@ void Ps2Framebuffer::present() {
     if (raster_ == 0 || gsBuf_ == 0) {
         return;
     }
+    // Debug mode: the front-end composites a split view (game on the left, the full app
+    // log on the right) and presents it itself -- we are done for this frame.
+    if (Ps2Frontend::instance().debugPresent(
+            reinterpret_cast<const unsigned short*>(raster_), width_, height_)) {
+        return;
+    }
+
     // The game is now drawing its own frames: stop the native launch-trace overlay so
     // it no longer clobbers the game's screen (no-op if it was never enabled).
     Ps2Frontend::instance().logEnable(false);

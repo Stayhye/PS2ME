@@ -1185,14 +1185,14 @@ bool ensureVideo() {
     return GsDisplay::instance().init();
 }
 
-// --- On-screen launch log (real-HW diagnostics) -----------------------------------
-// The VM's stdout (System.out via javacall_print -> StdoutSink) is teed here during
-// the launch window so the [Launcher] milestones + any exception traces render on the
-// native GS -- the only console left once the USB IOP reset kills the SIF tty. Bytes
-// are buffered into lines; each newline pushes a line and repaints. Bounded, no heap.
-const int LOG_TITLE_H  = 46;
-const int LOG_MAX_LINES = 22;    // fits 640x448 below the title at 17px stride
-const int LOG_LINE_CAP  = 96;    // long lines just clip to the raster width
+// --- On-screen application log (real-HW diagnostics) ------------------------------
+// The VM's stdout (System.out + VM diagnostics via pcsl_print -> javacall_print ->
+// StdoutSink, and our own javacall_print calls) is teed here so it renders on the native
+// GS -- the only console left once the USB IOP reset kills the SIF tty. Bytes are
+// buffered into lines; the debug split view (debugPresent / debugSplitRender) shows the
+// tail of this rolling buffer beside the running game. Bounded, no heap.
+const int LOG_MAX_LINES = 40;    // rolling scrollback; the view shows the tail that fits
+const int LOG_LINE_CAP  = 96;    // long lines just clip to the panel width
 
 char g_logLines[LOG_MAX_LINES][LOG_LINE_CAP];
 int  g_logCount = 0;             // completed lines stored
@@ -1201,24 +1201,6 @@ int  g_logCur   = 0;             // chars in g_logBuild
 
 // Active launch overlay: 0 = none, 1 = raw debug trace, 2 = friendly loading screen.
 int  g_launchMode = 0;
-
-void logRender() {
-    if (g_ras == 0 || !g_fontOk) {
-        return;
-    }
-    fillRect(0, 0, g_w, g_h, rgba5551(16, 18, 28));
-    drawText(MARGIN, 8, "PS2ME - launching game", 210, 220, 235, 30.0f);
-    int ly = LOG_TITLE_H + 8;
-    for (int i = 0; i < g_logCount; ++i) {
-        drawText(MARGIN, ly, g_logLines[i], 190, 205, 225, 15.0f);
-        ly += 17;
-    }
-    if (g_logCur > 0 && g_logCount < LOG_MAX_LINES) {
-        g_logBuild[g_logCur] = '\0';          // show the partial line in flight too
-        drawText(MARGIN, ly, g_logBuild, 190, 205, 225, 15.0f);
-    }
-    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-}
 
 void logPushLine() {
     g_logBuild[g_logCur] = '\0';
@@ -1349,6 +1331,143 @@ void loadingFeed(const char* s, int len) {
     }
 }
 
+// --- Debug split view (game left, full app log right) -----------------------------
+// With "Debug mode" on, each game frame is composited here instead of shown fullscreen:
+// the running game (aspect-preserved) fills the left half and the rolling application
+// log (the same g_logLines buffer, TTY-style) fills the right half. Lets a developer
+// watch the game and its stdout side by side on real hardware, where the SIF tty is gone.
+const int SPLIT_X = 320;   // divider: left half = game, right half = log (screen / 2)
+
+// The most recent game frame, cached so a log line arriving between game frames can
+// re-render the split with the last picture (null until the game draws its first frame).
+const unsigned short* g_dbgRaster = 0;
+int g_dbgW = 0, g_dbgH = 0;
+
+// Nearest-neighbour scale the game's RGB565 raster into a g_ras rect, converting to the
+// GS-native RGBA5551 (R low, G, B, alpha set) -- same channel layout Ps2Framebuffer uses.
+void blitScaled565(const unsigned short* src, int sw, int sh,
+                   int dx, int dy, int dw, int dh) {
+    if (src == 0 || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+        return;
+    }
+    for (int y = 0; y < dh; ++y) {
+        const int py = dy + y;
+        if (py < 0 || py >= g_h) continue;
+        const int sy = y * sh / dh;
+        const unsigned short* srow = src + sy * sw;
+        u16* drow = g_ras + py * g_w + dx;
+        for (int x = 0; x < dw; ++x) {
+            const int px = dx + x;
+            if (px < 0 || px >= g_w) continue;
+            const unsigned p = srow[x * sw / dw];
+            const unsigned r = (p >> 11) & 0x1F;   // RGB565 -> 5551 (green drops its LSB)
+            const unsigned g = (p >> 6)  & 0x1F;
+            const unsigned b =  p        & 0x1F;
+            drow[x] = (u16)(r | (g << 5) | (b << 10) | 0x8000);
+        }
+    }
+}
+
+// A wrapped display row: a slice [p, p+n) of a stored log line. The log buffers stay
+// valid for the whole render, so rows point into them instead of copying.
+struct LogRow { const char* p; int n; };
+
+// Append a row, dropping the oldest when full so the array always holds the newest rows.
+void logRowAppend(LogRow* rows, int cap, int* count, const char* p, int n) {
+    if (*count < cap) {
+        rows[*count].p = p; rows[*count].n = n; ++(*count);
+    } else {
+        for (int k = 1; k < cap; ++k) rows[k - 1] = rows[k];
+        rows[cap - 1].p = p; rows[cap - 1].n = n;
+    }
+}
+
+// Word-wrap a null-terminated log line to @p maxW pixels at @p pxh, appending each visual
+// row. Breaks at the last space that fits (hard-breaks when a word is too long), preserves
+// blank lines, and always emits at least one character per row (never loops forever).
+void logWrap(const char* s, float pxh, int maxW, LogRow* rows, int cap, int* count) {
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, pxh);
+    int len = 0;
+    while (s[len] != '\0') ++len;
+    if (len == 0) {
+        logRowAppend(rows, cap, count, s, 0);      // keep blank lines
+        return;
+    }
+    int start = 0;
+    while (start < len) {
+        float wpx = 0.0f;
+        int i = start, lastSpace = -1;
+        while (i < len) {
+            int adv = 0, lsb = 0;
+            stbtt_GetCodepointHMetrics(&g_font, (unsigned char)s[i], &adv, &lsb);
+            const float cw = adv * scale;
+            if (wpx + cw > (float)maxW && i > start) break;
+            if (s[i] == ' ') lastSpace = i;
+            wpx += cw;
+            ++i;
+        }
+        const int end = (i < len && lastSpace > start) ? lastSpace : i;
+        logRowAppend(rows, cap, count, s + start, end - start);
+        start = end;
+        while (start < len && s[start] == ' ') ++start;   // swallow the break's spaces
+    }
+}
+
+void debugSplitRender(const unsigned short* raster, int w, int h) {
+    if (g_ras == 0 || !g_fontOk) {
+        return;
+    }
+    // Left half: black stage for the game. Right half: TTY-dark log panel + divider.
+    fillRect(0, 0, SPLIT_X, g_h, rgba5551(0, 0, 0));
+    fillRect(SPLIT_X, 0, g_w - SPLIT_X, g_h, rgba5551(14, 16, 24));
+    fillRect(SPLIT_X - 1, 0, 2, g_h, rgba5551(60, 90, 140));
+
+    // Game, aspect-preserved and centred in the left region (2px inset). Before the game
+    // draws its first frame the left half shows a "Loading..." placeholder.
+    if (raster != 0 && w > 0 && h > 0) {
+        const int rw = SPLIT_X - 4, rh = g_h - 4;
+        int dw = rw, dh = h * rw / w;
+        if (dh > rh) { dh = rh; dw = w * rh / h; }
+        blitScaled565(raster, w, h, 2 + (rw - dw) / 2, 2 + (rh - dh) / 2, dw, dh);
+    } else {
+        const int tw = textWidth("Loading...", 22.0f);
+        drawText((SPLIT_X - tw) / 2, g_h / 2 - 14, "Loading...", 200, 214, 235, 22.0f);
+    }
+
+    // Right half: the rolling app log, TTY green-on-dark, word-wrapped to the panel width
+    // and tail-windowed so the newest wrapped rows always fill the bottom.
+    const int lx = SPLIT_X + 8;
+    const int clipR = g_w - 4;
+    drawText(lx, 6, "APP LOG", 130, 205, 150, 15.0f);
+    const int top = 26, stride = 15;
+    const int fit = (g_h - top) / stride;
+    const float pxh = 13.0f;
+    const int maxW = clipR - lx;
+
+    static LogRow rows[96];               // render is single-threaded; keep this off the stack
+    int rc = 0;
+    for (int i = 0; i < g_logCount; ++i) {
+        logWrap(g_logLines[i], pxh, maxW, rows, 96, &rc);
+    }
+    if (g_logCur > 0) {
+        g_logBuild[g_logCur] = '\0';
+        logWrap(g_logBuild, pxh, maxW, rows, 96, &rc);    // partial line in flight
+    }
+
+    int ly = top;
+    for (int i = (rc > fit ? rc - fit : 0); i < rc; ++i) {
+        char rb[LOG_LINE_CAP];
+        int n = rows[i].n;
+        if (n > LOG_LINE_CAP - 1) n = LOG_LINE_CAP - 1;
+        memcpy(rb, rows[i].p, (size_t)n);
+        rb[n] = '\0';
+        drawTextClip(lx, ly, rb, 175, 232, 178, pxh, lx, clipR);
+        ly += stride;
+    }
+
+    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+}
+
 // Frame pacing: block until the next field. Uses the vsync-interrupt semaphore when
 // it is installed (so the icon worker runs meanwhile); falls back to a busy vsync.
 void waitFrame() {
@@ -1367,10 +1486,20 @@ Ps2Frontend& Ps2Frontend::instance() {
 }
 
 void Ps2Frontend::logEnable(bool on) {
-    g_launchMode = on ? 1 : 0;    // 1 = raw debug trace; 0 tears down any overlay
-    if (on) {                     // start each launch window with a clean trace
-        g_logCount = 0;
-        g_logCur   = 0;
+    if (on) {
+        // Begin the debug split view straight away (no fullscreen trace step): clear the
+        // rolling log and the cached game frame, and paint the initial "loading" split
+        // (black left with a placeholder, empty log right). The game fills the left half
+        // once it draws (debugPresent); log lines fill the right half live meanwhile.
+        g_launchMode = 3;
+        g_logCount   = 0;
+        g_logCur     = 0;
+        g_dbgRaster  = 0;
+        g_dbgW = 0; g_dbgH = 0;
+        debugSplitRender(0, 0, 0);
+    } else {
+        g_launchMode = 0;         // tear down any overlay (game draws / back to menu)
+        g_dbgRaster  = 0;
     }
 }
 
@@ -1393,6 +1522,7 @@ void Ps2Frontend::logWrite(const char* s, int len) {
         loadingFeed(s, len);
         return;
     }
+    // Debug split view (mode 3): buffer the teed VM/native stdout into lines.
     bool sawNewline = false;
     for (int i = 0; i < len; ++i) {
         const char c = s[i];
@@ -1405,9 +1535,22 @@ void Ps2Frontend::logWrite(const char* s, int len) {
             g_logBuild[g_logCur++] = (c >= 32 && c < 127) ? c : ' ';
         }
     }
+    // Re-render the split on each completed line, reusing the last game frame, so the log
+    // updates live even before the game's first frame and between its frames.
     if (sawNewline) {
-        logRender();              // repaint once per completed line (bounded)
+        debugSplitRender(g_dbgRaster, g_dbgW, g_dbgH);
     }
+}
+
+bool Ps2Frontend::debugPresent(const unsigned short* raster565, int w, int h) {
+    if (!Settings::instance().debugMode()) {
+        return false;             // not debugging -> caller presents the game fullscreen
+    }
+    g_launchMode = 3;
+    g_dbgRaster  = raster565;     // cache this frame so between-frame log lines can reuse it
+    g_dbgW = w; g_dbgH = h;
+    debugSplitRender(raster565, w, h);
+    return true;
 }
 
 int Ps2Frontend::pick() {

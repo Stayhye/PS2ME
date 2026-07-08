@@ -109,6 +109,7 @@ JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti $JC_EXTRA
     -I/work/vendors -I/work/assets"
 JC_SRCS="
     contract/javacall_logging.cpp
+    contract/pcsl_print.cpp
     contract/javacall_os.cpp
     contract/javacall_time.cpp
     contract/javacall_memory.cpp

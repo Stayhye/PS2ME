@@ -23,16 +23,15 @@ public:
     /// Self-contained: brings up video, input and storage as needed; touches no VM.
     int pick();
 
-    /// Raw on-screen launch trace (debug mode). On real hardware the SIF/EE console is
-    /// gone after the USB IOP reset, so there is no way to see the VM's stdout while it
-    /// installs and starts a game. When enabled, logWrite() mirrors those bytes
-    /// (System.out incl. the [Launcher] milestones and any exception traces) onto the
-    /// native GS overlay, so a freeze during launch leaves the last milestone visible.
-    /// This is the developer view, shown only when the "Debug mode" setting is on; the
-    /// default launch view is the friendly loadingBegin() screen. It reuses the menu
-    /// raster/font/GsDisplay that pick() already brought up, so it is only valid after
-    /// pick() has run. logEnable(false) tears down whichever overlay is up (raw or
-    /// friendly); the game's first drawn frame calls it -- see Ps2Framebuffer::present.
+    /// Begin/end the debug overlay (developer view, shown only with "Debug mode" on).
+    /// logEnable(true) starts the split view directly (game left, full app log right) --
+    /// see debugPresent(); it clears the rolling log and paints the initial "loading"
+    /// split. logWrite() feeds the teed VM/native stdout into that log. On real hardware
+    /// the SIF/EE console is gone after the USB IOP reset, so this GS overlay is the only
+    /// way to see the log. It reuses the menu raster/font/GsDisplay that pick() already
+    /// brought up, so it is only valid after pick() has run. logEnable(false) tears down
+    /// whichever overlay is up (debug or friendly loader); the non-debug game path calls
+    /// it on the first drawn frame -- see Ps2Framebuffer::present.
     void logEnable(bool on);
     void logWrite(const char* s, int len);
 
@@ -42,6 +41,16 @@ public:
     /// after pick() and before JavaTask(), instead of logEnable(true). Torn down by
     /// logEnable(false) when the game starts drawing.
     void loadingBegin(int gameIndex);
+
+    /// Debug split view. While the "Debug mode" setting is on, composite the running
+    /// game into the LEFT half of the screen (aspect-preserved) and the full running
+    /// application log into the RIGHT half (TTY-style, legible), then present that
+    /// combined frame. Called by Ps2Framebuffer::present() each game frame with the VM's
+    /// RGB565 raster. Returns true when it handled the present (debug on, so the caller
+    /// must not present again); false when debug is off (caller presents fullscreen as
+    /// usual). While active it also keeps the fullscreen launch trace's log rolling, so
+    /// the install trace scrolls straight into the in-game log.
+    bool debugPresent(const unsigned short* raster565, int w, int h);
 
 private:
     Ps2Frontend() {}
