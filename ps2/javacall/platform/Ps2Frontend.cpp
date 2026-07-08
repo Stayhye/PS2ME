@@ -127,6 +127,10 @@ const int MAX_VIEW = 2048;      // matches Ps2HostStorage / IconCache caps
 int g_view[MAX_VIEW];
 int g_viewCount = 0;
 
+// Sort order applied to the view. 0=Name A-Z, 1=Name Z-A, 2=Favourites first.
+const int SORT_COUNT = 3;
+int g_sortMode = 0;
+
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
 unsigned g_marqueeTick = 0;
@@ -563,6 +567,16 @@ void buildInitials(int count) {
             g_initials[g_initialCount++] = c;
         }
     }
+    // Sort ascending so the sidebar reads in order regardless of storage order.
+    for (int a = 1; a < g_initialCount; ++a) {
+        const char key = g_initials[a];
+        int j = a - 1;
+        while (j >= 0 && g_initials[j] > key) {
+            g_initials[j + 1] = g_initials[j];
+            --j;
+        }
+        g_initials[j + 1] = key;
+    }
     g_initialsBuilt = true;
 }
 
@@ -575,8 +589,38 @@ char initialOf(int i) {
     return c;
 }
 
+// Case-insensitive ASCII compare (game-name ordering).
+int ciStrcmp(const char* a, const char* b) {
+    for (;; ++a, ++b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        if (ca == 0) return 0;
+    }
+}
+
+// qsort comparator over g_view entries (game indices), honouring g_sortMode.
+int viewCmp(const void* pa, const void* pb) {
+    const int ga = *(const int*)pa, gb = *(const int*)pb;
+    if (g_sortMode == 2) {   // favourites first
+        const bool fa = Favorites::instance().isFavorite(ga);
+        const bool fb = Favorites::instance().isFavorite(gb);
+        if (fa != fb) return fa ? -1 : 1;
+    }
+    const char* na = hal::GameStorage::instance().nameAt(ga);
+    const char* nb = hal::GameStorage::instance().nameAt(gb);
+    int c = ciStrcmp(na != 0 ? na : "", nb != 0 ? nb : "");
+    return (g_sortMode == 1) ? -c : c;   // Z-A negates
+}
+
+const char* sortModeName(int mode) {
+    return mode == 1 ? "Z-A" : (mode == 2 ? "FAVS" : "A-Z");
+}
+
 // Rebuild g_view for the active tab: identity (all games) for ALL GAMES, the
-// favourited subset for FAVORITES, empty for SETTINGS.
+// favourited subset for FAVORITES, empty for SETTINGS. The grid tabs are then sorted
+// by the current g_sortMode.
 void rebuildView(int activeTab, int count) {
     if (activeTab == 1) {
         g_viewCount = Favorites::instance().list(g_view, MAX_VIEW);
@@ -586,6 +630,10 @@ void rebuildView(int activeTab, int count) {
         g_viewCount = n;
     } else {
         g_viewCount = 0;
+        return;
+    }
+    if (g_viewCount > 1) {
+        qsort(g_view, g_viewCount, sizeof(int), viewCmp);
     }
 }
 
@@ -677,6 +725,12 @@ void drawTabs(int activeTab) {
     const int hy = TAB_Y + TAB_H / 2;
     drawTabHint(x0 - 10, hy, "L1", true);
     drawTabHint(x0 + total + 10, hy, "R1", false);
+
+    // Current sort mode, right-aligned on the tab row.
+    char sortLbl[24];
+    snprintf(sortLbl, (int)sizeof(sortLbl), "SORT: %s", sortModeName(g_sortMode));
+    const int sw = textWidth(sortLbl, 13.0f);
+    drawTextVC(g_w - MARGIN - sw, hy, sortLbl, 150, 185, 220, 13.0f);
 }
 
 void drawSidebar(int curGame) {
@@ -1123,6 +1177,7 @@ int Ps2Frontend::pick() {
         // Poll the pad every field so input stays responsive even when we skip the
         // (expensive) redraw below.
         bool favToggled = false;
+        bool sortChanged = false;
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
             // Tab switching (L1/R1) works on any tab; resets the view + selection.
@@ -1148,6 +1203,18 @@ int Ps2Frontend::pick() {
                             selected = g_viewCount > 0 ? g_viewCount - 1 : 0;
                         }
                     }
+                }
+                if (b.square && !prev.square) {
+                    // Cycle the sort order, keeping the same game selected.
+                    const int curGame = g_view[selected];
+                    g_sortMode = (g_sortMode + 1) % SORT_COUNT;
+                    rebuildView(activeTab, count);
+                    selected = 0;
+                    for (int i = 0; i < g_viewCount; ++i) {
+                        if (g_view[i] == curGame) { selected = i; break; }
+                    }
+                    topRow = 0;
+                    sortChanged = true;
                 }
             }
             prev = b;
@@ -1184,7 +1251,8 @@ int Ps2Frontend::pick() {
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || tabChanged || favToggled || marquee || dirty || clockTick) {
+        if (firstFrame || moved || tabChanged || favToggled || sortChanged ||
+            marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
