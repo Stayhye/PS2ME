@@ -20,10 +20,17 @@ namespace platform {
 
 class Ps2SaveIcon {
 public:
-    /// Generate icon.sys + icon.icn and write them into the launcher's memory-card app
-    /// directory (via Ps2MemCard::configWrite), titling the save @p title. Requires a
-    /// present card (Ps2MemCard::available()); a no-op-worth call otherwise. Returns true
-    /// when both files were written.
+    /// Generate icon.sys + icon.icn and write them into memory-card directory @p absDir
+    /// (absolute card path, e.g. "/PS2ME_GAME"), titling the save @p title and texturing
+    /// the 3D icon with the RGBA8888 image @p rgba (@p w x @p h; may be null -> a plain
+    /// gradient). Creates @p absDir. Requires a present card. Returns true when both files
+    /// were written. This is the reusable path used for per-game save icons.
+    static bool install(const char* absDir, const char* title,
+                        const unsigned char* rgba, int w, int h);
+
+    /// Give the launcher's own /PS2ME directory a save appearance, textured with the
+    /// embedded PS2ME logo and titled @p title. Version-gated (writes once per icon
+    /// revision). No-op without a card. Returns true when installed/already current.
     static bool installAppIcon(const char* title);
 };
 

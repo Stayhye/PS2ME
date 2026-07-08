@@ -31,6 +31,7 @@ extern "C" {
 #include "ps2me_icon.h"     // g_ps2me_icon / g_ps2me_icon_len (xxd -i of PS2ME_ICON.png)
 
 #include <stdlib.h>         // malloc / free
+#include <stdio.h>          // snprintf
 #include <string.h>         // memset / memcpy / strlen
 
 namespace ps2 {
@@ -105,13 +106,11 @@ void putVertex(unsigned char*& p, const Corner& c, float nz) {
     p[0] = 0x80; p[1] = 0x80; p[2] = 0x80; p[3] = 0x80; p += 4;     // rgba (0x80 = full)
 }
 
-// Fill the 128x128 A1B5G5R5 texture from the PS2ME logo PNG, composited over a dark blue
-// so there are no transparent texels; falls back to a plain vertical gradient if the PNG
-// can't be decoded.
-void buildTexture(unsigned char* tex) {
+// Fill the 128x128 A1B5G5R5 texture from an RGBA8888 source image (@p rgba, @p w x @p h),
+// nearest-resampled and composited over a dark blue so there are no transparent texels.
+// Falls back to a plain vertical gradient when no source is given.
+void buildTexture(unsigned char* tex, const unsigned char* rgba, int w, int h) {
     unsigned short* out = (unsigned short*)tex;
-    int w = 0, h = 0;
-    unsigned char* rgba = MidletIcon::decodePng(g_ps2me_icon, (int)g_ps2me_icon_len, &w, &h);
     const int bgR = 18, bgG = 26, bgB = 58;        // background the logo sits on
     for (int y = 0; y < kTexDim; ++y) {
         for (int x = 0; x < kTexDim; ++x) {
@@ -131,13 +130,11 @@ void buildTexture(unsigned char* tex) {
             out[y * kTexDim + x] = toA1B5G5R5(r, g, b);
         }
     }
-    if (rgba != 0) {
-        MidletIcon::release(rgba);
-    }
 }
 
-// Build the whole icon.icn into a freshly malloc'd buffer; caller frees. Sets *outLen.
-unsigned char* buildIcon(int* outLen) {
+// Build the whole icon.icn (textured with @p rgba, @p w x @p h) into a freshly malloc'd
+// buffer; caller frees. Sets *outLen.
+unsigned char* buildIcon(int* outLen, const unsigned char* rgba, int w, int h) {
     const int total = 20 + kNumVerts * 24 + 20 + 16 + kTexBytes;
     unsigned char* buf = (unsigned char*)malloc(total);
     if (buf == 0) {
@@ -179,7 +176,7 @@ unsigned char* buildIcon(int* outLen) {
     put32(p, 1);            // frame: value
 
     // Texture.
-    buildTexture(p);
+    buildTexture(p, rgba, w, h);
     p += kTexBytes;
 
     *outLen = total;
@@ -241,6 +238,30 @@ void buildIconSys(mcIcon* ic, const char* title) {
 // next boot; otherwise an already-installed save at this version is left untouched.
 const int kIconVersion = 1;
 
+bool Ps2SaveIcon::install(const char* absDir, const char* title,
+                          const unsigned char* rgba, int w, int h) {
+    if (!Ps2MemCard::instance().available() || absDir == 0) {
+        return false;
+    }
+    Ps2MemCard::instance().ensureDir(absDir);
+
+    char path[80];
+    mcIcon sys;
+    buildIconSys(&sys, (title != 0) ? title : "PS2ME");
+    snprintf(path, sizeof(path), "%s/icon.sys", absDir);
+    const bool okSys = Ps2MemCard::instance().writeFile(path, &sys, (int)sizeof(mcIcon));
+
+    int icnLen = 0;
+    unsigned char* icn = buildIcon(&icnLen, rgba, w, h);
+    bool okIcn = false;
+    if (icn != 0) {
+        snprintf(path, sizeof(path), "%s/icon.icn", absDir);
+        okIcn = Ps2MemCard::instance().writeFile(path, icn, icnLen);
+        free(icn);
+    }
+    return okSys && okIcn;
+}
+
 bool Ps2SaveIcon::installAppIcon(const char* title) {
     if (!Ps2MemCard::instance().available()) {
         return false;
@@ -253,24 +274,20 @@ bool Ps2SaveIcon::installAppIcon(const char* title) {
         return true;
     }
 
-    mcIcon sys;
-    buildIconSys(&sys, (title != 0) ? title : "PS2ME");
-    const bool okSys = Ps2MemCard::instance().configWrite("icon.sys", &sys, (int)sizeof(mcIcon));
-
-    int icnLen = 0;
-    unsigned char* icn = buildIcon(&icnLen);
-    bool okIcn = false;
-    if (icn != 0) {
-        okIcn = Ps2MemCard::instance().configWrite("icon.icn", icn, icnLen);
-        free(icn);
+    // Texture the app save with the embedded PS2ME logo.
+    int w = 0, h = 0;
+    unsigned char* rgba = MidletIcon::decodePng(g_ps2me_icon, (int)g_ps2me_icon_len, &w, &h);
+    const bool ok = install("/PS2ME", (title != 0) ? title : "PS2ME", rgba, w, h);
+    if (rgba != 0) {
+        MidletIcon::release(rgba);
     }
 
-    // Record the version so subsequent boots skip the rewrite (only once both files landed).
-    if (okSys && okIcn) {
-        int ver = kIconVersion;
-        Ps2MemCard::instance().configWrite("iconver", &ver, (int)sizeof(ver));
+    // Record the version so subsequent boots skip the rewrite.
+    if (ok) {
+        int v = kIconVersion;
+        Ps2MemCard::instance().configWrite("iconver", &v, (int)sizeof(v));
     }
-    return okSys && okIcn;
+    return ok;
 }
 
 } // namespace platform
