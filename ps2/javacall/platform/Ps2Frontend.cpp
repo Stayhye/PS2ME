@@ -24,6 +24,7 @@
 #include "MidletIcon.hpp"
 #include "IconCache.hpp"
 #include "Favorites.hpp"
+#include "Recent.hpp"
 #include "Ps2Storage.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
@@ -127,9 +128,14 @@ const int MAX_VIEW = 2048;      // matches Ps2HostStorage / IconCache caps
 int g_view[MAX_VIEW];
 int g_viewCount = 0;
 
-// Sort order applied to the view. 0=Name A-Z, 1=Name Z-A, 2=Favourites first.
-const int SORT_COUNT = 3;
+// Sort order applied to the non-recent part of the view. 0=Name A-Z, 1=Name Z-A.
+const int SORT_COUNT = 2;
 int g_sortMode = 0;
+
+// Number of leading g_view slots reserved for the "recent" row (0 = no recent row).
+// When >0, g_view[0..COLS-1] hold the recent games padded with -1 to a full row, and
+// the sorted rest starts at index COLS.
+int g_recentBand = 0;
 
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
@@ -600,14 +606,9 @@ int ciStrcmp(const char* a, const char* b) {
     }
 }
 
-// qsort comparator over g_view entries (game indices), honouring g_sortMode.
+// qsort comparator over game indices, by name, honouring g_sortMode (A-Z / Z-A).
 int viewCmp(const void* pa, const void* pb) {
     const int ga = *(const int*)pa, gb = *(const int*)pb;
-    if (g_sortMode == 2) {   // favourites first
-        const bool fa = Favorites::instance().isFavorite(ga);
-        const bool fb = Favorites::instance().isFavorite(gb);
-        if (fa != fb) return fa ? -1 : 1;
-    }
     const char* na = hal::GameStorage::instance().nameAt(ga);
     const char* nb = hal::GameStorage::instance().nameAt(gb);
     int c = ciStrcmp(na != 0 ? na : "", nb != 0 ? nb : "");
@@ -615,26 +616,73 @@ int viewCmp(const void* pa, const void* pb) {
 }
 
 const char* sortModeName(int mode) {
-    return mode == 1 ? "Z-A" : (mode == 2 ? "FAVS" : "A-Z");
+    return mode == 1 ? "Z-A" : "A-Z";
 }
 
-// Rebuild g_view for the active tab: identity (all games) for ALL GAMES, the
-// favourited subset for FAVORITES, empty for SETTINGS. The grid tabs are then sorted
-// by the current g_sortMode.
+// Rebuild g_view for the active tab. SETTINGS: empty. FAVORITES: the favourited subset
+// (sorted). ALL GAMES: a recent row (up to COLS most-recent games, padded to a full row
+// with -1) followed by the sorted rest, excluding the recent ones (no duplicates).
 void rebuildView(int activeTab, int count) {
-    if (activeTab == 1) {
-        g_viewCount = Favorites::instance().list(g_view, MAX_VIEW);
-    } else if (activeTab == 0) {
-        int n = count < MAX_VIEW ? count : MAX_VIEW;
-        for (int i = 0; i < n; ++i) g_view[i] = i;
-        g_viewCount = n;
-    } else {
+    g_recentBand = 0;
+    if (activeTab == 2) {
         g_viewCount = 0;
         return;
     }
-    if (g_viewCount > 1) {
-        qsort(g_view, g_viewCount, sizeof(int), viewCmp);
+    if (activeTab == 1) {
+        g_viewCount = Favorites::instance().list(g_view, MAX_VIEW);
+        if (g_viewCount > 1) qsort(g_view, g_viewCount, sizeof(int), viewCmp);
+        return;
     }
+
+    // ALL GAMES.
+    int recent[COLS];
+    const int rc = Recent::instance().list(recent, COLS);
+    g_recentBand = rc;
+
+    int w = 0;
+    if (rc > 0) {
+        for (int i = 0; i < rc; ++i)   g_view[w++] = recent[i];
+        for (int i = rc; i < COLS; ++i) g_view[w++] = -1;   // pad to a full row
+    }
+
+    static int rest[MAX_VIEW];
+    int rn = 0;
+    const int total = count < MAX_VIEW ? count : MAX_VIEW;
+    for (int g = 0; g < total; ++g) {
+        bool isRecent = false;
+        for (int k = 0; k < rc; ++k) {
+            if (recent[k] == g) { isRecent = true; break; }
+        }
+        if (!isRecent) rest[rn++] = g;
+    }
+    if (rn > 1) qsort(rest, rn, sizeof(int), viewCmp);
+    for (int i = 0; i < rn && w < MAX_VIEW; ++i) g_view[w++] = rest[i];
+    g_viewCount = w;
+}
+
+// The view index where the sorted (alphabetical) section starts, past the recent row.
+int firstSorted() { return g_recentBand > 0 ? COLS : 0; }
+
+// Selectable-slot helpers (the recent row may have empty -1 pad cells).
+bool slotOk(int i)    { return i >= 0 && i < g_viewCount && g_view[i] >= 0; }
+int  nextValid(int f) { for (int i = f; i < g_viewCount; ++i) if (g_view[i] >= 0) return i; return -1; }
+int  prevValid(int f) { for (int i = f; i >= 0; --i)         if (g_view[i] >= 0) return i; return -1; }
+
+// Index of game @p game's initial within the sorted sidebar list (0 if absent).
+int initialIndexOf(int game) {
+    const char c = initialOf(game);
+    for (int k = 0; k < g_initialCount; ++k) {
+        if (g_initials[k] == c) return k;
+    }
+    return 0;
+}
+
+// First view index (past the recent row) whose game starts with @p c, or -1 if none.
+int jumpToInitial(char c) {
+    for (int i = firstSorted(); i < g_viewCount; ++i) {
+        if (g_view[i] >= 0 && initialOf(g_view[i]) == c) return i;
+    }
+    return -1;
 }
 
 // The session clock shown in the header ("HH:MM:SS", counting up from boot).
@@ -733,36 +781,53 @@ void drawTabs(int activeTab) {
     drawTextVC(g_w - MARGIN - sw, hy, sortLbl, 150, 185, 220, 13.0f);
 }
 
-void drawSidebar(int curGame) {
+// @p focus is true when the d-pad has moved into the alphabet column; @p focusSel is
+// then the highlighted letter index. Otherwise the current game's initial is shown.
+void drawSidebar(int curGame, bool focus, int focusSel) {
     const int y0 = CONTENT_Y;
     const int h  = CONTENT_BOTTOM - CONTENT_Y;
     panel(SIDE_X, y0, SIDE_W, h, 6);
-    if (curGame < 0 || g_initialCount <= 0) {
+    if (g_initialCount <= 0) {
         return;
     }
 
-    const char cur = initialOf(curGame);
-    const int rowH = 15;
-    int maxShow = (h - 8) / rowH;
-    if (maxShow < 1) maxShow = 1;
+    // Up/down chevrons: the column scrolls when focused (d-pad up/down).
+    const int cxm = SIDE_X + SIDE_W / 2;
+    fillTriangle(cxm, y0 + 4, cxm - 4, y0 + 9, cxm + 4, y0 + 9, 110, 170, 215);
+    fillTriangle(cxm - 4, y0 + h - 9, cxm + 4, y0 + h - 9, cxm, y0 + h - 4, 110, 170, 215);
+
+    const int listTop = y0 + 13;
+    const int listH   = h - 26;
     const int n = g_initialCount;
+
+    // Highlighted entry: the focused letter, or the current game's initial.
+    int hi = -1;
+    if (focus) {
+        hi = focusSel < 0 ? 0 : (focusSel >= n ? n - 1 : focusSel);
+    } else if (curGame >= 0) {
+        hi = initialIndexOf(curGame);
+    }
+
+    const int rowH = 15;
+    int maxShow = listH / rowH;
+    if (maxShow < 1) maxShow = 1;
     const int show = n < maxShow ? n : maxShow;
 
-    int curIdx = 0;
-    for (int k = 0; k < n; ++k) {
-        if (g_initials[k] == cur) { curIdx = k; break; }
-    }
-    int start = curIdx - show / 2;
+    int start = (hi >= 0 ? hi : 0) - show / 2;
     if (start < 0) start = 0;
     if (start + show > n) start = n - show;
 
-    int y = y0 + 6;
+    int y = listTop + (listH - show * rowH) / 2;
     for (int k = start; k < start + show; ++k) {
-        const bool act = (g_initials[k] == cur);
+        const bool act = (k == hi);
         char s[2] = { g_initials[k], 0 };
         const int lw = textWidth(s, 13.0f);
         const int lx = SIDE_X + (SIDE_W - lw) / 2;
-        if (act) {
+        if (act && focus) {
+            roundRectFillA(SIDE_X - 2, y - 3, SIDE_W + 4, rowH + 4, 5, 70, 200, 255, 75); // glow
+            roundRectFillA(SIDE_X + 1, y - 1, SIDE_W - 2, rowH, 4, 120, 235, 255, 255);
+            drawText(lx, y, s, 16, 34, 62, 13.0f);
+        } else if (act) {
             roundRectFillA(SIDE_X + 1, y - 1, SIDE_W - 2, rowH, 4, 90, 215, 255, 255);
             drawText(lx, y, s, 18, 38, 68, 13.0f);
         } else {
@@ -786,11 +851,29 @@ void drawScrollbar(int viewCount, int topRow) {
     }
 }
 
-void drawGrid(int viewCount, int selected, int topRow, const int* view) {
+void drawGrid(int viewCount, int selected, int topRow, const int* view, bool gridFocused) {
+    // Recent row: an amber "shelf" behind the first row, with a RECENT tag in any
+    // unused cells. Drawn before the tiles so it shows through the gaps and pad cells.
+    if (g_recentBand > 0 && topRow == 0) {
+        const int rowW = COLS * GRID_CELLW + (COLS - 1) * GRID_GAP;
+        roundRectVGrad(GRID_X0 - 2, GRID_Y0 - 2, rowW + 4, GRID_ROWSTRIDE - 2, 10,
+                       98, 80, 36, 60, 48, 20);
+        if (g_recentBand < COLS) {
+            const int ex0 = GRID_X0 + g_recentBand * (GRID_CELLW + GRID_GAP);
+            const int ex1 = GRID_X0 + rowW;
+            const int tw  = textWidth("RECENT", 16.0f);
+            drawTextVC(ex0 + (ex1 - ex0 - tw) / 2, GRID_Y0 - 2 + (GRID_ROWSTRIDE - 2) / 2,
+                       "RECENT", 214, 182, 112, 16.0f);
+        }
+    }
+
     const int firstIdx = topRow * COLS;
     const int lastIdx  = (topRow + ROWS) * COLS;   // exclusive
     for (int i = firstIdx; i < viewCount && i < lastIdx; ++i) {
         const int game  = view[i];
+        if (game < 0) {
+            continue;   // empty recent-row pad cell (the amber shelf shows through)
+        }
         const int r = i / COLS;
         const int c = i % COLS;
         const int cellX = GRID_X0 + c * (GRID_CELLW + GRID_GAP);
@@ -798,8 +881,12 @@ void drawGrid(int viewCount, int selected, int topRow, const int* view) {
         const int cellH = GRID_ROWSTRIDE - 4;
         const bool sel  = (i == selected);
 
-        if (sel) {
+        if (sel && gridFocused) {
             drawSelection(cellX + 2, cellY, GRID_CELLW - 4, cellH, 8);
+        } else if (sel) {
+            // Focus is on the sidebar: show a muted (grey) frame where we'll return.
+            roundRectFillA(cellX, cellY - 2, GRID_CELLW, cellH + 4, 10, 120, 140, 170, 255);
+            roundRectVGrad(cellX + 2, cellY, GRID_CELLW - 4, cellH, 8, 40, 60, 104, 24, 40, 76);
         } else {
             roundRectVGrad(cellX + 2, cellY, GRID_CELLW - 4, cellH, 8, 40, 60, 104, 24, 40, 76);
         }
@@ -887,8 +974,12 @@ void drawDetails(int viewCount, int selected, const int* view) {
     const int lw = textWidth(lbl, 16.0f);
     drawText(px + (pw - lw) / 2, prevY + prev + gap1, lbl, 235, 242, 252, 16.0f);
 
+    int pos = 0, total = 0;
+    for (int i = 0; i < viewCount; ++i) {
+        if (view[i] >= 0) { ++total; if (i <= selected) ++pos; }
+    }
     char info[32];
-    snprintf(info, (int)sizeof(info), "%d / %d", selected + 1, viewCount);
+    snprintf(info, (int)sizeof(info), "%d / %d", pos, total);
     const int iw = textWidth(info, 13.0f);
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
 }
@@ -931,12 +1022,13 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-void render(int viewCount, int selected, int topRow, int activeTab, const int* view) {
+void render(int viewCount, int selected, int topRow, int activeTab, const int* view,
+            bool sidebarFocus, int sidebarSel) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
     const int curGame = viewCount > 0 ? view[selected] : -1;
-    drawSidebar(curGame);
+    drawSidebar(curGame, sidebarFocus, sidebarSel);
     drawFooter();
 
     if (activeTab == 2) {                       // SETTINGS: not implemented yet
@@ -973,7 +1065,7 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
 
     drawScrollbar(viewCount, topRow);
     drawDetails(viewCount, selected, view);
-    drawGrid(viewCount, selected, topRow, view);
+    drawGrid(viewCount, selected, topRow, view, !sidebarFocus);
 }
 
 // Bake the static background (vertical gradient + radial vignette) into g_bg once, so
@@ -1140,6 +1232,7 @@ int Ps2Frontend::pick() {
 
     buildInitials(count);         // alphabet sidebar contents (once)
     Favorites::instance().load(count);   // persisted favourites -> game indices
+    Recent::instance().load(count);      // recently-launched games -> game indices
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
     // the controller exactly once; reading it here drives no VM code path. Do the
@@ -1169,6 +1262,10 @@ int Ps2Frontend::pick() {
     int lastClockSec = -1;
     int chosen = -1;
     int activeTab = 0;            // 0=ALL GAMES, 1=FAVORITES, 2=SETTINGS (L1/R1 switch)
+    bool sidebarFocus = false;    // d-pad moved into the alphabet column
+    int  sidebarSel = 0;          // highlighted letter while focused
+    bool lastSbFocus = false;
+    int  lastSbSel = -1;
     bool firstFrame = true;
     hal::PadButtons prev;         // all-false initial snapshot
     rebuildView(activeTab, count);   // initial view (all games)
@@ -1180,41 +1277,91 @@ int Ps2Frontend::pick() {
         bool sortChanged = false;
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
-            // Tab switching (L1/R1) works on any tab; resets the view + selection.
+            // Tab switching (L1/R1): resets the view + selection + sidebar focus.
             if (b.r1 && !prev.r1 && activeTab < 2) {
-                activeTab++; rebuildView(activeTab, count); selected = 0; topRow = 0;
+                activeTab++; rebuildView(activeTab, count);
+                selected = 0; topRow = 0; sidebarFocus = false;
             }
             if (b.l1 && !prev.l1 && activeTab > 0) {
-                activeTab--; rebuildView(activeTab, count); selected = 0; topRow = 0;
+                activeTab--; rebuildView(activeTab, count);
+                selected = 0; topRow = 0; sidebarFocus = false;
             }
-            // Grid navigation + actions on the tabs that show a grid (ALL GAMES/FAVORITES).
             if (g_viewCount > 0 && (activeTab == 0 || activeTab == 1)) {
-                if (b.right && !prev.right && selected + 1 < g_viewCount)    { selected++; }
-                if (b.left  && !prev.left  && selected > 0)                 { selected--; }
-                if (b.down  && !prev.down  && selected + COLS < g_viewCount) { selected += COLS; }
-                if (b.up    && !prev.up    && selected - COLS >= 0)         { selected -= COLS; }
-                if (b.cross && !prev.cross)                                 { chosen = g_view[selected]; }
-                if (b.triangle && !prev.triangle) {
-                    Favorites::instance().toggle(g_view[selected]);
-                    favToggled = true;
-                    if (activeTab == 1) {   // a toggled-off game leaves the favourites view
-                        rebuildView(activeTab, count);
-                        if (selected >= g_viewCount) {
-                            selected = g_viewCount > 0 ? g_viewCount - 1 : 0;
+                if (sidebarFocus) {
+                    // Alphabet column focused: up/down pick a letter; cross/right jumps
+                    // to it and returns to the grid; left cancels.
+                    if (b.up   && !prev.up   && sidebarSel > 0)                  { sidebarSel--; }
+                    if (b.down && !prev.down && sidebarSel < g_initialCount - 1) { sidebarSel++; }
+                    if ((b.cross && !prev.cross) || (b.right && !prev.right)) {
+                        const int j = jumpToInitial(g_initials[sidebarSel]);
+                        if (j >= 0) selected = j;
+                        sidebarFocus = false;
+                    }
+                    if (b.left && !prev.left) {
+                        sidebarFocus = false;   // cancel back to the grid
+                    }
+                } else {
+                    // Grid navigation (skips the recent row's empty pad cells).
+                    if (b.right && !prev.right) {
+                        const int t = nextValid(selected + 1);
+                        if (t >= 0) selected = t;
+                    }
+                    if (b.left && !prev.left) {
+                        if (selected % COLS == 0) {   // at the left edge -> focus the sidebar
+                            sidebarFocus = true;
+                            sidebarSel = initialIndexOf(g_view[selected]);
+                        } else {
+                            const int t = prevValid(selected - 1);
+                            if (t >= 0) selected = t;
                         }
                     }
-                }
-                if (b.square && !prev.square) {
-                    // Cycle the sort order, keeping the same game selected.
-                    const int curGame = g_view[selected];
-                    g_sortMode = (g_sortMode + 1) % SORT_COUNT;
-                    rebuildView(activeTab, count);
-                    selected = 0;
-                    for (int i = 0; i < g_viewCount; ++i) {
-                        if (g_view[i] == curGame) { selected = i; break; }
+                    if (b.down && !prev.down) {
+                        const int t = selected + COLS;
+                        if (t < g_viewCount && g_view[t] >= 0) selected = t;
                     }
-                    topRow = 0;
-                    sortChanged = true;
+                    if (b.up && !prev.up) {
+                        int t = selected - COLS;
+                        if (t >= 0) {
+                            if (g_view[t] < 0) t = prevValid(t);   // snap onto the recent row
+                            if (t >= 0) selected = t;
+                        }
+                    }
+                    if (b.cross && !prev.cross) { chosen = g_view[selected]; }
+                    if (b.triangle && !prev.triangle) {
+                        Favorites::instance().toggle(g_view[selected]);
+                        favToggled = true;
+                        if (activeTab == 1) {   // a toggled-off game leaves the favourites view
+                            rebuildView(activeTab, count);
+                            if (selected >= g_viewCount) {
+                                selected = g_viewCount > 0 ? g_viewCount - 1 : 0;
+                            }
+                        }
+                    }
+                    if (b.square && !prev.square) {
+                        // Cycle the sort order, keeping the same game selected.
+                        const int curGame = g_view[selected];
+                        g_sortMode = (g_sortMode + 1) % SORT_COUNT;
+                        rebuildView(activeTab, count);
+                        selected = 0;
+                        for (int i = 0; i < g_viewCount; ++i) {
+                            if (g_view[i] == curGame) { selected = i; break; }
+                        }
+                        topRow = 0;
+                        sortChanged = true;
+                    }
+                    // Page up/down (L2/R2): move the selection by a whole page.
+                    if (b.r2 && !prev.r2) {
+                        int t = selected + COLS * ROWS;
+                        if (t > g_viewCount - 1) t = g_viewCount - 1;
+                        if (!slotOk(t)) t = prevValid(t);
+                        if (t >= 0) selected = t;
+                    }
+                    if (b.l2 && !prev.l2) {
+                        int t = selected - COLS * ROWS;
+                        if (t < 0) t = 0;
+                        if (!slotOk(t)) t = nextValid(t);
+                        if (t >= 0) selected = t;
+                    }
                 }
             }
             prev = b;
@@ -1238,7 +1385,7 @@ int Ps2Frontend::pick() {
         // Does the active item's name overflow its cell? Only then must we keep
         // redrawing every field to animate the marquee (grid tabs only).
         bool marquee = false;
-        if (g_viewCount > 0 && !moved && (activeTab == 0 || activeTab == 1)) {
+        if (g_viewCount > 0 && !moved && !sidebarFocus && (activeTab == 0 || activeTab == 1)) {
             const char* nm = hal::GameStorage::instance().nameAt(g_view[selected]);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
@@ -1246,22 +1393,26 @@ int Ps2Frontend::pick() {
         }
 
         // Render on demand: only when something changed -- navigation, a tab switch, a
-        // favourite toggle, a marquee in flight, a decoded icon, or a new clock second.
+        // sidebar-focus change, a favourite toggle, a marquee, a decoded icon, or a
+        // new clock second.
         const bool tabChanged = (activeTab != lastTab);
+        const bool sbChanged  = (sidebarFocus != lastSbFocus) || (sidebarSel != lastSbSel);
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || tabChanged || favToggled || sortChanged ||
+        if (firstFrame || moved || tabChanged || sbChanged || favToggled || sortChanged ||
             marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
             IconCache::instance().tick();
-            render(g_viewCount, selected, topRow, activeTab, g_view);
+            render(g_viewCount, selected, topRow, activeTab, g_view, sidebarFocus, sidebarSel);
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
             lastSel      = selected;
             lastTop      = topRow;
             lastTab      = activeTab;
+            lastSbFocus  = sidebarFocus;
+            lastSbSel    = sidebarSel;
             lastClockSec = nowSec;
             firstFrame   = false;
         }
@@ -1277,6 +1428,10 @@ int Ps2Frontend::pick() {
     if (g_vsyncCb >= 0) {
         graph_remove_vsync_handler(g_vsyncCb);
         g_vsyncCb = -1;
+    }
+    // Record the launch so it heads the recent row next time (worker is idle now).
+    if (chosen >= 0) {
+        Recent::instance().push(chosen);
     }
     return chosen;
 }

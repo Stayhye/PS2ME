@@ -84,6 +84,8 @@ bool Ps2Pad::read(hal::PadButtons* out) {
     out->square   = (d & PAD_SQUARE)   != 0;
     out->l1       = (d & PAD_L1)       != 0;
     out->r1       = (d & PAD_R1)       != 0;
+    out->l2       = (d & PAD_L2)       != 0;
+    out->r2       = (d & PAD_R2)       != 0;
     return true;
 }
 

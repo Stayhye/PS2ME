@@ -44,6 +44,11 @@ public:
     /// PCSX2). Writes into @p out (capacity @p cap); returns false if it would not fit.
     bool favoritesPath(char* out, int cap);
 
+    /// Path of the recently-launched list file: "<bootdir>recent.txt" (beside games/),
+    /// or "host:recent.txt" (dev fallback). Writes into @p out (capacity @p cap);
+    /// returns false if it would not fit.
+    bool recentPath(char* out, int cap);
+
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }
 

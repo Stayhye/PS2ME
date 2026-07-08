@@ -23,11 +23,13 @@ struct PadButtons {
     bool square;     // sort (native menu)
     bool l1;         // left soft key / prev tab
     bool r1;         // right soft key / next tab
+    bool l2;         // alphabet jump (prev section)
+    bool r2;         // alphabet jump (next section)
 
     PadButtons()
         : up(false), down(false), left(false), right(false),
           cross(false), circle(false), triangle(false), square(false),
-          l1(false), r1(false) {}
+          l1(false), r1(false), l2(false), r2(false) {}
 };
 
 class IPad {
