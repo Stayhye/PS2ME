@@ -327,5 +327,44 @@ bool IconCache::draw(int game, unsigned short* raster, int rw, int rh, int x, in
     return drawn;
 }
 
+bool IconCache::drawScaled(int game, unsigned short* raster, int rw, int rh,
+                           int x, int y, int destSize) {
+    if (!started_ || game < 0 || game >= count_ || game >= MAX_GAMES ||
+        destSize <= 0) {
+        return false;
+    }
+    bool drawn = false;
+
+    WaitSema(mutex_);
+    if (state_[game] == ST_LOADED) {
+        const int slot = gameToSlot_[game];
+        if (slot >= 0 && slots_[slot].tile != 0) {
+            slots_[slot].seen = frame_;
+            const int n = iconSize_;
+            const unsigned char* t = slots_[slot].tile;
+            for (int dy = 0; dy < destSize; ++dy) {
+                const int py = y + dy;
+                if (py < 0 || py >= rh) continue;
+                const int sy = dy * n / destSize;
+                unsigned short* row = raster + py * rw;
+                const unsigned char* src = t + sy * n * 4;
+                for (int dx = 0; dx < destSize; ++dx) {
+                    const int px = x + dx;
+                    if (px < 0 || px >= rw) continue;
+                    const int sx = dx * n / destSize;
+                    const int a = src[sx * 4 + 3];
+                    if (a) {
+                        row[px] = blend5551(row[px], src[sx * 4 + 0],
+                                            src[sx * 4 + 1], src[sx * 4 + 2], a);
+                    }
+                }
+            }
+            drawn = true;
+        }
+    }
+    SignalSema(mutex_);
+    return drawn;
+}
+
 } // namespace platform
 } // namespace ps2

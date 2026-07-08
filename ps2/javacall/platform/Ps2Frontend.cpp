@@ -1,10 +1,18 @@
 // PS2 JavaCall port — platform layer. Ps2Frontend implementation.
 //
 // Standalone native menu, no dependency on the Java VM. It renders a full native
-// resolution (640x448) grid of games -- each an application icon with a name below,
-// phone-launcher style -- into its own RGBA5551 raster with the embedded TrueType font,
-// presents it fullscreen through the shared GsDisplay (no pillarbox), reads the shared
-// pad backend, and lists games from hal::GameStorage.
+// resolution (640x448) "console dashboard" UI -- a metallic-blue themed launcher with
+// a header (logo + session clock), navigation tabs, an alphabet sidebar, a rounded
+// game grid with a glowing selection, a right-hand details panel with a large preview,
+// and a footer button legend -- into its own RGBA5551 raster with the embedded
+// TrueType font, and presents it fullscreen through the shared GsDisplay (no
+// pillarbox). It reads the shared pad backend and lists games from hal::GameStorage.
+//
+// Everything is drawn procedurally (gradients, bevelled rounded panels, a cyan
+// selection glow, vector controller glyphs) except the two brand rasters: the Java
+// flame logo (java_logo.png) and the PS2ME wordmark (ps2me_title.png). Until those
+// assets are supplied the embedded PS2ME icon stands in for the logo and the wordmark
+// is drawn in the UI font.
 //
 // Icons come from IconCache, a background worker that decodes only the on-screen icons
 // off the render path, so navigation never stalls on JAR I/O. The render thread paces
@@ -19,10 +27,13 @@
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
+#include "../hal/SystemClock.hpp"   // session clock for the header
 
 #include <tamtypes.h>   // u16
 #include <malloc.h>     // memalign / malloc / free
 #include <stdlib.h>
+#include <string.h>     // memcpy (blit the baked background each frame)
+#include <stdio.h>      // snprintf (clock / index labels)
 #include <kernel.h>     // CreateSema / WaitSema / iSignalSema (vsync pacing)
 #include <graph.h>      // graph_add_vsync_handler / graph_wait_vsync
 
@@ -47,17 +58,34 @@ namespace {
 const int SCREEN_W = 640;
 const int SCREEN_H = 448;
 
-// Phone-launcher grid: square icon + name label below, fixed 4 x 5 page.
-const int   MARGIN   = 14;
-const int   TITLE_H  = 46;
-const int   COLS     = 4;
-const int   ROWS     = 5;
-const int   GAP      = 8;               // horizontal gap between cells
-const int   VGAP     = 6;               // vertical gap between cells
-const int   ICON     = 48;              // on-screen icon size (square)
-const int   TITLE_ICON = 36;            // logo drawn left of the title text
-const float TITLE_PX   = 30.0f;
-const float NAME_PX    = 15.0f;
+// --- Dashboard layout (all in native pixels) --------------------------------------
+const int MARGIN     = 10;
+const int HEADER_H   = 34;              // top bar: logo + wordmark + clock
+const int TITLE_ICON = 26;              // logo drawn left of the wordmark
+const int TAB_Y      = 40;              // navigation tab row
+const int TAB_H      = 26;
+const int FOOTER_H   = 30;              // bottom button legend
+const int SIDE_X     = 6;               // alphabet sidebar
+const int SIDE_W     = 16;
+const int DET_W      = 150;             // right-hand details panel
+
+const int COLS       = 4;
+const int ROWS       = 5;
+const int GRID_GAP   = 6;
+const int ICON       = 44;              // on-screen grid icon size (square)
+const float NAME_PX  = 14.0f;
+
+// Derived geometry (shared by render() and pick()).
+const int CONTENT_Y      = TAB_Y + TAB_H + 8;        // top of the main area
+const int FOOTER_Y       = SCREEN_H - FOOTER_H;
+const int CONTENT_BOTTOM = FOOTER_Y - 4;
+const int DET_X          = SCREEN_W - 8 - DET_W;
+const int SCROLL_X       = DET_X - 12;               // vertical scrollbar
+const int GRID_X0        = SIDE_X + SIDE_W + 8;
+const int GRID_X1        = SCROLL_X - 8;
+const int GRID_CELLW     = (GRID_X1 - GRID_X0 - (COLS - 1) * GRID_GAP) / COLS;
+const int GRID_Y0        = CONTENT_Y + 2;
+const int GRID_ROWSTRIDE = (CONTENT_BOTTOM - GRID_Y0) / ROWS;
 
 // --- Font -------------------------------------------------------------------------
 stbtt_fontinfo g_font;
@@ -79,11 +107,17 @@ bool initFont() {
 // The GS 16-bit texture is R in the low bits, G, then B, alpha in the top bit (the
 // exact layout Ps2Framebuffer converts RGB565 into before presenting).
 u16* g_ras = 0;
+u16* g_bg  = 0;             // baked background (gradient + vignette), blitted per frame
 int  g_w = 0;
 int  g_h = 0;
 
 // The title logo (TITLE_ICON x TITLE_ICON RGBA8888), decoded once; null if it failed.
 unsigned char* g_titleIcon = 0;
+
+// Distinct game-name initials for the alphabet sidebar, built once from the list.
+char g_initials[48];
+int  g_initialCount = 0;
+bool g_initialsBuilt = false;
 
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
@@ -116,6 +150,22 @@ inline u16 blend5551(u16 dst, int sr, int sg, int sb, int a) {
     return rgba5551(r, g, b);
 }
 
+// Integer square root (rounded down) -- rounded-corner insets, no libm dependency.
+inline int isqrt(int v) {
+    if (v <= 0) return 0;
+    int x = v, y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + v / x) / 2; }
+    return x;
+}
+
+inline void plotA(int x, int y, int r, int g, int b, int a) {
+    if (a <= 0) return;
+    if ((unsigned)x < (unsigned)g_w && (unsigned)y < (unsigned)g_h) {
+        u16* p = &g_ras[y * g_w + x];
+        *p = (a >= 255) ? rgba5551(r, g, b) : blend5551(*p, r, g, b, a);
+    }
+}
+
 void fillRect(int x, int y, int w, int h, u16 c) {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -126,6 +176,136 @@ void fillRect(int x, int y, int w, int h, u16 c) {
         for (int i = 0; i < w; ++i) {
             row[i] = c;
         }
+    }
+}
+
+// A plain (square) vertical-gradient rect -- header/footer bars.
+void rectVGrad(int x, int y, int w, int h,
+               int r0, int g0, int b0, int r1, int g1, int b1) {
+    if (w <= 0 || h <= 0) return;
+    for (int j = 0; j < h; ++j) {
+        const int t = (h > 1) ? (j * 255 / (h - 1)) : 0;
+        const u16 c = rgba5551(r0 + (r1 - r0) * t / 255,
+                               g0 + (g1 - g0) * t / 255,
+                               b0 + (b1 - b0) * t / 255);
+        const int yy = y + j;
+        if (yy < 0 || yy >= g_h) continue;
+        int xa = x, xb = x + w;
+        if (xa < 0) xa = 0;
+        if (xb > g_w) xb = g_w;
+        u16* row = g_ras + yy * g_w;
+        for (int i = xa; i < xb; ++i) row[i] = c;
+    }
+}
+
+// Left/right inset of a rounded rect on row j (of height h, corner radius rad).
+inline int cornerInset(int j, int h, int rad) {
+    const int dy = (j < h - 1 - j) ? j : (h - 1 - j);
+    if (dy >= rad) return 0;
+    const int k = rad - 1 - dy;
+    int v = rad * rad - k * k;
+    if (v < 0) v = 0;
+    return rad - isqrt(v);
+}
+
+// Rounded rect filled with a vertical gradient (opaque) -- panels, tiles, tabs.
+void roundRectVGrad(int x, int y, int w, int h, int rad,
+                    int r0, int g0, int b0, int r1, int g1, int b1) {
+    if (w <= 0 || h <= 0) return;
+    if (rad * 2 > w) rad = w / 2;
+    if (rad * 2 > h) rad = h / 2;
+    for (int j = 0; j < h; ++j) {
+        const int ins = cornerInset(j, h, rad);
+        const int t = (h > 1) ? (j * 255 / (h - 1)) : 0;
+        const u16 c = rgba5551(r0 + (r1 - r0) * t / 255,
+                               g0 + (g1 - g0) * t / 255,
+                               b0 + (b1 - b0) * t / 255);
+        const int yy = y + j;
+        if (yy < 0 || yy >= g_h) continue;
+        u16* row = g_ras + yy * g_w;
+        for (int i = ins; i < w - ins; ++i) {
+            const int xx = x + i;
+            if (xx >= 0 && xx < g_w) row[xx] = c;
+        }
+    }
+}
+
+// Rounded rect filled with a flat colour at coverage a -- selection glow layers.
+void roundRectFillA(int x, int y, int w, int h, int rad, int r, int g, int b, int a) {
+    if (w <= 0 || h <= 0) return;
+    if (rad * 2 > w) rad = w / 2;
+    if (rad * 2 > h) rad = h / 2;
+    for (int j = 0; j < h; ++j) {
+        const int ins = cornerInset(j, h, rad);
+        const int yy = y + j;
+        for (int i = ins; i < w - ins; ++i) plotA(x + i, yy, r, g, b, a);
+    }
+}
+
+// A bevelled metallic panel: bright 1px edge + inner gradient fill.
+void panel(int x, int y, int w, int h, int rad) {
+    roundRectFillA(x, y, w, h, rad, 120, 150, 205, 255);            // outer bevel edge
+    const int r2 = rad - 1 > 0 ? rad - 1 : 0;
+    roundRectVGrad(x + 1, y + 1, w - 2, h - 2, r2, 56, 86, 140, 26, 44, 84);
+}
+
+// The glowing cyan frame + recessed fill for the selected grid tile.
+void drawSelection(int x, int y, int w, int h, int rad) {
+    roundRectFillA(x - 5, y - 5, w + 10, h + 10, rad + 4,  70, 200, 255,  40);  // bloom
+    roundRectFillA(x - 3, y - 3, w + 6,  h + 6,  rad + 3,  90, 215, 255,  95);
+    roundRectFillA(x - 2, y - 2, w + 4,  h + 4,  rad + 2, 130, 235, 255, 255);  // frame
+    roundRectVGrad(x, y, w, h, rad, 40, 74, 132, 24, 46, 90);                   // recess
+}
+
+// Bresenham line (for the triangle glyph).
+void line(int x0, int y0, int x1, int y1, int r, int g, int b) {
+    int dx = x1 - x0; if (dx < 0) dx = -dx;
+    int dy = y1 - y0; if (dy < 0) dy = -dy;
+    const int sx = x0 < x1 ? 1 : -1;
+    const int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        plotA(x0, y0, r, g, b, 255);
+        plotA(x0 + 1, y0, r, g, b, 255);   // 2px thick
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
+// PS2 face-button glyphs, drawn as vector outlines (footer legend).
+void glyphCross(int cx, int cy, int R, int r, int g, int b) {
+    for (int t = -R; t <= R; ++t) {
+        plotA(cx + t, cy + t,     r, g, b, 255);
+        plotA(cx + t, cy + t + 1, r, g, b, 255);
+        plotA(cx + t, cy - t,     r, g, b, 255);
+        plotA(cx + t, cy - t + 1, r, g, b, 255);
+    }
+}
+void glyphCircle(int cx, int cy, int R, int r, int g, int b) {
+    const int ro = R * R, ri = (R - 2) * (R - 2);
+    for (int j = -R; j <= R; ++j)
+        for (int i = -R; i <= R; ++i) {
+            const int d = i * i + j * j;
+            if (d <= ro && d >= ri) plotA(cx + i, cy + j, r, g, b, 255);
+        }
+}
+void glyphTriangle(int cx, int cy, int R, int r, int g, int b) {
+    line(cx,     cy - R,     cx - R, cy + R - 1, r, g, b);
+    line(cx - R, cy + R - 1, cx + R, cy + R - 1, r, g, b);
+    line(cx + R, cy + R - 1, cx,     cy - R,     r, g, b);
+}
+void glyphSquare(int cx, int cy, int R, int r, int g, int b) {
+    for (int t = -R; t <= R; ++t) {
+        plotA(cx + t, cy - R,     r, g, b, 255);
+        plotA(cx + t, cy - R + 1, r, g, b, 255);
+        plotA(cx + t, cy + R,     r, g, b, 255);
+        plotA(cx + t, cy + R - 1, r, g, b, 255);
+        plotA(cx - R,     cy + t, r, g, b, 255);
+        plotA(cx - R + 1, cy + t, r, g, b, 255);
+        plotA(cx + R,     cy + t, r, g, b, 255);
+        plotA(cx + R - 1, cy + t, r, g, b, 255);
     }
 }
 
@@ -187,6 +367,17 @@ int drawTextClip(int x, int y, const char* s, int sr, int sg, int sb, float pxh,
 // Draw an ASCII string clipped only to the raster.
 int drawText(int x, int y, const char* s, int sr, int sg, int sb, float pxh) {
     return drawTextClip(x, y, s, sr, sg, sb, pxh, 0, g_w);
+}
+
+// Draw an ASCII string with its cap-height box vertically centred on @p cy (using the
+// real font metrics), so labels sit true-centre in bars/pills regardless of pixel size.
+int drawTextVC(int x, int cy, const char* s, int sr, int sg, int sb, float pxh) {
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, pxh);
+    int ascent = 0, descent = 0, lineGap = 0;
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &lineGap);
+    const int baseline = cy + (int)(0.36f * pxh);      // centre the ~0.72em cap box
+    const int top = baseline - (int)(ascent * scale);
+    return drawText(x, top, s, sr, sg, sb, pxh);
 }
 
 // Copy game name @p src into @p out, dropping a trailing ".jar".
@@ -251,7 +442,8 @@ unsigned char* downscaleSquare(const unsigned char* src, int w, int h, int dst) 
     return tile;
 }
 
-// Decode + downscale the embedded PS2ME title logo once into g_titleIcon.
+// Decode + downscale the embedded PS2ME title logo once into g_titleIcon. (Mock for
+// the java_logo.png brand asset until it is supplied.)
 void loadTitleIcon() {
     if (g_titleIcon != 0) {
         return;
@@ -289,102 +481,210 @@ void drawIcon(int x, int y, int i) {
     if (IconCache::instance().draw(i, g_ras, g_w, g_h, x, y)) {
         return;
     }
-    fillRect(x, y, ICON, ICON, rgba5551(70, 74, 96));
+    fillRect(x, y, ICON, ICON, rgba5551(60, 78, 120));
     const char* nm = hal::GameStorage::instance().nameAt(i);
     char c[2];
     c[0] = (nm != 0 && nm[0] != 0) ? nm[0] : '?';
     c[1] = '\0';
     drawText(x + ICON / 2 - textWidth(c, 40.0f) / 2, y + ICON / 2 - 22,
-             c, 230, 230, 240, 40.0f);
+             c, 220, 230, 245, 40.0f);
 }
 
-void render(int count, int selected, int topRow, int cellW, int rowStride,
-            int gridY, int visibleRows) {
-    // Ice-white background + subtle header (light theme).
-    fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
-    fillRect(0, 0, g_w, TITLE_H, rgba5551(218, 224, 234));
-    int titleX = MARGIN;
-    if (g_titleIcon != 0) {
-        blitRGBA(g_titleIcon, TITLE_ICON, TITLE_ICON, MARGIN, (TITLE_H - TITLE_ICON) / 2);
-        titleX = MARGIN + TITLE_ICON + 12;
+// One-time distinct-initials scan for the alphabet sidebar (names arrive sorted).
+void buildInitials(int count) {
+    if (g_initialsBuilt) {
+        return;
     }
-    drawText(titleX, 10, "PS2ME", 40, 52, 84, TITLE_PX);
-
-    if (count <= 0) {
-        // No games: show the storage-resolution trace on screen (the EE console is
-        // invisible on real hardware booted standalone from USB).
-        drawText(MARGIN, gridY + 2, "Nenhum jogo encontrado. Diagnostico:",
-                 150, 60, 60, NAME_PX + 2);
-        const char* p = Ps2Storage::instance().diagText();
-        int ly = gridY + 28;
-        char line[160];
-        int li = 0;
-        for (;; ++p) {
-            if (*p == '\n' || *p == '\0') {
-                line[li] = '\0';
-                if (li > 0) {
-                    drawText(MARGIN, ly, line, 40, 46, 70, 15.0f);
-                    ly += 19;
-                }
-                li = 0;
-                if (*p == '\0') {
-                    break;
-                }
-            } else if (li < (int)sizeof(line) - 1) {
-                line[li++] = *p;
-            }
+    g_initialCount = 0;
+    for (int i = 0; i < count; ++i) {
+        const char* nm = hal::GameStorage::instance().nameAt(i);
+        char c = (nm != 0 && nm[0] != 0) ? nm[0] : '#';
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) c = '#';
+        bool found = false;
+        for (int k = 0; k < g_initialCount; ++k) {
+            if (g_initials[k] == c) { found = true; break; }
         }
+        if (!found && g_initialCount < (int)sizeof(g_initials) - 1) {
+            g_initials[g_initialCount++] = c;
+        }
+    }
+    g_initialsBuilt = true;
+}
+
+// Uppercased first letter of game @p i ('#' if none), for the sidebar highlight.
+char initialOf(int i) {
+    const char* nm = hal::GameStorage::instance().nameAt(i);
+    char c = (nm != 0 && nm[0] != 0) ? nm[0] : '#';
+    if (c >= 'a' && c <= 'z') c -= 32;
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) c = '#';
+    return c;
+}
+
+// The session clock shown in the header ("HH:MM:SS", counting up from boot).
+void formatClock(char* out, int cap) {
+    javacall_int64 ms = hal::SystemClock::instance().elapsedMillis();
+    if (ms < 0) ms = 0;
+    const javacall_int64 s = ms / 1000;
+    const int sec = (int)(s % 60);
+    const int mn  = (int)((s / 60) % 60);
+    const int hr  = (int)((s / 3600) % 100);
+    snprintf(out, cap, "%02d:%02d:%02d", hr, mn, sec);
+}
+
+// --- Region renderers -------------------------------------------------------------
+
+void drawHeader() {
+    rectVGrad(0, 0, g_w, HEADER_H, 40, 66, 120, 22, 38, 74);
+    for (int x = 0; x < g_w; ++x) plotA(x, 0, 96, 128, 186, 150);            // top sheen
+    for (int x = 0; x < g_w; ++x) plotA(x, HEADER_H - 1, 12, 20, 40, 255);   // hairline
+
+    int tx = MARGIN;
+    if (g_titleIcon != 0) {
+        blitRGBA(g_titleIcon, TITLE_ICON, TITLE_ICON, MARGIN, (HEADER_H - TITLE_ICON) / 2);
+        tx = MARGIN + TITLE_ICON + 10;
+    }
+    drawTextVC(tx, HEADER_H / 2, "PS2ME", 240, 246, 255, 26.0f);
+
+    // Right-aligned two-line clock ("SYSTEM" over the running MM:SS:mmm), as in the kit.
+    char clk[16];
+    formatClock(clk, (int)sizeof(clk));
+    const int lw = textWidth("SYSTEM", 11.0f);
+    drawText(g_w - MARGIN - lw, 3, "SYSTEM", 150, 185, 220, 11.0f);
+    const int cw = textWidth(clk, 16.0f);
+    drawText(g_w - MARGIN - cw, 15, clk, 210, 226, 246, 16.0f);
+}
+
+void drawTabs(int activeTab) {
+    static const char* labels[3] = { "ALL GAMES", "FAVORITES", "SETTINGS" };
+    const int areaX = GRID_X0 - 4;
+    const int areaW = SCROLL_X - areaX;
+    const int tabW  = 118, gap = 10;
+    const int total = 3 * tabW + 2 * gap;
+    const int x0    = areaX + (areaW - total) / 2;
+
+    for (int i = 0; i < 3; ++i) {
+        const int tx = x0 + i * (tabW + gap);
+        const bool act = (i == activeTab);
+        if (act) {
+            roundRectFillA(tx - 3, TAB_Y - 3, tabW + 6, TAB_H + 6, 11, 70, 200, 255, 55);
+            roundRectFillA(tx - 1, TAB_Y - 1, tabW + 2, TAB_H + 2, 10, 120, 230, 255, 255);
+            roundRectVGrad(tx, TAB_Y, tabW, TAB_H, 9, 46, 96, 150, 30, 64, 110);
+        } else {
+            roundRectVGrad(tx, TAB_Y, tabW, TAB_H, 9, 44, 64, 104, 26, 40, 76);
+        }
+        char lbl[32];
+        snprintf(lbl, (int)sizeof(lbl), "[ %s ]", labels[i]);
+        const int lw = textWidth(lbl, 15.0f);
+        const int tr = act ? 245 : 150;
+        const int tg = act ? 250 : 178;
+        const int tb = act ? 255 : 208;
+        drawTextVC(tx + (tabW - lw) / 2, TAB_Y + TAB_H / 2, lbl, tr, tg, tb, 15.0f);
+    }
+}
+
+void drawSidebar(int count, int selected) {
+    const int y0 = CONTENT_Y;
+    const int h  = CONTENT_BOTTOM - CONTENT_Y;
+    panel(SIDE_X, y0, SIDE_W, h, 6);
+    if (count <= 0 || g_initialCount <= 0) {
         return;
     }
 
-    // Only the visible page is drawn (the grid can hold ~1200 games).
+    const char cur = initialOf(selected);
+    const int rowH = 15;
+    int maxShow = (h - 8) / rowH;
+    if (maxShow < 1) maxShow = 1;
+    const int n = g_initialCount;
+    const int show = n < maxShow ? n : maxShow;
+
+    int curIdx = 0;
+    for (int k = 0; k < n; ++k) {
+        if (g_initials[k] == cur) { curIdx = k; break; }
+    }
+    int start = curIdx - show / 2;
+    if (start < 0) start = 0;
+    if (start + show > n) start = n - show;
+
+    int y = y0 + 6;
+    for (int k = start; k < start + show; ++k) {
+        const bool act = (g_initials[k] == cur);
+        char s[2] = { g_initials[k], 0 };
+        const int lw = textWidth(s, 13.0f);
+        const int lx = SIDE_X + (SIDE_W - lw) / 2;
+        if (act) {
+            roundRectFillA(SIDE_X + 1, y - 1, SIDE_W - 2, rowH, 4, 90, 215, 255, 255);
+            drawText(lx, y, s, 18, 38, 68, 13.0f);
+        } else {
+            drawText(lx, y, s, 150, 180, 215, 13.0f);
+        }
+        y += rowH;
+    }
+}
+
+void drawScrollbar(int count, int topRow) {
+    const int trackY = CONTENT_Y;
+    const int trackH = CONTENT_BOTTOM - CONTENT_Y;
+    roundRectVGrad(SCROLL_X, trackY, 6, trackH, 3, 20, 32, 60, 14, 22, 44);
+    const int totalRows = (count + COLS - 1) / COLS;
+    if (totalRows > ROWS) {
+        int thumbH = trackH * ROWS / totalRows;
+        if (thumbH < 16) thumbH = 16;
+        const int maxTop = totalRows - ROWS;
+        const int thumbY = trackY + (trackH - thumbH) * topRow / (maxTop > 0 ? maxTop : 1);
+        roundRectVGrad(SCROLL_X, thumbY, 6, thumbH, 3, 100, 190, 240, 50, 110, 180);
+    }
+}
+
+void drawGrid(int count, int selected, int topRow) {
     const int firstIdx = topRow * COLS;
-    const int lastIdx  = (topRow + visibleRows) * COLS;   // exclusive
+    const int lastIdx  = (topRow + ROWS) * COLS;   // exclusive
     for (int i = firstIdx; i < count && i < lastIdx; ++i) {
         const int r = i / COLS;
         const int c = i % COLS;
-        const int cellX = MARGIN + c * (cellW + GAP);
-        const int cellY = gridY + (r - topRow) * rowStride;
-        const int cellH = rowStride - VGAP;
-        const bool sel = (i == selected);
+        const int cellX = GRID_X0 + c * (GRID_CELLW + GRID_GAP);
+        const int cellY = GRID_Y0 + (r - topRow) * GRID_ROWSTRIDE;
+        const int cellH = GRID_ROWSTRIDE - 4;
+        const bool sel  = (i == selected);
 
         if (sel) {
-            fillRect(cellX, cellY - 2, cellW, cellH, rgba5551(70, 130, 225));
+            drawSelection(cellX + 2, cellY, GRID_CELLW - 4, cellH, 8);
+        } else {
+            roundRectVGrad(cellX + 2, cellY, GRID_CELLW - 4, cellH, 8, 40, 60, 104, 24, 40, 76);
         }
 
-        drawIcon(cellX + (cellW - ICON) / 2, cellY, i);
+        const int iconX = cellX + (GRID_CELLW - ICON) / 2;
+        const int iconY = cellY + 3;
+        drawIcon(iconX, iconY, i);
 
         const char* nm = hal::GameStorage::instance().nameAt(i);
         if (nm == 0) {
             nm = "?";
         }
-        const int nameY = cellY + ICON + 6;
+        const int nameY = iconY + ICON + 2;   // sits inside the tile (no overflow)
         const int pad   = 4;
         const int clipL = cellX + pad;
-        const int clipR = cellX + cellW - pad;
-        const int avail = cellW - 2 * pad;
-        // Light text over the highlight; dark text on the ice-white background.
-        const int tr = sel ? 255 : 55;
-        const int tg = sel ? 255 : 62;
-        const int tb = sel ? 255 : 82;
+        const int clipR = cellX + GRID_CELLW - pad;
+        const int avail = GRID_CELLW - 2 * pad;
+        const int tr = sel ? 255 : 210;
+        const int tg = sel ? 255 : 220;
+        const int tb = sel ? 255 : 235;
 
         char base[128];
         stripJar(base, (int)sizeof(base), nm);
         const int fullW = textWidth(base, NAME_PX);
 
         if (!sel || fullW <= avail) {
-            // Static: truncate ("..") when it overflows, otherwise centre.
             char label[48];
             makeLabel(label, (int)sizeof(label), nm, (float)avail, NAME_PX);
             const int tw = textWidth(label, NAME_PX);
-            drawText(cellX + (cellW - tw) / 2, nameY, label, tr, tg, tb, NAME_PX);
+            drawText(cellX + (GRID_CELLW - tw) / 2, nameY, label, tr, tg, tb, NAME_PX);
         } else {
-            // Active item whose name overflows: auto-shift (marquee) the full name,
-            // clipped to the cell, with a seamless wrap and a brief start pause.
-            const int period = fullW + 32;             // trailing gap before repeat
-            int t = (int)g_marqueeTick - 45;           // hold at the start briefly
+            // Active item whose name overflows: auto-shift (marquee) the full name.
+            const int period = fullW + 32;
+            int t = (int)g_marqueeTick - 45;
             if (t < 0) t = 0;
-            const int off = (t / 2) % period;          // ~30 px/s at 60 fps
+            const int off = (t / 2) % period;
             const int x0  = clipL - off;
             drawTextClip(x0,          nameY, base, tr, tg, tb, NAME_PX, clipL, clipR);
             drawTextClip(x0 + period, nameY, base, tr, tg, tb, NAME_PX, clipL, clipR);
@@ -392,16 +692,154 @@ void render(int count, int selected, int topRow, int cellW, int rowStride,
     }
 }
 
-// Allocate the DMA-aligned native-resolution raster and bring up the shared GS.
+void drawDetails(int count, int selected) {
+    const int px = DET_X, py = CONTENT_Y, pw = DET_W, ph = CONTENT_BOTTOM - CONTENT_Y;
+    panel(px, py, pw, ph, 10);
+    drawText(px + 10, py + 8, "GAME DETAILS", 150, 185, 220, 12.0f);
+    if (count <= 0) {
+        return;
+    }
+
+    // Vertically centre the preview + name + counter block in the panel body (below
+    // the "GAME DETAILS" caption), so the panel reads balanced rather than top-heavy.
+    const int prev = pw - 26;
+    const int gap1 = 12, nameH = 16, gap2 = 8, infoH = 14;
+    const int blockH = prev + gap1 + nameH + gap2 + infoH;
+    const int regTop = py + 26, regBot = py + ph - 8;
+    int top = regTop + ((regBot - regTop) - blockH) / 2;
+    if (top < regTop) top = regTop;
+
+    const int prevX = px + (pw - prev) / 2;
+    const int prevY = top;
+
+    // Recessed frame behind the preview.
+    roundRectFillA(prevX - 3, prevY - 3, prev + 6, prev + 6, 8, 120, 150, 205, 255);
+    roundRectVGrad(prevX - 2, prevY - 2, prev + 4, prev + 4, 7, 28, 46, 86, 18, 32, 64);
+
+    if (!IconCache::instance().drawScaled(selected, g_ras, g_w, g_h, prevX, prevY, prev)) {
+        char c[2] = { initialOf(selected), 0 };
+        drawText(prevX + prev / 2 - textWidth(c, 64.0f) / 2, prevY + prev / 2 - 36,
+                 c, 210, 224, 244, 64.0f);
+    }
+
+    const char* nm = hal::GameStorage::instance().nameAt(selected);
+    char lbl[40];
+    makeLabel(lbl, (int)sizeof(lbl), nm != 0 ? nm : "?", (float)(pw - 16), 16.0f);
+    const int lw = textWidth(lbl, 16.0f);
+    drawText(px + (pw - lw) / 2, prevY + prev + gap1, lbl, 235, 242, 252, 16.0f);
+
+    char info[32];
+    snprintf(info, (int)sizeof(info), "%d / %d", selected + 1, count);
+    const int iw = textWidth(info, 13.0f);
+    drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
+}
+
+void drawFooter() {
+    rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
+    for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
+    const int cy = FOOTER_Y + FOOTER_H / 2;
+
+    // One legend entry: a face-button glyph (drawn by kind) + its label.
+    static const char* labels[4] = { "LAUNCH", "BACK", "FAVORITE", "SORT BY..." };
+    const int glyphW = 16;   // glyph column (centre at +7) before the label
+    const int itemGap = 26;
+
+    // Measure so the whole legend can be centred across the footer.
+    int total = 0;
+    for (int i = 0; i < 4; ++i) {
+        total += glyphW + textWidth(labels[i], 15.0f);
+        if (i < 3) total += itemGap;
+    }
+    int x = (g_w - total) / 2;
+    if (x < MARGIN) x = MARGIN;
+
+    for (int i = 0; i < 4; ++i) {
+        const int gcx = x + 7;
+        if      (i == 0) glyphCross(gcx,    cy, 7, 100, 150, 235);
+        else if (i == 1) glyphCircle(gcx,   cy, 7, 235,  92,  92);
+        else if (i == 2) glyphTriangle(gcx, cy, 7,  92, 216, 150);
+        else             glyphSquare(gcx,   cy, 7, 230, 112, 190);
+        drawTextVC(x + glyphW, cy, labels[i], 232, 240, 250, 15.0f);
+        x += glyphW + textWidth(labels[i], 15.0f) + itemGap;
+    }
+}
+
+void render(int count, int selected, int topRow, int activeTab) {
+    memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
+    drawHeader();
+    drawTabs(activeTab);
+    drawSidebar(count, selected);
+    drawScrollbar(count, topRow);
+    drawDetails(count, selected);
+    drawFooter();
+
+    if (count <= 0) {
+        // No games: show the storage-resolution trace in the grid area (the EE console
+        // is invisible on real hardware booted standalone from USB).
+        drawText(GRID_X0, GRID_Y0 + 2, "No games found. Diagnostics:", 235, 120, 120, NAME_PX + 2);
+        const char* p = Ps2Storage::instance().diagText();
+        int ly = GRID_Y0 + 28;
+        char lineBuf[160];
+        int li = 0;
+        for (;; ++p) {
+            if (*p == '\n' || *p == '\0') {
+                lineBuf[li] = '\0';
+                if (li > 0) {
+                    drawText(GRID_X0, ly, lineBuf, 200, 214, 235, 15.0f);
+                    ly += 19;
+                }
+                li = 0;
+                if (*p == '\0') break;
+            } else if (li < (int)sizeof(lineBuf) - 1) {
+                lineBuf[li++] = *p;
+            }
+        }
+        return;
+    }
+
+    drawGrid(count, selected, topRow);
+}
+
+// Bake the static background (vertical gradient + radial vignette) into g_bg once, so
+// each frame just memcpy's it rather than recomputing the per-pixel vignette.
+void buildBackground() {
+    if (g_bg == 0) {
+        return;
+    }
+    const int cx = g_w / 2, cy = g_h / 2;
+    const int dxs = cx * cx / 45 + 1;
+    const int dys = cy * cy / 45 + 1;
+    for (int y = 0; y < g_h; ++y) {
+        const int t = (g_h > 1) ? (y * 255 / (g_h - 1)) : 0;
+        const int br = 18 + (28 - 18) * t / 255;
+        const int bg = 28 + (46 - 28) * t / 255;
+        const int bb = 54 + (88 - 54) * t / 255;
+        const int dy = y - cy;
+        const int vy = (dy * dy) / dys;
+        u16* row = g_bg + y * g_w;
+        for (int x = 0; x < g_w; ++x) {
+            const int dx = x - cx;
+            int f = 100 - ((dx * dx) / dxs + vy);
+            if (f < 58) f = 58;
+            if (f > 100) f = 100;
+            row[x] = rgba5551(br * f / 100, bg * f / 100, bb * f / 100);
+        }
+    }
+}
+
+// Allocate the DMA-aligned native-resolution raster (+ baked background) and bring up
+// the shared GS.
 bool ensureVideo() {
     if (g_ras == 0) {
         const size_t bytes = (size_t)SCREEN_W * SCREEN_H * sizeof(u16);
         g_ras = (u16*)memalign(128, bytes);
-        if (g_ras == 0) {
+        g_bg  = (u16*)memalign(128, bytes);
+        if (g_ras == 0 || g_bg == 0) {
             return false;
         }
         g_w = SCREEN_W;
         g_h = SCREEN_H;
+        buildBackground();
     }
     return GsDisplay::instance().init();
 }
@@ -411,6 +849,7 @@ bool ensureVideo() {
 // the launch window so the [Launcher] milestones + any exception traces render on the
 // native GS -- the only console left once the USB IOP reset kills the SIF tty. Bytes
 // are buffered into lines; each newline pushes a line and repaints. Bounded, no heap.
+const int LOG_TITLE_H  = 46;
 const int LOG_MAX_LINES = 22;    // fits 640x448 below the title at 17px stride
 const int LOG_LINE_CAP  = 96;    // long lines just clip to the raster width
 
@@ -425,8 +864,8 @@ void logRender() {
         return;
     }
     fillRect(0, 0, g_w, g_h, rgba5551(16, 18, 28));
-    drawText(MARGIN, 8, "PS2ME - iniciando jogo", 210, 220, 235, TITLE_PX);
-    int ly = TITLE_H + 8;
+    drawText(MARGIN, 8, "PS2ME - launching game", 210, 220, 235, 30.0f);
+    int ly = LOG_TITLE_H + 8;
     for (int i = 0; i < g_logCount; ++i) {
         drawText(MARGIN, ly, g_logLines[i], 190, 205, 225, 15.0f);
         ly += 17;
@@ -519,9 +958,11 @@ int Ps2Frontend::pick() {
 
     // First fullscreen present also allocates the GS texture; do it before the worker
     // starts, and show a brief splash while the first icons decode.
-    fillRect(0, 0, g_w, g_h, rgba5551(236, 240, 245));
-    drawText(MARGIN, g_h / 2 - 16, "Carregando...", 60, 70, 95, 24.0f);
+    memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
+    drawText(MARGIN, g_h / 2 - 16, "Loading...", 210, 224, 244, 24.0f);
     GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+
+    buildInitials(count);         // alphabet sidebar contents (once)
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
     // the controller exactly once; reading it here drives no VM code path. Do the
@@ -543,19 +984,15 @@ int Ps2Frontend::pick() {
     g_vsyncCb = graph_add_vsync_handler(onVsync);
     IconCache::instance().begin(count, ICON);
 
-    // Fixed 4 x 5 grid page.
-    const int gridY       = TITLE_H + 4;
-    const int cellW       = (g_w - 2 * MARGIN - (COLS - 1) * GAP) / COLS;
-    const int rowStride   = (g_h - gridY - 6) / ROWS;
-    const int visibleRows = ROWS;
-
     int selected = 0;
     int topRow = 0;
     int lastSel = -1;
     int lastTop = -1;
+    int lastClockSec = -1;
     int chosen = -1;
+    const int activeTab = 0;      // "ALL GAMES" -- tabs are visual-only for now
     bool firstFrame = true;
-    hal::PadButtons prev;   // all-false initial snapshot
+    hal::PadButtons prev;         // all-false initial snapshot
 
     while (chosen < 0) {
         // Poll the pad every field so input stays responsive even when we skip the
@@ -577,8 +1014,8 @@ int Ps2Frontend::pick() {
         if (selRow < topRow) {
             topRow = selRow;
         }
-        if (selRow >= topRow + visibleRows) {
-            topRow = selRow - visibleRows + 1;
+        if (selRow >= topRow + ROWS) {
+            topRow = selRow - ROWS + 1;
         }
 
         const bool moved = (selected != lastSel) || (topRow != lastTop);
@@ -594,23 +1031,25 @@ int Ps2Frontend::pick() {
             const char* nm = hal::GameStorage::instance().nameAt(selected);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
-            marquee = textWidth(base, NAME_PX) > (cellW - 8);
+            marquee = textWidth(base, NAME_PX) > (GRID_CELLW - 8);
         }
 
         // Render on demand: only when something changed -- navigation, a marquee in
-        // flight, or a freshly decoded icon. Otherwise stay blocked on vsync so the
-        // low-priority icon worker gets the whole field to decode in.
+        // flight, a freshly decoded icon, or the header clock ticking a new second.
         const bool dirty = IconCache::instance().takeDirty();
-        if (firstFrame || moved || marquee || dirty) {
+        const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
+        const bool clockTick = (nowSec != lastClockSec);
+        if (firstFrame || moved || marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
             IconCache::instance().tick();
-            render(count, selected, topRow, cellW, rowStride, gridY, visibleRows);
+            render(count, selected, topRow, activeTab);
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-            lastSel    = selected;
-            lastTop    = topRow;
-            firstFrame = false;
+            lastSel      = selected;
+            lastTop      = topRow;
+            lastClockSec = nowSec;
+            firstFrame   = false;
         }
         waitFrame();
     }

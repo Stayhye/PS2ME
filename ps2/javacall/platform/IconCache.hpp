@@ -37,6 +37,13 @@ public:
     /// the caller draws a placeholder this frame.
     bool draw(int game, unsigned short* raster, int rw, int rh, int x, int y);
 
+    /// Like draw(), but nearest-neighbour upscales the cached tile to a @p destSize
+    /// square at (x,y) -- used by the details-panel large preview. Draw-only: never
+    /// queues (the grid already requests the on-screen icons). Returns false if the
+    /// tile is not cached yet.
+    bool drawScaled(int game, unsigned short* raster, int rw, int rh,
+                    int x, int y, int destSize);
+
     /// Drop queued (not-yet-started) requests. Pair with busy() to quiesce the worker
     /// before handing the CPU to the VM.
     void clearPending();
