@@ -147,6 +147,7 @@ JC_SRCS="
     platform/Ps2Audio.cpp
     platform/MidletIcon.cpp
     platform/IconCache.cpp
+    platform/Favorites.cpp
     platform/Ps2Frontend.cpp
 "
 JC_OBJS=""

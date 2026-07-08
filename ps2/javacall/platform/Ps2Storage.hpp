@@ -39,6 +39,11 @@ public:
     /// Writes into @p out (capacity @p cap); returns false if it would not fit.
     bool bankPath(char* out, int cap);
 
+    /// Path of the favourites list file: "<bootdir>favorites.txt" (beside games/), or
+    /// "host:favorites.txt" when the boot dir wasn't resolved (dev fallback under
+    /// PCSX2). Writes into @p out (capacity @p cap); returns false if it would not fit.
+    bool favoritesPath(char* out, int cap);
+
     /// Whether the on-disk tile cache is available (its location is writable).
     bool cacheEnabled() const { return cacheOk_; }
 

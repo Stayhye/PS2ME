@@ -23,6 +23,7 @@
 #include "GsDisplay.hpp"
 #include "MidletIcon.hpp"
 #include "IconCache.hpp"
+#include "Favorites.hpp"
 #include "Ps2Storage.hpp"
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
@@ -118,6 +119,13 @@ unsigned char* g_titleIcon = 0;
 char g_initials[48];
 int  g_initialCount = 0;
 bool g_initialsBuilt = false;
+
+// The current tab's "view": a list of game indices to display/navigate. ALL GAMES is
+// the identity (all games); FAVORITES is the favourited subset. Rebuilt on tab change
+// and whenever a favourite is toggled.
+const int MAX_VIEW = 2048;      // matches Ps2HostStorage / IconCache caps
+int g_view[MAX_VIEW];
+int g_viewCount = 0;
 
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
@@ -306,6 +314,52 @@ void glyphSquare(int cx, int cy, int R, int r, int g, int b) {
         plotA(cx - R + 1, cy + t, r, g, b, 255);
         plotA(cx + R,     cy + t, r, g, b, 255);
         plotA(cx + R - 1, cy + t, r, g, b, 255);
+    }
+}
+
+inline int edgeFn(int ax, int ay, int bx, int by, int px, int py) {
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+// Solid triangle fill (bounding-box + edge-sign test; handles either winding).
+void fillTriangle(int ax, int ay, int bx, int by, int cx, int cy, int r, int g, int b) {
+    int minx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
+    int maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
+    int miny = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
+    int maxy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+    if (minx < 0) minx = 0;
+    if (miny < 0) miny = 0;
+    if (maxx >= g_w) maxx = g_w - 1;
+    if (maxy >= g_h) maxy = g_h - 1;
+    for (int y = miny; y <= maxy; ++y) {
+        for (int x = minx; x <= maxx; ++x) {
+            const int w0 = edgeFn(bx, by, cx, cy, x, y);
+            const int w1 = edgeFn(cx, cy, ax, ay, x, y);
+            const int w2 = edgeFn(ax, ay, bx, by, x, y);
+            if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                plotA(x, y, r, g, b, 255);
+            }
+        }
+    }
+}
+
+// A solid 5-point star (favourite marker), as a triangle fan from the centre. Unit
+// vertices alternate outer/inner around an up-pointing star (screen coords, y down).
+void drawStar(int cx, int cy, int outR, int r, int g, int b) {
+    static const float ux[10] = { 0.000f,  0.588f,  0.951f,  0.951f,  0.588f,
+                                  0.000f, -0.588f, -0.951f, -0.951f, -0.588f };
+    static const float uy[10] = { -1.000f, -0.809f, -0.309f,  0.309f,  0.809f,
+                                   1.000f,  0.809f,  0.309f, -0.309f, -0.809f };
+    const float innR = outR * 0.45f;
+    int px[10], py[10];
+    for (int i = 0; i < 10; ++i) {
+        const float R = (i % 2 == 0) ? (float)outR : innR;
+        px[i] = cx + (int)(ux[i] * R + (ux[i] < 0 ? -0.5f : 0.5f));
+        py[i] = cy + (int)(uy[i] * R + (uy[i] < 0 ? -0.5f : 0.5f));
+    }
+    for (int i = 0; i < 10; ++i) {
+        const int j = (i + 1) % 10;
+        fillTriangle(cx, cy, px[i], py[i], px[j], py[j], r, g, b);
     }
 }
 
@@ -521,6 +575,20 @@ char initialOf(int i) {
     return c;
 }
 
+// Rebuild g_view for the active tab: identity (all games) for ALL GAMES, the
+// favourited subset for FAVORITES, empty for SETTINGS.
+void rebuildView(int activeTab, int count) {
+    if (activeTab == 1) {
+        g_viewCount = Favorites::instance().list(g_view, MAX_VIEW);
+    } else if (activeTab == 0) {
+        int n = count < MAX_VIEW ? count : MAX_VIEW;
+        for (int i = 0; i < n; ++i) g_view[i] = i;
+        g_viewCount = n;
+    } else {
+        g_viewCount = 0;
+    }
+}
+
 // The session clock shown in the header ("HH:MM:SS", counting up from boot).
 void formatClock(char* out, int cap) {
     javacall_int64 ms = hal::SystemClock::instance().elapsedMillis();
@@ -611,15 +679,15 @@ void drawTabs(int activeTab) {
     drawTabHint(x0 + total + 10, hy, "R1", false);
 }
 
-void drawSidebar(int count, int selected) {
+void drawSidebar(int curGame) {
     const int y0 = CONTENT_Y;
     const int h  = CONTENT_BOTTOM - CONTENT_Y;
     panel(SIDE_X, y0, SIDE_W, h, 6);
-    if (count <= 0 || g_initialCount <= 0) {
+    if (curGame < 0 || g_initialCount <= 0) {
         return;
     }
 
-    const char cur = initialOf(selected);
+    const char cur = initialOf(curGame);
     const int rowH = 15;
     int maxShow = (h - 8) / rowH;
     if (maxShow < 1) maxShow = 1;
@@ -650,11 +718,11 @@ void drawSidebar(int count, int selected) {
     }
 }
 
-void drawScrollbar(int count, int topRow) {
+void drawScrollbar(int viewCount, int topRow) {
     const int trackY = CONTENT_Y;
     const int trackH = CONTENT_BOTTOM - CONTENT_Y;
     roundRectVGrad(SCROLL_X, trackY, 6, trackH, 3, 20, 32, 60, 14, 22, 44);
-    const int totalRows = (count + COLS - 1) / COLS;
+    const int totalRows = (viewCount + COLS - 1) / COLS;
     if (totalRows > ROWS) {
         int thumbH = trackH * ROWS / totalRows;
         if (thumbH < 16) thumbH = 16;
@@ -664,10 +732,11 @@ void drawScrollbar(int count, int topRow) {
     }
 }
 
-void drawGrid(int count, int selected, int topRow) {
+void drawGrid(int viewCount, int selected, int topRow, const int* view) {
     const int firstIdx = topRow * COLS;
     const int lastIdx  = (topRow + ROWS) * COLS;   // exclusive
-    for (int i = firstIdx; i < count && i < lastIdx; ++i) {
+    for (int i = firstIdx; i < viewCount && i < lastIdx; ++i) {
+        const int game  = view[i];
         const int r = i / COLS;
         const int c = i % COLS;
         const int cellX = GRID_X0 + c * (GRID_CELLW + GRID_GAP);
@@ -683,9 +752,16 @@ void drawGrid(int count, int selected, int topRow) {
 
         const int iconX = cellX + (GRID_CELLW - ICON) / 2;
         const int iconY = cellY + 3;
-        drawIcon(iconX, iconY, i);
+        drawIcon(iconX, iconY, game);
 
-        const char* nm = hal::GameStorage::instance().nameAt(i);
+        // Favourite marker: a gold star (dark halo) at the tile's top-right.
+        if (Favorites::instance().isFavorite(game)) {
+            const int sx = cellX + GRID_CELLW - 12, sy = cellY + 11;
+            drawStar(sx, sy, 7, 40, 34, 10);
+            drawStar(sx, sy, 6, 255, 205, 60);
+        }
+
+        const char* nm = hal::GameStorage::instance().nameAt(game);
         if (nm == 0) {
             nm = "?";
         }
@@ -720,13 +796,14 @@ void drawGrid(int count, int selected, int topRow) {
     }
 }
 
-void drawDetails(int count, int selected) {
+void drawDetails(int viewCount, int selected, const int* view) {
     const int px = DET_X, py = CONTENT_Y, pw = DET_W, ph = CONTENT_BOTTOM - CONTENT_Y;
     panel(px, py, pw, ph, 10);
     drawText(px + 10, py + 8, "GAME DETAILS", 150, 185, 220, 12.0f);
-    if (count <= 0) {
+    if (viewCount <= 0) {
         return;
     }
+    const int game = view[selected];
 
     // Vertically centre the preview + name + counter block in the panel body (below
     // the "GAME DETAILS" caption), so the panel reads balanced rather than top-heavy.
@@ -744,20 +821,20 @@ void drawDetails(int count, int selected) {
     roundRectFillA(prevX - 3, prevY - 3, prev + 6, prev + 6, 8, 120, 150, 205, 255);
     roundRectVGrad(prevX - 2, prevY - 2, prev + 4, prev + 4, 7, 28, 46, 86, 18, 32, 64);
 
-    if (!IconCache::instance().drawScaled(selected, g_ras, g_w, g_h, prevX, prevY, prev)) {
-        char c[2] = { initialOf(selected), 0 };
+    if (!IconCache::instance().drawScaled(game, g_ras, g_w, g_h, prevX, prevY, prev)) {
+        char c[2] = { initialOf(game), 0 };
         drawText(prevX + prev / 2 - textWidth(c, 64.0f) / 2, prevY + prev / 2 - 36,
                  c, 210, 224, 244, 64.0f);
     }
 
-    const char* nm = hal::GameStorage::instance().nameAt(selected);
+    const char* nm = hal::GameStorage::instance().nameAt(game);
     char lbl[40];
     makeLabel(lbl, (int)sizeof(lbl), nm != 0 ? nm : "?", (float)(pw - 16), 16.0f);
     const int lw = textWidth(lbl, 16.0f);
     drawText(px + (pw - lw) / 2, prevY + prev + gap1, lbl, 235, 242, 252, 16.0f);
 
     char info[32];
-    snprintf(info, (int)sizeof(info), "%d / %d", selected + 1, count);
+    snprintf(info, (int)sizeof(info), "%d / %d", selected + 1, viewCount);
     const int iw = textWidth(info, 13.0f);
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
 }
@@ -800,27 +877,23 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-void render(int count, int selected, int topRow, int activeTab) {
+void render(int viewCount, int selected, int topRow, int activeTab, const int* view) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
-    drawSidebar(count, selected);
+    const int curGame = viewCount > 0 ? view[selected] : -1;
+    drawSidebar(curGame);
     drawFooter();
 
-    // FAVORITES / SETTINGS: content not implemented yet -- show a placeholder so the
-    // tab switch is visibly working. (Filled in by later features.)
-    if (activeTab != 0) {
-        drawContentMessage(activeTab == 1
-            ? "No favorites yet -- mark games with TRIANGLE"
-            : "Settings -- coming soon");
+    if (activeTab == 2) {                       // SETTINGS: not implemented yet
+        drawContentMessage("Settings -- coming soon");
         return;
     }
-
-    // ALL GAMES.
-    drawScrollbar(count, topRow);
-    drawDetails(count, selected);
-
-    if (count <= 0) {
+    if (activeTab == 1 && viewCount <= 0) {     // FAVORITES: empty
+        drawContentMessage("No favorites yet -- mark games with TRIANGLE");
+        return;
+    }
+    if (activeTab == 0 && viewCount <= 0) {
         // No games: show the storage-resolution trace in the grid area (the EE console
         // is invisible on real hardware booted standalone from USB).
         drawText(GRID_X0, GRID_Y0 + 2, "No games found. Diagnostics:", 235, 120, 120, NAME_PX + 2);
@@ -844,7 +917,9 @@ void render(int count, int selected, int topRow, int activeTab) {
         return;
     }
 
-    drawGrid(count, selected, topRow);
+    drawScrollbar(viewCount, topRow);
+    drawDetails(viewCount, selected, view);
+    drawGrid(viewCount, selected, topRow, view);
 }
 
 // Bake the static background (vertical gradient + radial vignette) into g_bg once, so
@@ -1010,6 +1085,7 @@ int Ps2Frontend::pick() {
     GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
 
     buildInitials(count);         // alphabet sidebar contents (once)
+    Favorites::instance().load(count);   // persisted favourites -> game indices
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
     // the controller exactly once; reading it here drives no VM code path. Do the
@@ -1041,28 +1117,44 @@ int Ps2Frontend::pick() {
     int activeTab = 0;            // 0=ALL GAMES, 1=FAVORITES, 2=SETTINGS (L1/R1 switch)
     bool firstFrame = true;
     hal::PadButtons prev;         // all-false initial snapshot
+    rebuildView(activeTab, count);   // initial view (all games)
 
     while (chosen < 0) {
         // Poll the pad every field so input stays responsive even when we skip the
         // (expensive) redraw below.
+        bool favToggled = false;
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
-            // Tab switching (L1/R1) works on any tab.
-            if (b.r1 && !prev.r1 && activeTab < 2) { activeTab++; }
-            if (b.l1 && !prev.l1 && activeTab > 0) { activeTab--; }
-            // Grid navigation + launch only on the ALL GAMES tab.
-            if (count > 0 && activeTab == 0) {
-                if (b.right && !prev.right && selected + 1 < count)    { selected++; }
-                if (b.left  && !prev.left  && selected > 0)            { selected--; }
-                if (b.down  && !prev.down  && selected + COLS < count) { selected += COLS; }
-                if (b.up    && !prev.up    && selected - COLS >= 0)    { selected -= COLS; }
-                if (b.cross && !prev.cross)                            { chosen = selected; }
+            // Tab switching (L1/R1) works on any tab; resets the view + selection.
+            if (b.r1 && !prev.r1 && activeTab < 2) {
+                activeTab++; rebuildView(activeTab, count); selected = 0; topRow = 0;
+            }
+            if (b.l1 && !prev.l1 && activeTab > 0) {
+                activeTab--; rebuildView(activeTab, count); selected = 0; topRow = 0;
+            }
+            // Grid navigation + actions on the tabs that show a grid (ALL GAMES/FAVORITES).
+            if (g_viewCount > 0 && (activeTab == 0 || activeTab == 1)) {
+                if (b.right && !prev.right && selected + 1 < g_viewCount)    { selected++; }
+                if (b.left  && !prev.left  && selected > 0)                 { selected--; }
+                if (b.down  && !prev.down  && selected + COLS < g_viewCount) { selected += COLS; }
+                if (b.up    && !prev.up    && selected - COLS >= 0)         { selected -= COLS; }
+                if (b.cross && !prev.cross)                                 { chosen = g_view[selected]; }
+                if (b.triangle && !prev.triangle) {
+                    Favorites::instance().toggle(g_view[selected]);
+                    favToggled = true;
+                    if (activeTab == 1) {   // a toggled-off game leaves the favourites view
+                        rebuildView(activeTab, count);
+                        if (selected >= g_viewCount) {
+                            selected = g_viewCount > 0 ? g_viewCount - 1 : 0;
+                        }
+                    }
+                }
             }
             prev = b;
         }
 
         // Keep the selected row within the visible window.
-        const int selRow = (count > 0) ? selected / COLS : 0;
+        const int selRow = (g_viewCount > 0) ? selected / COLS : 0;
         if (selRow < topRow) {
             topRow = selRow;
         }
@@ -1077,27 +1169,27 @@ int Ps2Frontend::pick() {
         }
 
         // Does the active item's name overflow its cell? Only then must we keep
-        // redrawing every field to animate the marquee (ALL GAMES tab only).
+        // redrawing every field to animate the marquee (grid tabs only).
         bool marquee = false;
-        if (count > 0 && !moved && activeTab == 0) {
-            const char* nm = hal::GameStorage::instance().nameAt(selected);
+        if (g_viewCount > 0 && !moved && (activeTab == 0 || activeTab == 1)) {
+            const char* nm = hal::GameStorage::instance().nameAt(g_view[selected]);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
             marquee = textWidth(base, NAME_PX) > (GRID_CELLW - 8);
         }
 
         // Render on demand: only when something changed -- navigation, a tab switch, a
-        // marquee in flight, a freshly decoded icon, or the clock ticking a new second.
+        // favourite toggle, a marquee in flight, a decoded icon, or a new clock second.
         const bool tabChanged = (activeTab != lastTab);
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || tabChanged || marquee || dirty || clockTick) {
+        if (firstFrame || moved || tabChanged || favToggled || marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
             IconCache::instance().tick();
-            render(count, selected, topRow, activeTab);
+            render(g_viewCount, selected, topRow, activeTab, g_view);
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
             lastSel      = selected;
             lastTop      = topRow;

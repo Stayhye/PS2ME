@@ -293,6 +293,14 @@ bool Ps2Storage::bankPath(char* out, int cap) {
     return n > 0 && n < cap;
 }
 
+bool Ps2Storage::favoritesPath(char* out, int cap) {
+    // Sits beside the games (same resolved boot dir); host: fallback like bankPath().
+    const int n = (baseDir_[0] != '\0')
+                      ? snprintf(out, cap, "%sfavorites.txt", baseDir_)
+                      : snprintf(out, cap, "host:favorites.txt");
+    return n > 0 && n < cap;
+}
+
 bool Ps2Storage::cachePath(char* out, int cap, const char* jarName,
                            int jarSize, int iconSize) {
     char safe[96];
