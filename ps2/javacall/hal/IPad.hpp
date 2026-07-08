@@ -10,19 +10,24 @@
 namespace ps2 {
 namespace hal {
 
-/// Active-high digital button snapshot. Only the buttons the J2ME keypad maps.
+/// Active-high digital button snapshot. Covers the buttons the J2ME keypad maps
+/// plus the face buttons the native front-end uses for its menu actions.
 struct PadButtons {
     bool up;
     bool down;
     bool left;
     bool right;
-    bool cross;   // primary action / fire
-    bool l1;      // left soft key
-    bool r1;      // right soft key
+    bool cross;      // primary action / fire / launch
+    bool circle;     // back / cancel (native menu)
+    bool triangle;   // favourite (native menu)
+    bool square;     // sort (native menu)
+    bool l1;         // left soft key / prev tab
+    bool r1;         // right soft key / next tab
 
     PadButtons()
         : up(false), down(false), left(false), right(false),
-          cross(false), l1(false), r1(false) {}
+          cross(false), circle(false), triangle(false), square(false),
+          l1(false), r1(false) {}
 };
 
 class IPad {

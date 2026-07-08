@@ -78,9 +78,12 @@ bool Ps2Pad::read(hal::PadButtons* out) {
     out->down  = (d & PAD_DOWN)  != 0;
     out->left  = (d & PAD_LEFT)  != 0;
     out->right = (d & PAD_RIGHT) != 0;
-    out->cross = (d & PAD_CROSS) != 0;
-    out->l1    = (d & PAD_L1)    != 0;
-    out->r1    = (d & PAD_R1)    != 0;
+    out->cross    = (d & PAD_CROSS)    != 0;
+    out->circle   = (d & PAD_CIRCLE)   != 0;
+    out->triangle = (d & PAD_TRIANGLE) != 0;
+    out->square   = (d & PAD_SQUARE)   != 0;
+    out->l1       = (d & PAD_L1)       != 0;
+    out->r1       = (d & PAD_R1)       != 0;
     return true;
 }
 

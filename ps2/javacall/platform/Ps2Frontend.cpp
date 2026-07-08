@@ -555,6 +555,29 @@ void drawHeader() {
     drawText(g_w - MARGIN - cw, 15, clk, 210, 226, 246, 16.0f);
 }
 
+// A small solid horizontal arrowhead pointing left/right (tab movement legend).
+void chevronH(int tipX, int cy, int size, bool left, int r, int g, int b) {
+    for (int i = 0; i <= size; ++i) {
+        const int x = left ? tipX + i : tipX - i;
+        for (int j = -i; j <= i; ++j) plotA(x, cy + j, r, g, b, 255);
+    }
+}
+
+// An "L1"/"R1" shoulder-button badge flanking the tab row, with an outward arrow.
+void drawTabHint(int edgeX, int cy, const char* label, bool leftSide) {
+    const float px = 13.0f;
+    const int tw = textWidth(label, px);
+    const int bw = tw + 12, bh = 20, arrow = 5, gap = 4;
+    const int bx = leftSide ? edgeX - bw : edgeX;
+    roundRectVGrad(bx, cy - bh / 2, bw, bh, 6, 44, 64, 104, 26, 40, 76);
+    drawTextVC(bx + (bw - tw) / 2, cy, label, 185, 208, 232, px);
+    if (leftSide) {
+        chevronH(bx - gap - arrow, cy, arrow, true,  130, 180, 225);   // points left
+    } else {
+        chevronH(bx + bw + gap + arrow, cy, arrow, false, 130, 180, 225); // points right
+    }
+}
+
 void drawTabs(int activeTab) {
     static const char* labels[3] = { "ALL GAMES", "FAVORITES", "SETTINGS" };
     const int areaX = GRID_X0 - 4;
@@ -581,6 +604,11 @@ void drawTabs(int activeTab) {
         const int tb = act ? 255 : 208;
         drawTextVC(tx + (tabW - lw) / 2, TAB_Y + TAB_H / 2, lbl, tr, tg, tb, 15.0f);
     }
+
+    // Movement legend: shoulder-button hints flanking the tab row.
+    const int hy = TAB_Y + TAB_H / 2;
+    drawTabHint(x0 - 10, hy, "L1", true);
+    drawTabHint(x0 + total + 10, hy, "R1", false);
 }
 
 void drawSidebar(int count, int selected) {
@@ -764,14 +792,33 @@ void drawFooter() {
     }
 }
 
+// A single centred line across the main content area (empty tab placeholders).
+void drawContentMessage(const char* msg) {
+    const int left = GRID_X0, right = DET_X + DET_W;
+    const int cy = (CONTENT_Y + CONTENT_BOTTOM) / 2;
+    const int w = textWidth(msg, 18.0f);
+    drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
+}
+
 void render(int count, int selected, int topRow, int activeTab) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
     drawSidebar(count, selected);
+    drawFooter();
+
+    // FAVORITES / SETTINGS: content not implemented yet -- show a placeholder so the
+    // tab switch is visibly working. (Filled in by later features.)
+    if (activeTab != 0) {
+        drawContentMessage(activeTab == 1
+            ? "No favorites yet -- mark games with TRIANGLE"
+            : "Settings -- coming soon");
+        return;
+    }
+
+    // ALL GAMES.
     drawScrollbar(count, topRow);
     drawDetails(count, selected);
-    drawFooter();
 
     if (count <= 0) {
         // No games: show the storage-resolution trace in the grid area (the EE console
@@ -988,9 +1035,10 @@ int Ps2Frontend::pick() {
     int topRow = 0;
     int lastSel = -1;
     int lastTop = -1;
+    int lastTab = -1;
     int lastClockSec = -1;
     int chosen = -1;
-    const int activeTab = 0;      // "ALL GAMES" -- tabs are visual-only for now
+    int activeTab = 0;            // 0=ALL GAMES, 1=FAVORITES, 2=SETTINGS (L1/R1 switch)
     bool firstFrame = true;
     hal::PadButtons prev;         // all-false initial snapshot
 
@@ -999,7 +1047,11 @@ int Ps2Frontend::pick() {
         // (expensive) redraw below.
         hal::PadButtons b;
         if (pad != 0 && pad->ensureReady() && pad->read(&b)) {
-            if (count > 0) {
+            // Tab switching (L1/R1) works on any tab.
+            if (b.r1 && !prev.r1 && activeTab < 2) { activeTab++; }
+            if (b.l1 && !prev.l1 && activeTab > 0) { activeTab--; }
+            // Grid navigation + launch only on the ALL GAMES tab.
+            if (count > 0 && activeTab == 0) {
                 if (b.right && !prev.right && selected + 1 < count)    { selected++; }
                 if (b.left  && !prev.left  && selected > 0)            { selected--; }
                 if (b.down  && !prev.down  && selected + COLS < count) { selected += COLS; }
@@ -1025,21 +1077,22 @@ int Ps2Frontend::pick() {
         }
 
         // Does the active item's name overflow its cell? Only then must we keep
-        // redrawing every field to animate the marquee.
+        // redrawing every field to animate the marquee (ALL GAMES tab only).
         bool marquee = false;
-        if (count > 0 && !moved) {
+        if (count > 0 && !moved && activeTab == 0) {
             const char* nm = hal::GameStorage::instance().nameAt(selected);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
             marquee = textWidth(base, NAME_PX) > (GRID_CELLW - 8);
         }
 
-        // Render on demand: only when something changed -- navigation, a marquee in
-        // flight, a freshly decoded icon, or the header clock ticking a new second.
+        // Render on demand: only when something changed -- navigation, a tab switch, a
+        // marquee in flight, a freshly decoded icon, or the clock ticking a new second.
+        const bool tabChanged = (activeTab != lastTab);
         const bool dirty = IconCache::instance().takeDirty();
         const int nowSec = (int)(hal::SystemClock::instance().elapsedMillis() / 1000);
         const bool clockTick = (nowSec != lastClockSec);
-        if (firstFrame || moved || marquee || dirty || clockTick) {
+        if (firstFrame || moved || tabChanged || marquee || dirty || clockTick) {
             if (marquee) {
                 g_marqueeTick++;
             }
@@ -1048,6 +1101,7 @@ int Ps2Frontend::pick() {
             GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
             lastSel      = selected;
             lastTop      = topRow;
+            lastTab      = activeTab;
             lastClockSec = nowSec;
             firstFrame   = false;
         }
