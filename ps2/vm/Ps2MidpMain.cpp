@@ -40,6 +40,7 @@ extern "C" {
 #include "../javacall/platform/SifLock.hpp"
 #include "../javacall/hal/LcdDevice.hpp"
 #include "../javacall/hal/GameStorage.hpp"
+#include "../version.h"   // PS2ME_VERSION_STRING (boot banner)
 
 #include <stdio.h>    // snprintf (per-game save icon path building)
 #include <string.h>   // strlen / memcpy (save title)
@@ -79,7 +80,7 @@ struct SaveIconJarReader : ps2::platform::MidletIcon::IJarReader {
 };
 
 // Icon-format version for per-game saves; bump to force a one-time rewrite on next exit.
-const int kGameIconVersion = 2;   // bumped with Ps2SaveIcon's smaller quad (kHalf 4.0->2.5)
+const int kGameIconVersion = 3;   // bumped with Ps2SaveIcon's 1-bit alpha (transparent icons)
 
 // After a game exits, if it saved progress this run, give its memory-card directory a real
 // "save" appearance in the console's OSD browser: an icon.sys + 3D icon textured with the
@@ -171,7 +172,7 @@ int main(int argc, char** argv) {
 
     // Straight through our javacall layer, before anything else: proves libjavacall
     // and the print path linked and run on real hardware.
-    javacall_print("j2me-ps2: booting phoneME Feature MIDP\n");
+    javacall_print("PS2ME " PS2ME_VERSION_STRING ": booting phoneME Feature MIDP\n");
 
     // Bring up USB mass storage (ps2_drivers) so the program can run from a USB stick,
     // and anchor games + the icon cache to the ELF's own launch directory (argv[0]).

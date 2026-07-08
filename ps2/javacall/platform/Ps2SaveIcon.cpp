@@ -109,27 +109,29 @@ void putVertex(unsigned char*& p, const Corner& c, float nz) {
 }
 
 // Fill the 128x128 A1B5G5R5 texture from an RGBA8888 source image (@p rgba, @p w x @p h),
-// nearest-resampled and composited over a dark blue so there are no transparent texels.
-// Falls back to a plain vertical gradient when no source is given.
+// nearest-resampled. The format carries a 1-bit alpha, so we honour the source alpha as an
+// on/off mask: a source pixel that is (mostly) transparent becomes a fully transparent texel
+// (0x0000) -- the icon.sys background gradient then shows through, giving the icon a shaped,
+// "floating" look instead of sitting on a solid card -- while an opaque pixel keeps its
+// colour with the alpha bit set. There is no partial alpha, so anti-aliased edges are
+// thresholded (hard edges). Falls back to a plain opaque gradient when no source is given.
 void buildTexture(unsigned char* tex, const unsigned char* rgba, int w, int h) {
     unsigned short* out = (unsigned short*)tex;
-    const int bgR = 18, bgG = 26, bgB = 58;        // background the logo sits on
+    const int bgR = 18, bgG = 26, bgB = 58;        // gradient fallback base (no source)
     for (int y = 0; y < kTexDim; ++y) {
         for (int x = 0; x < kTexDim; ++x) {
-            int r = bgR, g = bgG, b = bgB;
             if (rgba != 0 && w > 0 && h > 0) {
                 const int sx = x * w / kTexDim;
                 const int sy = y * h / kTexDim;
                 const unsigned char* s = rgba + (sy * w + sx) * 4;
-                const int a = s[3];
-                r = bgR + (s[0] - bgR) * a / 255;   // composite logo over the background
-                g = bgG + (s[1] - bgG) * a / 255;
-                b = bgB + (s[2] - bgB) * a / 255;
+                // 1-bit alpha: below half -> transparent (show the gradient), else opaque.
+                out[y * kTexDim + x] =
+                    (s[3] < 128) ? 0 : toA1B5G5R5(s[0], s[1], s[2]);
             } else {
-                const int t = y * 255 / (kTexDim - 1);        // gradient fallback
-                r = bgR + t * 40 / 255; g = bgG + t * 50 / 255; b = bgB + t * 70 / 255;
+                const int t = y * 255 / (kTexDim - 1);        // opaque gradient fallback
+                out[y * kTexDim + x] = toA1B5G5R5(bgR + t * 40 / 255,
+                                                  bgG + t * 50 / 255, bgB + t * 70 / 255);
             }
-            out[y * kTexDim + x] = toA1B5G5R5(r, g, b);
         }
     }
 }
@@ -238,7 +240,7 @@ void buildIconSys(mcIcon* ic, const char* title) {
 
 // Bump when the generated icon.sys / icon.icn changes, to force a one-time rewrite on the
 // next boot; otherwise an already-installed save at this version is left untouched.
-const int kIconVersion = 2;   // bumped: quad half-extent 4.0 -> 2.5 (smaller icon)
+const int kIconVersion = 3;   // bumped: 1-bit alpha (transparent texels show the gradient)
 
 bool Ps2SaveIcon::install(const char* absDir, const char* title,
                           const unsigned char* rgba, int w, int h) {

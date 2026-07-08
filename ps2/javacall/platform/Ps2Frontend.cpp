@@ -33,6 +33,7 @@
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
 #include "../hal/SystemClock.hpp"   // session clock for the header
+#include "../../version.h"          // PS2ME_VERSION_STRING (shown in the header)
 
 #include <tamtypes.h>   // u16
 #include <malloc.h>     // memalign / malloc / free
@@ -715,6 +716,10 @@ void formatClock(char* out, int cap) {
 
 // --- Region renderers -------------------------------------------------------------
 
+// Launcher version, shown as a small tag beside the PS2ME wordmark in the header. Comes
+// from the single source of truth in ps2/version.h (bump via version.sh, never here).
+const char* const kAppVersion = PS2ME_VERSION_STRING;
+
 void drawHeader() {
     rectVGrad(0, 0, g_w, HEADER_H, 40, 66, 120, 22, 38, 74);
     for (int x = 0; x < g_w; ++x) plotA(x, 0, 96, 128, 186, 150);            // top sheen
@@ -726,6 +731,9 @@ void drawHeader() {
         tx = MARGIN + TITLE_ICON + 10;
     }
     drawTextVC(tx, HEADER_H / 2, "PS2ME", 240, 246, 255, 26.0f);
+    // Version tag, just right of the wordmark and dropped to its baseline.
+    drawTextVC(tx + textWidth("PS2ME", 26.0f) + 8, HEADER_H / 2 + 6,
+               kAppVersion, 130, 162, 205, 14.0f);
 
     // Right-aligned two-line clock ("SYSTEM" over the running MM:SS:mmm), as in the kit.
     char clk[16];
