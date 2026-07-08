@@ -89,6 +89,7 @@ static javacall_result midpHandleRemoveMIDlet(midp_event_remove_midlet removeMid
  * (char* paths) and the memory-card bridge (ps2mc_*, ps2gs_* in the javacall library).
  */
 extern char *rmfsFileStartWith(const char *filename);
+extern void  rmfsRewindFileStartWith(void);   /* ps2-rmfs-iter-rewind: reset the cursor */
 extern int   rmfsOpen(const char *filename, int flags, int creationMode);
 extern int   rmfsClose(int fd);
 extern int   rmfsRead(int fd, void *buffer, int size);
@@ -96,10 +97,10 @@ extern int   rmfsFileSize(int fd);
 extern int   rmfsGetUsedSpace(void);
 extern int   rmfsGetFreeSpace(void);
 
-/* Memory-card bridge (implemented in the javacall library, Ps2GameSaveBridge.cpp). */
+/* Memory-card bridge (implemented in the javacall library, Ps2GameSaveBridge.cpp). The
+ * blob lands as "/PS2ME_<game>/rms.dat" -- the game's own top-level card save. */
 extern int ps2mc_available(void);
-extern int ps2mc_config_write(const char *name, const void *data, int len);
-extern int ps2gs_save_name(int gameIndex, char *out, int cap);
+extern int ps2gs_write_save(int gameIndex, const void *blob, int len);
 /* The game index the native menu picked (GameLoaderKni.cpp). */
 extern int ps2_chosen_game;
 
@@ -115,37 +116,48 @@ static void ps2gsPutU32(unsigned char *p, unsigned int v) {
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
+/* A RecordStore backing file, i.e. the only thing that is actual save data. phoneME's RMS
+ * names them "<suite-id><store>.db" (and ".idx" for the index module); see rms.c
+ * (DB_EXTENSION/IDX_EXTENSION). Games also litter the same /j2me/appdb/ directory with
+ * other suite-prefixed files -- decoded-image scratch ("...png.tmp"), the AMS "_icons.dat"
+ * cache -- which are NOT progress and would just overflow the blob, so we pack only .db/.idx.
+ */
+static int ps2gsIsRmsFile(const char *name) {
+    int n = (int)strlen(name);
+    return (n >= 3 && name[n - 3] == '.' && name[n - 2] == 'd' && name[n - 1] == 'b') ||
+           (n >= 4 && name[n - 4] == '.' && name[n - 3] == 'i' &&
+            name[n - 2] == 'd' && name[n - 1] == 'x');
+}
+
 static void ps2GameSaveSnapshot(void) {
     static char names[64][256];
     const char *prefix = "/j2me/appdb/";
-    char savename[64];
     char *fn;
     int count = 0, k, pos;
     unsigned int fileCount = 0;
 
-    /* Reset the stateful rmfsFileStartWith cursor: searching a prefix that nothing matches
-     * walks the whole name table and leaves its static prevFilename = NULL, so the real
-     * enumeration below starts from the first entry (no rmfsAlloc patch needed for now). */
-    rmfsFileStartWith("\x01");
+    /* Reset the stateful rmfsFileStartWith cursor so this enumeration starts from the first
+     * entry (see the ps2-rmfs-iter-rewind patch in patch-phoneme.sh). */
+    rmfsRewindFileStartWith();
 
-    /* Pass 1: collect the names (copy them out -- the returned pointer aims into the rmfs
-     * name table, which we must not hold across other rmfs calls). */
+    /* Pass 1: collect the RMS file names (copy them out -- the returned pointer aims into
+     * the rmfs name table, which we must not hold across other rmfs calls). Filter to
+     * .db/.idx HERE so the game's image scratch never crowds the 64 slots (a game can leave
+     * hundreds of "...png.tmp" files under appdb/, ahead of the real save in enumeration). */
     while ((fn = rmfsFileStartWith(prefix)) != NULL && count < 64) {
-        int i = 0;
-        for (; fn[i] != '\0' && i < 255; i++) {
+        int i;
+        if (!ps2gsIsRmsFile(fn)) {
+            continue;
+        }
+        for (i = 0; fn[i] != '\0' && i < 255; i++) {
             names[count][i] = fn[i];
         }
         names[count][i] = '\0';
         count++;
     }
 
-    printf("[gamesave] snapshot: %d file(s) under %s, rmfs used=%d free=%d\n",
+    printf("[gamesave] snapshot: %d RecordStore file(s) under %s, rmfs used=%d free=%d\n",
            count, prefix, rmfsGetUsedSpace(), rmfsGetFreeSpace());
-
-    if (ps2gs_save_name(ps2_chosen_game, savename, (int)sizeof(savename)) <= 0) {
-        printf("[gamesave] no save name for game %d -- skip\n", ps2_chosen_game);
-        return;
-    }
 
     /* Pass 2: pack the game's RMS files (header first, then each kept entry). */
     pos = 8;   /* leave room for magic + file count */
@@ -192,12 +204,13 @@ static void ps2GameSaveSnapshot(void) {
     ps2gsPutU32(ps2gsBlob + 4, fileCount);
 
     if (!ps2mc_available()) {
-        printf("[gamesave] no memory card -- '%s' (%d bytes) NOT written\n", savename, pos);
+        printf("[gamesave] no memory card -- game %d save (%d bytes) NOT written\n",
+               ps2_chosen_game, pos);
         return;
     }
-    printf("[gamesave] writing %s: %u file(s), %d bytes -> %s\n",
-           savename, fileCount, pos,
-           ps2mc_config_write(savename, ps2gsBlob, pos) == 0 ? "OK" : "FAIL");
+    printf("[gamesave] writing game %d save: %u file(s), %d bytes -> %s\n",
+           ps2_chosen_game, fileCount, pos,
+           ps2gs_write_save(ps2_chosen_game, ps2gsBlob, pos) == 0 ? "OK" : "FAIL");
 }
 
 /**

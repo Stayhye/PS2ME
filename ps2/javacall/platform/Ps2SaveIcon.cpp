@@ -42,7 +42,9 @@ namespace {
 const int   kTexDim   = 128;                       // PS2 icon texture is fixed 128x128
 const int   kTexBytes = kTexDim * kTexDim * 2;     // 16-bit -> 32768
 const int   kNumVerts = 12;                        // double-sided quad (4 triangles)
-const float kHalf     = 4.0f;                      // quad half-extent (model units)
+const float kHalf     = 2.5f;                      // quad half-extent (model units); sized
+                                                   // to match a normal PS2 save's on-screen
+                                                   // icon (4.0 rendered noticeably too big)
 
 // Little-endian byte-cursor writers (icon.icn is a flat binary; avoid struct packing
 // assumptions on the EE by emitting every field explicitly).
@@ -236,7 +238,7 @@ void buildIconSys(mcIcon* ic, const char* title) {
 
 // Bump when the generated icon.sys / icon.icn changes, to force a one-time rewrite on the
 // next boot; otherwise an already-installed save at this version is left untouched.
-const int kIconVersion = 1;
+const int kIconVersion = 2;   // bumped: quad half-extent 4.0 -> 2.5 (smaller icon)
 
 bool Ps2SaveIcon::install(const char* absDir, const char* title,
                           const unsigned char* rgba, int w, int h) {

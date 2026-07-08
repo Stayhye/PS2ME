@@ -33,11 +33,16 @@ extern "C" {
 #include "../javacall/platform/Ps2Storage.hpp"
 #include "../javacall/platform/Ps2MemCard.hpp"
 #include "../javacall/platform/Ps2SaveIcon.hpp"
+#include "../javacall/platform/MidletIcon.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
 #include "../javacall/platform/Settings.hpp"
 #include "../javacall/platform/Resolutions.hpp"
 #include "../javacall/platform/SifLock.hpp"
 #include "../javacall/hal/LcdDevice.hpp"
+#include "../javacall/hal/GameStorage.hpp"
+
+#include <stdio.h>    // snprintf (per-game save icon path building)
+#include <string.h>   // strlen / memcpy (save title)
 
 extern "C" {
 // MIDP / javacall entry points, all defined in libjvm.a (the merged MIDP archive).
@@ -54,7 +59,108 @@ int  jcapp_get_screen_buffer(int hardwareId);
 // The game the native front-end picked, handed to GameLoader.chosenGame() (KNI in
 // GameLoaderKni.cpp). Defined there so the KNI TU owns the storage.
 extern int ps2_chosen_game;
+
+// Per-game save directory "/PS2ME_<game>" on the card (Ps2GameSaveBridge.cpp); the game's
+// rms.dat lives inside it, and we install its browser icon there (installGameSaveIcon).
+int ps2gs_save_dir(int index, char* out, int cap);
 }
+
+namespace {
+
+// SIF-locked random-access reader over the currently open JAR (mirrors IconCache's), so the
+// save-icon decode's host: reads serialize against the audio mixer's SIF traffic.
+struct SaveIconJarReader : ps2::platform::MidletIcon::IJarReader {
+    virtual int readAt(unsigned int off, void* buf, int len) {
+        ps2::platform::SifLock::acquire();
+        const int r = ps2::hal::GameStorage::instance().readAt(off, buf, len);
+        ps2::platform::SifLock::release();
+        return r;
+    }
+};
+
+// Icon-format version for per-game saves; bump to force a one-time rewrite on next exit.
+const int kGameIconVersion = 2;   // bumped with Ps2SaveIcon's smaller quad (kHalf 4.0->2.5)
+
+// After a game exits, if it saved progress this run, give its memory-card directory a real
+// "save" appearance in the console's OSD browser: an icon.sys + 3D icon textured with the
+// GAME's own icon and titled with its name. The rms.dat itself is written VM-side during the
+// snapshot (javaTask.c); only the icon is installed here, on the native side, where decoding
+// the JAR (host: I/O + the native stack) is safe -- doing it mid-VM-cycle is not. The
+// presence of "/PS2ME_<game>/rms.dat" is the "has save data" signal, so a game that never
+// saved gets no folder. Written once per game (version-gated); later exits just refresh
+// rms.dat. No-op without a card.
+void installGameSaveIcon(int idx) {
+    using namespace ps2::platform;
+    ps2::hal::GameStorage& st = ps2::hal::GameStorage::instance();
+
+    if (!Ps2MemCard::instance().available()) {
+        return;
+    }
+    char dir[64], path[80];
+    if (ps2gs_save_dir(idx, dir, (int)sizeof(dir)) <= 0) {
+        return;
+    }
+
+    // Only games that actually saved this run get a browser save (the snapshot writes
+    // rms.dat lazily -- only with data -- so its presence is the "has data" signal).
+    unsigned char probe[8];
+    snprintf(path, sizeof(path), "%s/rms.dat", dir);
+    if (Ps2MemCard::instance().readFile(path, probe, (int)sizeof(probe)) <= 0) {
+        return;
+    }
+
+    // Write the icon once per version: skip the ~33 KB rewrite once installed.
+    int ver = 0;
+    snprintf(path, sizeof(path), "%s/iconver", dir);
+    if (Ps2MemCard::instance().readFile(path, &ver, (int)sizeof(ver)) == (int)sizeof(ver) &&
+        ver == kGameIconVersion) {
+        return;
+    }
+
+    // Decode the game's own icon straight from its JAR (streaming: only the ZIP tail + the
+    // icon entry); Ps2SaveIcon resamples it onto the 128x128 card-icon texture.
+    SifLock::acquire();
+    const int size = st.openAt(idx);
+    SifLock::release();
+    unsigned char* rgba = 0;
+    int w = 0, h = 0;
+    if (size > 0) {
+        SaveIconJarReader reader;
+        rgba = MidletIcon::loadStreaming(reader, size, &w, &h);
+    }
+    SifLock::acquire();
+    st.close();
+    SifLock::release();
+
+    // Title the save with the game's name (drop a trailing ".jar" for a tidy label).
+    const char* nm = st.nameAt(idx);
+    char title[40];
+    title[0] = '\0';
+    if (nm != 0) {
+        int n = (int)strlen(nm);
+        if (n >= 4 && nm[n - 4] == '.' &&
+            (nm[n - 3] | 0x20) == 'j' && (nm[n - 2] | 0x20) == 'a' &&
+            (nm[n - 1] | 0x20) == 'r') {
+            n -= 4;
+        }
+        if (n > (int)sizeof(title) - 1) {
+            n = (int)sizeof(title) - 1;
+        }
+        memcpy(title, nm, (size_t)n);
+        title[n] = '\0';
+    }
+
+    if (Ps2SaveIcon::install(dir, (title[0] != '\0') ? title : "Game", rgba, w, h)) {
+        int v = kGameIconVersion;
+        snprintf(path, sizeof(path), "%s/iconver", dir);
+        Ps2MemCard::instance().writeFile(path, &v, (int)sizeof(v));
+    }
+    if (rgba != 0) {
+        MidletIcon::release(rgba);
+    }
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     // Arm the shared SIF lock before anything touches SIF or spawns a thread: from here
@@ -167,6 +273,12 @@ int main(int argc, char** argv) {
 
         // 4) Run the VM until the chosen game (and the loader) finish.
         JavaTask();
+
+        // 4b) If the game just saved progress this run, give its memory-card save a real
+        //     OSD-browser entry -- an icon.sys + a 3D icon textured with the game's own
+        //     icon and titled with its name. Done here on the native side (JAR decode is
+        //     safe now that the VM cycle is over), version-gated so it runs once per game.
+        installGameSaveIcon(idx);
     }
 
     // Returning from main() resets the console and scrolls the EE Console away.

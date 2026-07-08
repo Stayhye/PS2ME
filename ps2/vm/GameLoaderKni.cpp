@@ -47,8 +47,7 @@ void remove_storage_lock(int suiteId);
 // rmfs, which resets each cycle), so the packed "/j2me/appdb//<id>..." names match what the
 // game looks up. Raw rmfs writes (libjvm) + the memory-card bridge (Ps2GameSaveBridge.cpp).
 int  ps2mc_available(void);
-int  ps2mc_config_read(const char* name, void* buf, int cap);
-int  ps2gs_save_name(int gameIndex, char* out, int cap);
+int  ps2gs_read_save(int gameIndex, void* buf, int cap);
 int  rmfsOpen(const char* filename, int flags, int creationMode);
 int  rmfsClose(int fd);
 int  rmfsWrite(int fd, void* buffer, int size);
@@ -60,7 +59,6 @@ static unsigned int ps2gsGetU32(const unsigned char* p) {
 
 static void ps2GameSaveRestore(void) {
     static unsigned char blob[256 * 1024];
-    char savename[64];
     unsigned int magic, fileCount, i;
     int total, pos, restored = 0;
     const int wmode = 0x01 | 0x40 | 0x200;   // PCSL_FILE_O_WRONLY | O_CREAT | O_TRUNC
@@ -68,18 +66,15 @@ static void ps2GameSaveRestore(void) {
     if (!ps2mc_available()) {
         return;
     }
-    if (ps2gs_save_name(ps2_chosen_game, savename, (int)sizeof(savename)) <= 0) {
-        return;
-    }
-    total = ps2mc_config_read(savename, blob, (int)sizeof(blob));
+    total = ps2gs_read_save(ps2_chosen_game, blob, (int)sizeof(blob));
     if (total < 8) {
-        printf("[gamesave] restore: no save '%s' (%d)\n", savename, total);
+        printf("[gamesave] restore: no save for game %d (%d)\n", ps2_chosen_game, total);
         return;
     }
     magic = ps2gsGetU32(blob);
     fileCount = ps2gsGetU32(blob + 4);
     if (magic != 0x31534d52u) {              // 'RMS1'
-        printf("[gamesave] restore: bad magic in '%s'\n", savename);
+        printf("[gamesave] restore: bad magic for game %d\n", ps2_chosen_game);
         return;
     }
     pos = 8;
@@ -110,7 +105,8 @@ static void ps2GameSaveRestore(void) {
         }
         pos += (int)dlen;
     }
-    printf("[gamesave] restored %d/%u file(s) from %s\n", restored, fileCount, savename);
+    printf("[gamesave] restored %d/%u file(s) for game %d\n",
+           restored, fileCount, ps2_chosen_game);
 }
 
 

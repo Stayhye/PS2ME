@@ -310,4 +310,28 @@ grep -q 'ps2-safe-fill' "$GXJ_C" || \
   sed -i 's|^#if 0.*|#if defined(__mips__) /* ps2-safe-fill: EE traps unaligned sd, use 16-bit store path */|' \
       "$GXJ_C"
 
+# 25) rmfs prefix-iterator rewind (ps2-rmfs-iter-rewind). searchNameTabStartWith remembers
+#     the last returned name in the file-static prevFilename and returns "the next match
+#     after it", so a FRESH enumeration must begin with prevFilename == NULL. The game-save
+#     snapshot (javaTask.c) walks /j2me/appdb/ from the start each time; it used to force
+#     that by searching a prefix nothing matches (a no-match search nulls prevFilename as a
+#     side effect -- correct but obscure). Expose an explicit, self-documenting reset
+#     instead: a public rmfsRewindFileStartWith() sitting next to prevFilename in
+#     rmfsAlloc.c (where the static is in scope), declared in rmfsApi.h. Idempotent (marker).
+RMFS_ALLOC_C="$PHONEME/pcsl/file/ram/rmfsAlloc.c"
+grep -q 'ps2-rmfs-iter-rewind' "$RMFS_ALLOC_C" || \
+  sed -i '/^jint searchNameTabStartWith(const char \*filename, uchar \*identifier)/i\
+/* ps2-rmfs-iter-rewind: reset the stateful prefix iterator so the next\
+   rmfsFileStartWith() restarts from the first match (game-save snapshot). */\
+void rmfsRewindFileStartWith(void) {\
+  prevFilename = NULL;\
+}\
+' "$RMFS_ALLOC_C"
+
+RMFS_API_H="$PHONEME/pcsl/file/ram/rmfsApi.h"
+grep -q 'ps2-rmfs-iter-rewind' "$RMFS_API_H" || \
+  sed -i '/char\* rmfsFileStartWith(const char\* filename);/a\
+void rmfsRewindFileStartWith(void); /* ps2-rmfs-iter-rewind */' \
+      "$RMFS_API_H"
+
 echo "phoneME patches applied to: $PHONEME"
