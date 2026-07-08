@@ -23,6 +23,8 @@ public:
     const char* nameAt(int i)       { return backend_ ? backend_->nameAt(i)   : 0;  }
     int         openAt(int i)       { return backend_ ? backend_->openAt(i)   : -1; }
     int         read(void* b, int m){ return backend_ ? backend_->read(b, m)  : -1; }
+    int         readAt(unsigned int off, void* b, int m)
+                                    { return backend_ ? backend_->readAt(off, b, m) : -1; }
     void        close()             { if (backend_) backend_->close(); }
 
 private:

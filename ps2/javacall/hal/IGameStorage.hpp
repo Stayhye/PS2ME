@@ -32,6 +32,11 @@ public:
     /// (0 at end of file), or -1 on error.
     virtual int read(void* buf, int max) = 0;
 
+    /// Random-access read: read up to len bytes of the open entry starting at absolute
+    /// offset off into buf. Returns the number read, or -1 on error. Lets the icon
+    /// loader pull only the ZIP tail + the icon entry instead of the whole JAR.
+    virtual int readAt(unsigned int off, void* buf, int len) = 0;
+
     /// Close the current open entry (no-op if none is open).
     virtual void close() = 0;
 };

@@ -103,6 +103,17 @@ public:
         return (int)::read(fd_, buf, max);
     }
 
+    virtual int readAt(unsigned int off, void* buf, int len) {
+        if (fd_ < 0) {
+            return -1;
+        }
+        SifGuard guard;   // lseek + read go to the IOP over SIF (recursive guard)
+        if ((int)::lseek(fd_, (int)off, SEEK_SET) < 0) {
+            return -1;
+        }
+        return (int)::read(fd_, buf, len);
+    }
+
     virtual void close() {
         SifGuard guard;   // ::close goes to the IOP over SIF (fileXio)
         if (fd_ >= 0) {

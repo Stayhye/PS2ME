@@ -11,6 +11,7 @@
 
 extern "C" {
 #include <kernel.h>     // threads + semaphores
+#include <delaythread.h> // DelayThread (worker navigation backoff)
 }
 #include <malloc.h>     // memalign / malloc / free
 
@@ -39,6 +40,19 @@ inline unsigned short blend5551(unsigned short dst, int sr, int sg, int sb, int 
     return rgba5551(r, g, b);
 }
 
+// Random-access reader over the currently open JAR: each read seeks + reads under the
+// SIF lock, released between calls so the audio mixer and the render thread's pad reads
+// can interleave. Backs MidletIcon::loadStreaming so a cache miss pulls only the ZIP
+// tail + icon entry instead of the whole archive.
+struct StorageJarReader : MidletIcon::IJarReader {
+    virtual int readAt(unsigned int off, void* buf, int len) {
+        SifLock::acquire();
+        const int r = hal::GameStorage::instance().readAt(off, buf, len);
+        SifLock::release();
+        return r;
+    }
+};
+
 int makeSema(int init, int maxc) {
     ee_sema_t s;
     s.count        = init;
@@ -59,8 +73,13 @@ IconCache& IconCache::instance() {
 
 IconCache::IconCache()
     : count_(0), iconSize_(0), started_(false), working_(false), dirty_(false),
-      workerId_(0), mutex_(0), workSema_(0), stack_(0),
+      pauseTicks_(0), workerId_(0), mutex_(0), workSema_(0), stack_(0),
       frame_(0), slotCount_(0), qHead_(0), qTail_(0) {}
+
+void IconCache::pause() {
+    // ~24 * 8ms ≈ 190ms of backoff after the last navigation; refreshed on each press.
+    pauseTicks_ = 24;
+}
 
 // Kept for the existing call sites; the actual lock now lives in the shared SifLock so
 // the audio mixer thread and the controller reads serialize against the same lock.
@@ -142,6 +161,13 @@ void IconCache::run() {
     for (;;) {
         WaitSema(workSema_);            // sleep until the render thread posts work
         for (;;) {
+            // Back off while the user is actively navigating: start no new decode so our
+            // SIF I/O never blocks the render thread's pad reads. Decays on its own once
+            // pause() stops being called (each press resets it to a fresh window).
+            while (pauseTicks_ > 0) {
+                --pauseTicks_;
+                DelayThread(8000);      // 8 ms
+            }
             WaitSema(mutex_);
             int g = -1;
             if (qHead_ != qTail_) {
@@ -184,26 +210,14 @@ unsigned char* IconCache::loadTile(int game) {
     unsigned char* cached = (size > 0) ? disk.readTile(name, size, n) : 0;
     sifUnlock();
 
-    unsigned char* jar = 0;
-    int off = 0;
-    if (cached == 0 && size > 0) {              // cache miss: read the whole JAR in chunks,
-        jar = (unsigned char*)malloc(size);    // RELEASING the SIF lock between chunks so
-        if (jar != 0) {                        // the real-time audio mixer can grab it and
-            const int CHUNK = 32 * 1024;       // feed the ring -- a single big read under
-            while (off < size) {               // the lock would starve audio (~JAR ms).
-                int want = size - off;
-                if (want > CHUNK) {
-                    want = CHUNK;
-                }
-                sifLock();
-                const int r = st.read(jar + off, want);
-                sifUnlock();
-                if (r <= 0) {
-                    break;
-                }
-                off += r;
-            }
-        }
+    unsigned char* rgba = 0;
+    int w = 0, h = 0;
+    if (cached == 0 && size > 0) {
+        // Cache miss: pull only the ZIP tail + the icon entry through the reader (which
+        // releases the SIF lock between reads, so audio/pad interleave) instead of
+        // reading the whole multi-MB JAR just to extract a few-KB icon.
+        StorageJarReader reader;
+        rgba = MidletIcon::loadStreaming(reader, size, &w, &h);
     }
     sifLock();
     st.close();
@@ -212,13 +226,6 @@ unsigned char* IconCache::loadTile(int game) {
     if (cached != 0) {
         return cached;                          // cache hit -- nothing to decode
     }
-    if (size <= 0 || jar == 0) {
-        return 0;
-    }
-
-    int w = 0, h = 0;
-    unsigned char* rgba = (off == size) ? MidletIcon::load(jar, size, &w, &h) : 0;
-    free(jar);
     if (rgba == 0 || w <= 0 || h <= 0) {
         return 0;
     }

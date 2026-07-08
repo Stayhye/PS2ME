@@ -41,6 +41,12 @@ public:
     /// before handing the CPU to the VM.
     void clearPending();
 
+    /// Ask the worker to back off briefly (called by the render thread on each D-pad
+    /// navigation). While backed off the worker starts no new decode, so its SIF I/O
+    /// never contends with the pad reads -- navigation stays smooth during loading.
+    /// The backoff decays on its own once navigation stops.
+    void pause();
+
     /// Whether a decode is currently in flight on the worker.
     bool busy() const { return working_; }
 
@@ -80,6 +86,7 @@ private:
     bool started_;
     volatile bool working_;               // worker is mid-decode
     volatile bool dirty_;                 // worker installed a tile since last takeDirty
+    volatile int  pauseTicks_;            // >0: worker backs off (decremented by worker)
 
     int   workerId_;
     int   mutex_;                          // guards the cache + queue below

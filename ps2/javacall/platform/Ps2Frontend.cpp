@@ -584,6 +584,7 @@ int Ps2Frontend::pick() {
         const bool moved = (selected != lastSel) || (topRow != lastTop);
         if (moved) {
             g_marqueeTick = 0;   // restart the marquee for the newly active item
+            IconCache::instance().pause();   // back the worker off so nav stays smooth
         }
 
         // Does the active item's name overflow its cell? Only then must we keep

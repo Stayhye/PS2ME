@@ -199,6 +199,99 @@ bool iconPath(const char* mf, int mfLen, char* out, int outCap) {
     return true;
 }
 
+// --- Streaming ZIP (read only what we need through a random-access reader) ----------
+
+// Find the EOCD in a tail buffer [tail, tail+tailLen). Returns the central-directory
+// offset+size and entry count (all absolute to the file). false if no EOCD in the tail.
+bool findEocdTail(const u8* tail, int tailLen, u32* cdOffset, u32* cdSize, int* count) {
+    if (tailLen < 22) {
+        return false;
+    }
+    for (int p = tailLen - 22; p >= 0; --p) {
+        if (rd32(tail + p) == 0x06054b50u) {
+            *count    = rd16(tail + p + 10);
+            *cdSize   = rd32(tail + p + 12);
+            *cdOffset = rd32(tail + p + 16);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Walk a central-directory buffer [cd, cd+cdSize) for entry @p name. On a match, fill
+// its local-header offset, compressed/uncompressed sizes and method. false if absent.
+bool findCentralEntry(const u8* cd, u32 cdSize, int count, const char* name,
+                      u32* localOff, u32* compSize, u32* uncompSize, u16* method) {
+    u32 p = 0;
+    for (int i = 0; i < count; ++i) {
+        if (p + 46 > cdSize || rd32(cd + p) != 0x02014b50u) {
+            return false;
+        }
+        const u16 m  = rd16(cd + p + 10);
+        const u32 cs = rd32(cd + p + 20);
+        const u32 us = rd32(cd + p + 24);
+        const u16 nl = rd16(cd + p + 28);
+        const u16 el = rd16(cd + p + 30);
+        const u16 cl = rd16(cd + p + 32);
+        const u32 lo = rd32(cd + p + 42);
+        if (nameEqualsCI(cd + p + 46, nl, name)) {
+            *method = m; *compSize = cs; *uncompSize = us; *localOff = lo;
+            return true;
+        }
+        p += 46u + nl + el + cl;
+    }
+    return false;
+}
+
+// Read one entry's data through @p r (local header for the real data offset, then the
+// compressed bytes) and inflate it. Returns a fresh, NUL-terminated buffer (caller
+// frees) and sets *outSize. Handles stored (0) and deflate (8).
+u8* readEntry(MidletIcon::IJarReader& r, u32 localOff, u32 compSize, u32 uncompSize,
+              u16 method, int jarLen, int* outSize) {
+    u8 lh[30];
+    if (r.readAt(localOff, lh, 30) != 30 || rd32(lh) != 0x04034b50u) {
+        return 0;
+    }
+    const u16 lNameLen  = rd16(lh + 26);
+    const u16 lExtraLen = rd16(lh + 28);
+    const u32 dataOff   = localOff + 30u + lNameLen + lExtraLen;
+    if ((double)dataOff + compSize > (double)jarLen) {   // sanity vs a corrupt header
+        return 0;
+    }
+    u8* comp = (u8*)malloc(compSize + 1);
+    if (comp == 0) {
+        return 0;
+    }
+    if (compSize > 0 && (u32)r.readAt(dataOff, comp, (int)compSize) != compSize) {
+        free(comp);
+        return 0;
+    }
+    if (method == 0) {                       // stored
+        comp[compSize] = 0;
+        *outSize = (int)compSize;
+        return comp;
+    }
+    if (method == 8) {                       // deflate
+        u8* out = (u8*)malloc(uncompSize + 1);
+        if (out == 0) {
+            free(comp);
+            return 0;
+        }
+        const int got = stbi_zlib_decode_noheader_buffer(
+            (char*)out, (int)uncompSize, (const char*)comp, (int)compSize);
+        free(comp);
+        if (got < 0) {
+            free(out);
+            return 0;
+        }
+        out[got] = 0;
+        *outSize = got;
+        return out;
+    }
+    free(comp);
+    return 0;                                // unsupported method
+}
+
 } // namespace
 
 unsigned char* MidletIcon::load(const void* jarBytes, int jarLen, int* outW, int* outH) {
@@ -218,6 +311,87 @@ unsigned char* MidletIcon::load(const void* jarBytes, int jarLen, int* outW, int
 
     int pngSize = 0;
     u8* png = zipExtract(jar, jarLen, path, &pngSize);
+    if (png == 0) {
+        return 0;
+    }
+
+    int w = 0, h = 0, comp = 0;
+    unsigned char* rgba = stbi_load_from_memory(png, pngSize, &w, &h, &comp, 4);
+    free(png);
+    if (rgba == 0) {
+        return 0;
+    }
+    *outW = w;
+    *outH = h;
+    return rgba;
+}
+
+unsigned char* MidletIcon::loadStreaming(IJarReader& reader, int jarLen,
+                                         int* outW, int* outH) {
+    if (jarLen < 22) {
+        return 0;
+    }
+    // 1) Read the tail: enough to hold the EOCD (and, for typical game JARs, the whole
+    //    central directory) in one shot. 64 KB covers a max-length ZIP comment too.
+    int tailLen = (jarLen < 0x10000) ? jarLen : 0x10000;
+    u8* tail = (u8*)malloc(tailLen);
+    if (tail == 0) {
+        return 0;
+    }
+    const u32 tailStart = (u32)jarLen - (u32)tailLen;
+    if (reader.readAt(tailStart, tail, tailLen) != tailLen) {
+        free(tail);
+        return 0;
+    }
+    u32 cdOffset = 0, cdSize = 0;
+    int count = 0;
+    if (!findEocdTail(tail, tailLen, &cdOffset, &cdSize, &count)) {
+        free(tail);
+        return 0;
+    }
+
+    // 2) Get the central directory: reuse the tail if it already covers it, otherwise
+    //    read exactly the CD (still tiny next to the whole JAR).
+    const u8* cd = 0;
+    u8* cdAlloc = 0;
+    if (cdOffset >= tailStart && (double)cdOffset + cdSize <= (double)jarLen) {
+        cd = tail + (cdOffset - tailStart);
+    } else {
+        cdAlloc = (u8*)malloc(cdSize ? cdSize : 1);
+        if (cdAlloc == 0) {
+            free(tail);
+            return 0;
+        }
+        if ((u32)reader.readAt(cdOffset, cdAlloc, (int)cdSize) != cdSize) {
+            free(cdAlloc);
+            free(tail);
+            return 0;
+        }
+        cd = cdAlloc;
+    }
+
+    // 3) Manifest -> icon path.
+    u32 lo = 0, cs = 0, us = 0;
+    u16 method = 0;
+    char path[256];
+    bool havePath = false;
+    if (findCentralEntry(cd, cdSize, count, "META-INF/MANIFEST.MF", &lo, &cs, &us, &method)) {
+        int mfSize = 0;
+        u8* mf = readEntry(reader, lo, cs, us, method, jarLen, &mfSize);
+        if (mf != 0) {
+            havePath = iconPath((const char*)mf, mfSize, path, (int)sizeof(path));
+            free(mf);
+        }
+    }
+
+    // 4) Icon PNG entry.
+    u8* png = 0;
+    int pngSize = 0;
+    if (havePath && findCentralEntry(cd, cdSize, count, path, &lo, &cs, &us, &method)) {
+        png = readEntry(reader, lo, cs, us, method, jarLen, &pngSize);
+    }
+    free(cdAlloc);
+    free(tail);
     if (png == 0) {
         return 0;
     }
