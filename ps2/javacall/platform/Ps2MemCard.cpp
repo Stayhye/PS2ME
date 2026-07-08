@@ -52,8 +52,36 @@ Ps2MemCard& Ps2MemCard::instance() {
 }
 
 Ps2MemCard::Ps2MemCard()
-    : inited_(false), available_(false), port_(0), slot_(0) {
+    : inited_(false), available_(false), port_(0), slot_(0),
+      ioActivity_(0), ioBusy_(0) {
     status_[0] = '\0';
+}
+
+void Ps2MemCard::ioBegin() {
+    // Fire only on the outermost begin: a writeFile is one logical write even though it
+    // issues delete + open + write + close underneath.
+    if (++ioBusy_ == 1 && ioActivity_ != 0) {
+        ioActivity_(kIoBegin);
+    }
+}
+
+void Ps2MemCard::ioEnd() {
+    if (ioBusy_ > 0 && --ioBusy_ == 0 && ioActivity_ != 0) {
+        ioActivity_(kIoEnd);
+    }
+}
+
+int Ps2MemCard::syncResultIo() {
+    if (ioActivity_ == 0) {
+        return syncResult();           // no UI to animate: just block (e.g. at boot)
+    }
+    // Poll completion non-blockingly (mcSync mode 1 returns 0 while the function is still
+    // executing) and animate one spinner frame per poll, so the write never freezes the UI.
+    int cmd = 0, res = 0;
+    while (mcSync(1, &cmd, &res) == 0) {
+        ioActivity_(kIoTick);
+    }
+    return res;
 }
 
 int Ps2MemCard::syncResult() {
@@ -175,28 +203,39 @@ bool Ps2MemCard::writeFile(const char* absPath, const void* data, int len) {
     if (!available_ || absPath == 0 || (len > 0 && data == 0) || len < 0) {
         return false;
     }
+    // Bracket the write with the activity begin/end so the spinner is set up before the
+    // work and cleared after; the syncResultIo calls inside animate it while in flight.
+    // (ioBegin runs before we take the SifLock, and the spinner's present is GS/GIF, not
+    // SIF, so animating never contends with the memory-card traffic.)
+    ioBegin();
+    const bool ok = writeFileLocked(absPath, data, len);
+    ioEnd();
+    return ok;
+}
+
+bool Ps2MemCard::writeFileLocked(const char* absPath, const void* data, int len) {
     SifGuard guard;
     // No O_TRUNC on the card: drop any old copy so a shorter new file can't leave a stale
     // tail behind. Ignore the result (the file may not exist yet).
     mcDelete(port_, slot_, absPath);
-    syncResult();
+    syncResultIo();
 
     mcOpen(port_, slot_, absPath, kModeCreate);
-    const int fd = syncResult();
+    const int fd = syncResultIo();
     if (fd < 0) {
         return false;
     }
     int written = 0;
     while (written < len) {
         mcWrite(fd, (const char*)data + written, len - written);
-        const int n = syncResult();
+        const int n = syncResultIo();
         if (n <= 0) {
             break;
         }
         written += n;
     }
     mcClose(fd);
-    syncResult();
+    syncResultIo();
     return written == len;                      // len 0 => empty file, still success
 }
 
@@ -204,9 +243,16 @@ bool Ps2MemCard::removeFile(const char* absPath) {
     if (!available_ || absPath == 0) {
         return false;
     }
+    ioBegin();
+    const bool ok = removeFileLocked(absPath);
+    ioEnd();
+    return ok;
+}
+
+bool Ps2MemCard::removeFileLocked(const char* absPath) {
     SifGuard guard;
     mcDelete(port_, slot_, absPath);
-    const int r = syncResult();
+    const int r = syncResultIo();
     return r >= 0;
 }
 

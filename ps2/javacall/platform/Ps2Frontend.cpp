@@ -28,6 +28,7 @@
 #include "Settings.hpp"
 #include "Resolutions.hpp"
 #include "Ps2Storage.hpp"
+#include "Ps2MemCard.hpp"          // register the "saving" banner as its I/O-activity listener
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
@@ -1529,6 +1530,125 @@ void waitFrame() {
     }
 }
 
+// --- Memory-card "saving" spinner -------------------------------------------------
+// A memory-card write (a favourite/setting/resolution change now; a game save later) is
+// issued to the IOP and Ps2MemCard polls it to completion. Between polls it calls
+// memCardIoActivity(kIoTick) so we can animate a small, discreet "Salvando" spinner in the
+// bottom-right corner -- the UI stays alive through the write instead of freezing. We keep
+// a backup of just the spinner's box so each frame restores the menu underneath before
+// redrawing the rotated spinner (no trails, no full re-render), and on kIoEnd we hold it a
+// short minimum so an instant write (e.g. a virtual card on the emulator) is still visible.
+const int   SPIN_W = 150;               // spinner badge box (bottom-right corner)
+const int   SPIN_H = 30;
+const int   SPIN_MIN_FRAMES = 14;       // ~0.23s floor so a fast write still shows
+
+u16  g_spinBackup[SPIN_W * SPIN_H];     // menu pixels under the badge (render is single-threaded)
+bool g_spinActive = false;              // a write is currently drawing the badge
+int  g_spinTick   = 0;                  // rotation phase (advances each frame)
+int  g_spinFrames = 0;                  // frames shown this write (for the minimum hold)
+
+inline int spinX() { return g_w - 10 - SPIN_W; }
+inline int spinY() { return FOOTER_Y - 8 - SPIN_H; }   // just above the footer legend
+
+void spinCapture() {
+    const int bx = spinX(), by = spinY();
+    for (int j = 0; j < SPIN_H; ++j) {
+        const int py = by + j;
+        if (py < 0 || py >= g_h) continue;
+        for (int i = 0; i < SPIN_W; ++i) {
+            const int px = bx + i;
+            g_spinBackup[j * SPIN_W + i] =
+                ((unsigned)px < (unsigned)g_w) ? g_ras[py * g_w + px] : 0;
+        }
+    }
+}
+
+void spinRestore() {
+    const int bx = spinX(), by = spinY();
+    for (int j = 0; j < SPIN_H; ++j) {
+        const int py = by + j;
+        if (py < 0 || py >= g_h) continue;
+        for (int i = 0; i < SPIN_W; ++i) {
+            const int px = bx + i;
+            if ((unsigned)px < (unsigned)g_w) {
+                g_ras[py * g_w + px] = g_spinBackup[j * SPIN_W + i];
+            }
+        }
+    }
+}
+
+// A small filled disc (spinner dot), alpha-blended so trailing dots fade out.
+void spinDot(int cx, int cy, int rad, int r, int g, int b, int a) {
+    for (int j = -rad; j <= rad; ++j) {
+        for (int i = -rad; i <= rad; ++i) {
+            if (i * i + j * j <= rad * rad) plotA(cx + i, cy + j, r, g, b, a);
+        }
+    }
+}
+
+// Draw the badge (rounded pill + rotating ring of dots + "Salvando" label) at rotation
+// phase @p tick, over the already-restored menu pixels.
+void drawSpinBadge(int tick) {
+    const int bx = spinX(), by = spinY();
+    // Discreet dark translucent pill with a faint amber edge.
+    roundRectFillA(bx - 1, by - 1, SPIN_W + 2, SPIN_H + 2, 9, 210, 170, 80, 150);
+    roundRectFillA(bx, by, SPIN_W, SPIN_H, 8, 12, 18, 32, 235);
+
+    // Ring of 8 dots around the badge's left; the "head" is brightest and it rotates.
+    static const int SDX[8] = { 0, 6, 8, 6, 0, -6, -8, -6 };
+    static const int SDY[8] = { -8, -6, 0, 6, 8, 6, 0, -6 };
+    const int cx = bx + 18, cy = by + SPIN_H / 2;
+    const int head = ((tick % 8) + 8) % 8;
+    for (int k = 0; k < 8; ++k) {
+        const int ph = ((head - k) % 8 + 8) % 8;   // 0 = head
+        int a = 255 - ph * 26;
+        if (a < 45) a = 45;
+        spinDot(cx + SDX[k], cy + SDY[k], 2, 255, 205, 110, a);
+    }
+
+    drawTextVC(bx + 36, cy, "Salvando", 236, 224, 190, 15.0f);
+}
+
+// Draw one spinner frame: restore the clean menu box, draw the badge at the current phase,
+// present (which waits for the vblank flip so the frame is actually shown), and advance.
+void spinFrame() {
+    spinRestore();
+    drawSpinBadge(g_spinTick);
+    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+    ++g_spinTick;
+    ++g_spinFrames;
+}
+
+// Ps2MemCard activity hook. kIoBegin: capture the box + draw the first frame. kIoTick:
+// advance a frame (called between completion polls while the write is in flight). kIoEnd:
+// hold to the minimum so a fast write is still seen, then restore the clean menu box.
+// Registered by pick() once video is up; left registered for a later off-menu game save.
+void memCardIoActivity(int phase) {
+    if (g_ras == 0 || !g_fontOk || !GsDisplay::instance().ready()) {
+        return;   // no screen yet (e.g. boot-time icon writes before pick())
+    }
+    switch (phase) {
+        case ps2::platform::Ps2MemCard::kIoBegin:
+            spinCapture();
+            g_spinTick = 0;
+            g_spinFrames = 0;
+            g_spinActive = true;
+            spinFrame();
+            break;
+        case ps2::platform::Ps2MemCard::kIoTick:
+            if (g_spinActive) spinFrame();
+            break;
+        case ps2::platform::Ps2MemCard::kIoEnd:
+            if (g_spinActive) {
+                while (g_spinFrames < SPIN_MIN_FRAMES) spinFrame();
+                spinRestore();
+                GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+                g_spinActive = false;
+            }
+            break;
+    }
+}
+
 } // namespace
 
 Ps2Frontend& Ps2Frontend::instance() {
@@ -1610,6 +1730,11 @@ int Ps2Frontend::pick() {
         return -1;
     }
     loadTitleIcon();
+
+    // Video is up: let memory-card writes animate the discreet "saving" spinner. Idempotent
+    // across repeated pick() calls, and left registered afterwards so a later game save shows
+    // it too.
+    Ps2MemCard::instance().setIoActivity(memCardIoActivity);
 
     int count = hal::GameStorage::instance().list();
     if (count < 0) {

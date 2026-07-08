@@ -75,6 +75,27 @@ public:
     /// Delete @p absPath from the card. Returns true if the file no longer exists after.
     bool removeFile(const char* absPath);
 
+    // --- I/O activity indicator (card writes; drives a small on-screen spinner) ----------
+
+    /// A memory-card write is issued asynchronously to the IOP; the calling thread would
+    /// normally just block in mcSync until it finishes. To keep the UI alive instead, the
+    /// write polls completion and, between polls, calls a registered activity hook so a
+    /// caller (the launcher) can animate a small "saving" spinner -- the UI keeps rendering
+    /// through the whole write rather than freezing. The hook is called with:
+    ///   kIoBegin  once, when a write starts (set up + draw the first spinner frame);
+    ///   kIoTick   between completion polls while the write is in flight (advance a frame);
+    ///   kIoEnd    once, when it finishes (the caller may hold a minimum time, then clear).
+    /// Fires only for real card writes (writeFile / removeFile, which configWrite funnels
+    /// through); reads and the disk fallback never fire it. Runs on the writing thread;
+    /// there is a single hook. Passing 0 restores plain blocking writes (e.g. at boot).
+    enum IoPhase { kIoBegin = 0, kIoTick = 1, kIoEnd = 2 };
+    typedef void (*IoActivityFn)(int phase);
+    void setIoActivity(IoActivityFn fn) { ioActivity_ = fn; }
+
+    /// Whether a card write is in progress right now (a writeFile's internal delete+create
+    /// counts as one). Lets a non-UI caller poll instead of registering the hook.
+    bool ioBusy() const { return ioBusy_ > 0; }
+
 private:
     Ps2MemCard();
     Ps2MemCard(const Ps2MemCard&);
@@ -85,16 +106,35 @@ private:
     // the SifLock.
     int syncResult();
 
+    // Like syncResult, but for the write path: when an activity hook is registered it polls
+    // completion non-blockingly and fires kIoTick between polls (so the spinner animates
+    // during the write instead of the thread freezing). With no hook it just blocks as
+    // syncResult does. Caller holds the SifLock.
+    int syncResultIo();
+
     // Disk fallback for the config methods (used only when available_ is false): the
     // boot-directory file via Ps2Storage. Caller holds the SifLock.
     int  diskRead(const char* name, void* buf, int cap);
     bool diskWrite(const char* name, const void* data, int len);
+
+    // The card round-trip behind the public writeFile / removeFile. The public methods keep
+    // the caller-facing validation and bracket these with the I/O-activity begin/end; the
+    // syncResultIo calls inside them animate the spinner while the write is in flight.
+    bool writeFileLocked(const char* absPath, const void* data, int len);
+    bool removeFileLocked(const char* absPath);
+
+    // Fire the activity hook on the 0->1 (kIoBegin) and 1->0 (kIoEnd) transitions of the
+    // write nesting counter.
+    void ioBegin();
+    void ioEnd();
 
     bool inited_;               // init() has run
     bool available_;            // a usable formatted PS2 card was found
     int  port_;                 // card port that answered (0 = slot 1, 1 = slot 2)
     int  slot_;                 // always 0 (no multitap)
     char status_[64];           // human-readable state for diagnostics
+    IoActivityFn ioActivity_;   // spinner hook, called with kIoBegin/kIoTick/kIoEnd (0 = none)
+    int  ioBusy_;               // active-write nesting depth (0 = idle)
 };
 
 } // namespace platform
