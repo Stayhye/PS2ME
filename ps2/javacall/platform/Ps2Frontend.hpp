@@ -23,16 +23,25 @@ public:
     /// Self-contained: brings up video, input and storage as needed; touches no VM.
     int pick();
 
-    /// On-screen launch trace. On real hardware the SIF/EE console is gone after the
-    /// USB IOP reset, so there is no way to see the VM's stdout while it installs and
-    /// starts a game. When enabled, logWrite() mirrors those bytes (System.out incl.
-    /// the [Launcher] milestones and any exception traces) onto the native GS overlay,
-    /// so a freeze during launch leaves the last milestone visible. It reuses the menu
+    /// Raw on-screen launch trace (debug mode). On real hardware the SIF/EE console is
+    /// gone after the USB IOP reset, so there is no way to see the VM's stdout while it
+    /// installs and starts a game. When enabled, logWrite() mirrors those bytes
+    /// (System.out incl. the [Launcher] milestones and any exception traces) onto the
+    /// native GS overlay, so a freeze during launch leaves the last milestone visible.
+    /// This is the developer view, shown only when the "Debug mode" setting is on; the
+    /// default launch view is the friendly loadingBegin() screen. It reuses the menu
     /// raster/font/GsDisplay that pick() already brought up, so it is only valid after
-    /// pick() has run. Disabled again the moment the game starts drawing (so its own
-    /// screen is not clobbered) -- see Ps2Framebuffer::present.
+    /// pick() has run. logEnable(false) tears down whichever overlay is up (raw or
+    /// friendly); the game's first drawn frame calls it -- see Ps2Framebuffer::present.
     void logEnable(bool on);
     void logWrite(const char* s, int len);
+
+    /// Friendly loading screen (default, non-debug launch view). Shows the chosen game's
+    /// icon + name with a staged progress bar (Preparing -> Copying -> Installing ->
+    /// Starting), driven by the same [Launcher] milestones logWrite() sees. Call once,
+    /// after pick() and before JavaTask(), instead of logEnable(true). Torn down by
+    /// logEnable(false) when the game starts drawing.
+    void loadingBegin(int gameIndex);
 
 private:
     Ps2Frontend() {}

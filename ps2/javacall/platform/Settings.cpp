@@ -1,7 +1,7 @@
 // PS2 JavaCall port — platform layer. Settings implementation.
 //
-// A tiny key=value file (<bootdir>settings.txt): "recent=0|1", "sort=0|1". See
-// Settings.hpp for the model.
+// A tiny key=value file (<bootdir>settings.txt): "recent=0|1", "sort=0|1",
+// "debug=0|1". See Settings.hpp for the model.
 #include "Settings.hpp"
 
 #include "Ps2Storage.hpp"
@@ -20,11 +20,12 @@ Settings& Settings::instance() {
     return inst;
 }
 
-Settings::Settings() : showRecent_(true), defaultSort_(0), loaded_(false) {}
+Settings::Settings() : showRecent_(true), defaultSort_(0), debugMode_(false), loaded_(false) {}
 
 void Settings::load() {
     showRecent_  = true;    // defaults
     defaultSort_ = 0;
+    debugMode_   = false;
     loaded_ = true;
 
     char path[256];
@@ -58,6 +59,8 @@ void Settings::load() {
             showRecent_ = (line[7] != '0');
         } else if (strncmp(line, "sort=", 5) == 0 && len >= 6) {
             defaultSort_ = (line[5] == '1') ? 1 : 0;
+        } else if (strncmp(line, "debug=", 6) == 0 && len >= 7) {
+            debugMode_ = (line[6] != '0');
         }
     }
 }
@@ -69,6 +72,11 @@ void Settings::setShowRecent(bool on) {
 
 void Settings::setDefaultSort(int mode) {
     defaultSort_ = (mode == 1) ? 1 : 0;
+    save();
+}
+
+void Settings::setDebugMode(bool on) {
+    debugMode_ = on;
     save();
 }
 
@@ -86,6 +94,8 @@ void Settings::save() const {
     int n = snprintf(line, (int)sizeof(line), "recent=%d\n", showRecent_ ? 1 : 0);
     ::write(fd, line, n);
     n = snprintf(line, (int)sizeof(line), "sort=%d\n", defaultSort_);
+    ::write(fd, line, n);
+    n = snprintf(line, (int)sizeof(line), "debug=%d\n", debugMode_ ? 1 : 0);
     ::write(fd, line, n);
     ::close(fd);
 }

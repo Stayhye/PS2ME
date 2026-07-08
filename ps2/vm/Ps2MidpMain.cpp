@@ -32,6 +32,7 @@ extern "C" {
 #include "../javacall/platform/Ps2Frontend.hpp"
 #include "../javacall/platform/Ps2Storage.hpp"
 #include "../javacall/platform/Ps2Audio.hpp"
+#include "../javacall/platform/Settings.hpp"
 #include "../javacall/platform/SifLock.hpp"
 
 extern "C" {
@@ -109,12 +110,17 @@ int main(int argc, char** argv) {
         static char a2[] = "com.j2meps2.loader.GameLoader";
         char* jargv[] = { a0, a1, a2 };
 
-        // Mirror the VM's stdout onto the native GS while it installs and starts the
-        // game. On real hardware the SIF/EE console is gone after the USB IOP reset, so
-        // this on-screen trace is the only way to see the [Launcher] milestones (and
-        // any crash) -- a freeze leaves the last milestone on screen. It turns itself
-        // off the moment the game draws its first frame (Ps2Framebuffer::present).
-        ps2::platform::Ps2Frontend::instance().logEnable(true);
+        // Show launch progress while the VM installs and starts the game. By default
+        // this is the friendly loading screen (game icon + name + staged progress bar);
+        // with "Debug mode" on it is instead the raw VM stdout trace (the [Launcher]
+        // milestones + any crash), which on real hardware is the only console left after
+        // the USB IOP reset. Both overlays turn themselves off the moment the game draws
+        // its first frame (Ps2Framebuffer::present).
+        if (ps2::platform::Settings::instance().debugMode()) {
+            ps2::platform::Ps2Frontend::instance().logEnable(true);
+        } else {
+            ps2::platform::Ps2Frontend::instance().loadingBegin(idx);
+        }
         javacall_print("=== launch trace (install + start) ===\n");
 
         javanotify_start_java_with_arbitrary_args(3, jargv);

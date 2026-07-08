@@ -2,8 +2,9 @@
 //
 // Settings: the native launcher's persisted preferences (a tiny key=value text file,
 // <bootdir>settings.txt, written through fileXio under the shared SifLock). Currently:
-// whether the ALL GAMES tab shows the recent row, and the default sort order applied at
-// startup. Each setter persists immediately.
+// whether the ALL GAMES tab shows the recent row, the default sort order applied at
+// startup, and whether the raw VM launch trace is shown (debug mode) instead of the
+// friendly loading screen. Each setter persists immediately.
 #ifndef PS2_JAVACALL_PLATFORM_SETTINGS_HPP
 #define PS2_JAVACALL_PLATFORM_SETTINGS_HPP
 
@@ -19,9 +20,11 @@ public:
 
     bool showRecent() const  { return showRecent_; }   // default: true
     int  defaultSort() const { return defaultSort_; }  // default: 0 (A-Z); 1 = Z-A
+    bool debugMode() const   { return debugMode_; }    // default: false (friendly loader)
 
     void setShowRecent(bool on);
     void setDefaultSort(int mode);
+    void setDebugMode(bool on);
 
 private:
     Settings();
@@ -32,6 +35,7 @@ private:
 
     bool showRecent_;
     int  defaultSort_;
+    bool debugMode_;
     bool loaded_;
 };
 

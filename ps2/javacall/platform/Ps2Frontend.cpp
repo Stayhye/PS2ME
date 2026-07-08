@@ -1043,9 +1043,9 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-const int SETTINGS_COUNT = 4;
+const int SETTINGS_COUNT = 5;
 
-// The SETTINGS tab: a vertical list of options (two actions + two toggles). @p sel is
+// The SETTINGS tab: a vertical list of options (two actions + three toggles). @p sel is
 // the highlighted row.
 void drawSettings(int sel) {
     const int left  = GRID_X0;
@@ -1078,6 +1078,9 @@ void drawSettings(int sel) {
                     break;
             case 3: label = "Default sort";
                     snprintf(value, sizeof(value), "%s", Settings::instance().defaultSort() == 1 ? "Z-A" : "A-Z");
+                    break;
+            case 4: label = "Debug mode";
+                    snprintf(value, sizeof(value), "%s", Settings::instance().debugMode() ? "On" : "Off");
                     break;
         }
         const int cy = y + rowH / 2;
@@ -1195,7 +1198,9 @@ char g_logLines[LOG_MAX_LINES][LOG_LINE_CAP];
 int  g_logCount = 0;             // completed lines stored
 char g_logBuild[LOG_LINE_CAP];   // line currently being assembled
 int  g_logCur   = 0;             // chars in g_logBuild
-bool g_logOn    = false;
+
+// Active launch overlay: 0 = none, 1 = raw debug trace, 2 = friendly loading screen.
+int  g_launchMode = 0;
 
 void logRender() {
     if (g_ras == 0 || !g_fontOk) {
@@ -1236,6 +1241,114 @@ void logPushLine() {
     g_logCur = 0;
 }
 
+// --- Friendly loading screen (default, non-debug launch view) ---------------------
+// A centred card with the chosen game's icon + name and a staged progress bar. It is
+// painted on loadingBegin() and repainted each time a [Launcher] milestone (seen in the
+// teed VM stdout, loadingFeed()) advances the stage, so the user sees clear motion
+// while the VM installs and starts the game instead of the raw developer log.
+const char* const kLoadStages[4] = {
+    "Preparing...", "Copying game...", "Installing...", "Starting..."
+};
+const int kLoadPct[4] = { 15, 45, 72, 92 };   // progress-bar fill per stage
+
+char g_loadName[64];             // chosen game's display name (".jar" stripped)
+int  g_loadGame  = -1;           // its storage index (for the cached icon)
+int  g_loadStage = 0;            // 0..3, see kLoadStages
+bool g_loadFail  = false;        // a "[Launcher] launch FAILED" line was seen
+
+void loadingRender() {
+    if (g_ras == 0 || !g_fontOk) {
+        return;
+    }
+    memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked dashboard background
+    drawHeader();                                           // same PS2ME header as the menu
+
+    const int cardW = 360, cardH = 236;
+    const int cardX = (g_w - cardW) / 2;
+    const int cardY = (g_h - cardH) / 2 + 6;
+    panel(cardX, cardY, cardW, cardH, 12);
+
+    // Game icon (already decoded + cached while it sat in the menu) in a recessed frame,
+    // or a lettered fallback if it is not cached.
+    const int icon  = 92;
+    const int iconX = cardX + (cardW - icon) / 2;
+    const int iconY = cardY + 20;
+    roundRectFillA(iconX - 3, iconY - 3, icon + 6, icon + 6, 8, 120, 150, 205, 255);
+    roundRectVGrad(iconX - 2, iconY - 2, icon + 4, icon + 4, 7, 28, 46, 86, 18, 32, 64);
+    if (g_loadGame < 0 ||
+        !IconCache::instance().drawScaled(g_loadGame, g_ras, g_w, g_h, iconX, iconY, icon)) {
+        char c[2] = { (char)(g_loadName[0] ? g_loadName[0] : '?'), 0 };
+        drawText(iconX + icon / 2 - textWidth(c, 60.0f) / 2, iconY + icon / 2 - 34,
+                 c, 210, 224, 244, 60.0f);
+    }
+
+    // Game name, centred under the icon.
+    char lbl[48];
+    makeLabel(lbl, (int)sizeof(lbl), g_loadName, (float)(cardW - 40), 20.0f);
+    const int lw = textWidth(lbl, 20.0f);
+    drawText(cardX + (cardW - lw) / 2, iconY + icon + 12, lbl, 235, 242, 252, 20.0f);
+
+    // Stage label above the bar.
+    const int barX = cardX + 24, barW = cardW - 48, barH = 12;
+    const int barY = cardY + cardH - 30;
+    const char* stage = g_loadFail ? "Failed to start" : kLoadStages[g_loadStage];
+    const int sr = g_loadFail ? 235 : 150, sg = g_loadFail ? 110 : 185, sb = g_loadFail ? 110 : 220;
+    const int sw = textWidth(stage, 15.0f);
+    drawText(cardX + (cardW - sw) / 2, barY - 22, stage, sr, sg, sb, 15.0f);
+
+    // Progress bar: recessed track + filled portion.
+    roundRectVGrad(barX, barY, barW, barH, 6, 20, 32, 60, 14, 22, 44);
+    const int pct = g_loadFail ? 100 : kLoadPct[g_loadStage];
+    int fillW = barW * pct / 100;
+    if (fillW < barH) fillW = barH;
+    if (g_loadFail) {
+        roundRectVGrad(barX, barY, fillW, barH, 6, 210, 90, 90, 150, 50, 50);
+    } else {
+        roundRectVGrad(barX, barY, fillW, barH, 6, 100, 210, 255, 40, 110, 190);
+    }
+
+    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+}
+
+// Advance the loading stage from a completed [Launcher] milestone line, repainting only
+// when the stage (or the failure flag) actually changes. Stages never move backwards.
+void loadingStageFromLine(const char* line) {
+    int  st   = g_loadStage;
+    bool fail = g_loadFail;
+    if (strstr(line, "FAILED") != 0) {
+        fail = true;
+    } else if (strstr(line, "launching ") != 0) {
+        st = 3;
+    } else if (strstr(line, "installed ") != 0) {
+        st = 2;
+    } else if (strstr(line, "seeded ") != 0) {
+        st = 1;
+    }
+    if (st < g_loadStage) {
+        st = g_loadStage;
+    }
+    if (st != g_loadStage || fail != g_loadFail) {
+        g_loadStage = st;
+        g_loadFail  = fail;
+        loadingRender();
+    }
+}
+
+// Buffer teed VM stdout into lines and drive the stage from each completed one. Reuses
+// g_logBuild (the raw-trace line buffer) since only one launch overlay is ever active.
+void loadingFeed(const char* s, int len) {
+    for (int i = 0; i < len; ++i) {
+        const char c = s[i];
+        if (c == '\n') {
+            g_logBuild[g_logCur] = '\0';
+            loadingStageFromLine(g_logBuild);
+            g_logCur = 0;
+        } else if (c != '\r' && g_logCur < LOG_LINE_CAP - 1) {
+            g_logBuild[g_logCur++] = c;
+        }
+    }
+}
+
 // Frame pacing: block until the next field. Uses the vsync-interrupt semaphore when
 // it is installed (so the icon worker runs meanwhile); falls back to a busy vsync.
 void waitFrame() {
@@ -1254,15 +1367,30 @@ Ps2Frontend& Ps2Frontend::instance() {
 }
 
 void Ps2Frontend::logEnable(bool on) {
-    g_logOn = on;
+    g_launchMode = on ? 1 : 0;    // 1 = raw debug trace; 0 tears down any overlay
     if (on) {                     // start each launch window with a clean trace
         g_logCount = 0;
         g_logCur   = 0;
     }
 }
 
+void Ps2Frontend::loadingBegin(int gameIndex) {
+    g_launchMode = 2;             // friendly loading screen
+    g_loadGame   = gameIndex;
+    g_loadStage  = 0;
+    g_loadFail   = false;
+    g_logCur     = 0;             // fresh line buffer for milestone parsing
+    const char* nm = hal::GameStorage::instance().nameAt(gameIndex);
+    stripJar(g_loadName, (int)sizeof(g_loadName), nm != 0 ? nm : "?");
+    loadingRender();              // paint the initial "Preparing..." frame at once
+}
+
 void Ps2Frontend::logWrite(const char* s, int len) {
-    if (!g_logOn || s == 0) {
+    if (g_launchMode == 0 || s == 0) {
+        return;
+    }
+    if (g_launchMode == 2) {      // friendly loader: parse milestones, no raw text
+        loadingFeed(s, len);
         return;
     }
     bool sawNewline = false;
@@ -1387,6 +1515,8 @@ int Ps2Frontend::pick() {
                             g_sortMode = m;
                             break;
                         }
+                        case 4: Settings::instance().setDebugMode(
+                                    !Settings::instance().debugMode()); break;
                     }
                     settingsChanged = true;
                 }
