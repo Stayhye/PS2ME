@@ -12,6 +12,9 @@
 // <kni.h> is needed from the VM side (no SNI raw pointers / ROMStructs).
 #include <kni.h>
 
+#include <string.h>   // memcpy (game-save restore)
+#include <stdio.h>    // printf (game-save restore log)
+
 #include "../javacall/hal/GameStorage.hpp"
 
 extern "C" {
@@ -33,6 +36,82 @@ int ps2_chosen_game = -1;
 // outright; it is a no-op if the id is not locked, and safe at menu time because no
 // stored suite is running then.
 void remove_storage_lock(int suiteId);
+
+// --- PS2 game-save restore ---------------------------------------------------------
+// Before the chosen game runs, repopulate its RecordStores in the volatile rmfs from the
+// blob the previous run wrote to the memory card (ps2GameSaveSnapshot in javaTask.c does
+// the capture; same "RMS1" format). Called from GameLoader.run() after the suite is
+// installed (so the rmfs is set up) and before MIDletSuiteUtils.execute() hands off -- the
+// game runs in the next SVM cycle on the same rmfs, so files written here are visible to
+// it. Verbatim filenames: the suite id is stable across launches (its counter lives in the
+// rmfs, which resets each cycle), so the packed "/j2me/appdb//<id>..." names match what the
+// game looks up. Raw rmfs writes (libjvm) + the memory-card bridge (Ps2GameSaveBridge.cpp).
+int  ps2mc_available(void);
+int  ps2mc_config_read(const char* name, void* buf, int cap);
+int  ps2gs_save_name(int gameIndex, char* out, int cap);
+int  rmfsOpen(const char* filename, int flags, int creationMode);
+int  rmfsClose(int fd);
+int  rmfsWrite(int fd, void* buffer, int size);
+
+static unsigned int ps2gsGetU32(const unsigned char* p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static void ps2GameSaveRestore(void) {
+    static unsigned char blob[256 * 1024];
+    char savename[64];
+    unsigned int magic, fileCount, i;
+    int total, pos, restored = 0;
+    const int wmode = 0x01 | 0x40 | 0x200;   // PCSL_FILE_O_WRONLY | O_CREAT | O_TRUNC
+
+    if (!ps2mc_available()) {
+        return;
+    }
+    if (ps2gs_save_name(ps2_chosen_game, savename, (int)sizeof(savename)) <= 0) {
+        return;
+    }
+    total = ps2mc_config_read(savename, blob, (int)sizeof(blob));
+    if (total < 8) {
+        printf("[gamesave] restore: no save '%s' (%d)\n", savename, total);
+        return;
+    }
+    magic = ps2gsGetU32(blob);
+    fileCount = ps2gsGetU32(blob + 4);
+    if (magic != 0x31534d52u) {              // 'RMS1'
+        printf("[gamesave] restore: bad magic in '%s'\n", savename);
+        return;
+    }
+    pos = 8;
+    for (i = 0; i < fileCount; i++) {
+        char name[256];
+        unsigned int nlen, dlen;
+        int fd, wrote = 0;
+        if (pos + 4 > total) break;
+        nlen = ps2gsGetU32(blob + pos); pos += 4;
+        if (nlen == 0 || nlen > 255 || pos + (int)nlen > total) break;
+        memcpy(name, blob + pos, nlen); name[nlen] = '\0'; pos += (int)nlen;
+        if (pos + 4 > total) break;
+        dlen = ps2gsGetU32(blob + pos); pos += 4;
+        if (pos + (int)dlen > total) break;
+
+        fd = rmfsOpen(name, wmode, 0);
+        if (fd >= 0) {
+            while (wrote < (int)dlen) {
+                int w = rmfsWrite(fd, blob + pos + wrote, (int)dlen - wrote);
+                if (w <= 0) break;
+                wrote += w;
+            }
+            rmfsClose(fd);
+            restored++;
+            printf("[gamesave] restore: %s (%u bytes)\n", name, dlen);
+        } else {
+            printf("[gamesave] restore: open FAILED %s\n", name);
+        }
+        pos += (int)dlen;
+    }
+    printf("[gamesave] restored %d/%u file(s) from %s\n", restored, fileCount, savename);
+}
 
 
 // int chosenGame() -> the game index the native front-end already picked (or -1).
@@ -120,6 +199,14 @@ KNIDECL(com_j2meps2_loader_GameLoader_closeGame) {
 KNIEXPORT KNI_RETURNTYPE_VOID
 KNIDECL(com_j2meps2_loader_GameLoader_clearSuiteLock) {
     remove_storage_lock(KNI_GetParameterAsInt(1));
+    KNI_ReturnVoid();
+}
+
+// void restoreGameSave() -> repopulate the chosen game's RecordStores in the rmfs from the
+// memory card before it runs. No-op when there is no card or no save. See ps2GameSaveRestore.
+KNIEXPORT KNI_RETURNTYPE_VOID
+KNIDECL(com_j2meps2_loader_GameLoader_restoreGameSave) {
+    ps2GameSaveRestore();
     KNI_ReturnVoid();
 }
 

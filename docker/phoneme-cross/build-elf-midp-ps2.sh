@@ -145,6 +145,7 @@ JC_SRCS="
     platform/Ps2Pad.cpp
     platform/Ps2Storage.cpp
     platform/Ps2MemCard.cpp
+    platform/Ps2GameSaveBridge.cpp
     platform/Ps2SaveIcon.cpp
     platform/Ps2HostStorage.cpp
     platform/Ps2Audio.cpp

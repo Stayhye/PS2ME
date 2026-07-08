@@ -72,6 +72,134 @@ static javacall_result midpHandleListMIDlets(void);
 static javacall_result midpHandleListStorageNames(void);
 static javacall_result midpHandleRemoveMIDlet(midp_event_remove_midlet removeMidletEvent);
 
+/*
+ * PS2 GAME-SAVE SNAPSHOT (phase 2a -- capture the game's RecordStores to the memory card).
+ *
+ * A game's RecordStores live as files in the volatile rmfs under /j2me/appdb/, which
+ * midpFinalize() frees at the end of each JavaTask() cycle. Right after the game exits and
+ * before that teardown, this packs the game's RMS files and writes them to the memory card
+ * (one blob per game, keyed by the game's stable name) so the next launch can restore them
+ * (restore lands in phase 2b -- the GameLoader shim, before it runs the game).
+ *
+ * The per-suite RMS files are named <root>/<8-hex-suite-id><store-name>.db; the shared
+ * "_icons.dat" AMS cache sits in the same directory but is NOT game data, so we keep only
+ * the entries whose name (after the root) begins with a hex digit. The suite id is stable
+ * (the id counter lives in the rmfs, which resets every cycle, so a fresh install always
+ * gets the same id), so the packed filenames are restored verbatim. Uses the raw rmfs API
+ * (char* paths) and the memory-card bridge (ps2mc_*, ps2gs_* in the javacall library).
+ */
+extern char *rmfsFileStartWith(const char *filename);
+extern int   rmfsOpen(const char *filename, int flags, int creationMode);
+extern int   rmfsClose(int fd);
+extern int   rmfsRead(int fd, void *buffer, int size);
+extern int   rmfsFileSize(int fd);
+extern int   rmfsGetUsedSpace(void);
+extern int   rmfsGetFreeSpace(void);
+
+/* Memory-card bridge (implemented in the javacall library, Ps2GameSaveBridge.cpp). */
+extern int ps2mc_available(void);
+extern int ps2mc_config_write(const char *name, const void *data, int len);
+extern int ps2gs_save_name(int gameIndex, char *out, int cap);
+/* The game index the native menu picked (GameLoaderKni.cpp). */
+extern int ps2_chosen_game;
+
+/* rms.dat layout: [u32 magic 'RMS1'][u32 fileCount] then per file
+ * [u32 nameLen][name][u32 dataLen][data]. Same machine writes and reads it, so the u32s
+ * are stored in native (little-endian) byte order. */
+#define PS2GS_MAGIC 0x31534d52u   /* 'R','M','S','1' little-endian */
+
+static unsigned char ps2gsBlob[256 * 1024];
+
+static void ps2gsPutU32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)v;         p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+static void ps2GameSaveSnapshot(void) {
+    static char names[64][256];
+    const char *prefix = "/j2me/appdb/";
+    char savename[64];
+    char *fn;
+    int count = 0, k, pos;
+    unsigned int fileCount = 0;
+
+    /* Reset the stateful rmfsFileStartWith cursor: searching a prefix that nothing matches
+     * walks the whole name table and leaves its static prevFilename = NULL, so the real
+     * enumeration below starts from the first entry (no rmfsAlloc patch needed for now). */
+    rmfsFileStartWith("\x01");
+
+    /* Pass 1: collect the names (copy them out -- the returned pointer aims into the rmfs
+     * name table, which we must not hold across other rmfs calls). */
+    while ((fn = rmfsFileStartWith(prefix)) != NULL && count < 64) {
+        int i = 0;
+        for (; fn[i] != '\0' && i < 255; i++) {
+            names[count][i] = fn[i];
+        }
+        names[count][i] = '\0';
+        count++;
+    }
+
+    printf("[gamesave] snapshot: %d file(s) under %s, rmfs used=%d free=%d\n",
+           count, prefix, rmfsGetUsedSpace(), rmfsGetFreeSpace());
+
+    if (ps2gs_save_name(ps2_chosen_game, savename, (int)sizeof(savename)) <= 0) {
+        printf("[gamesave] no save name for game %d -- skip\n", ps2_chosen_game);
+        return;
+    }
+
+    /* Pass 2: pack the game's RMS files (header first, then each kept entry). */
+    pos = 8;   /* leave room for magic + file count */
+    for (k = 0; k < count; k++) {
+        const char *slash = strrchr(names[k], '/');
+        const char *base = slash ? slash + 1 : names[k];
+        int fd, sz, got, nlen;
+        if (!isxdigit((unsigned char)base[0])) {
+            continue;                   /* skip _icons.dat and other non-suite files */
+        }
+        fd = rmfsOpen(names[k], 0, 0);
+        if (fd < 0) {
+            continue;
+        }
+        sz = rmfsFileSize(fd);
+        nlen = (int)strlen(names[k]);
+        if (sz < 0 || pos + 8 + nlen + sz > (int)sizeof(ps2gsBlob)) {
+            printf("[gamesave] blob full / bad size, skip %s (%d bytes)\n", names[k], sz);
+            rmfsClose(fd);
+            continue;
+        }
+        ps2gsPutU32(ps2gsBlob + pos, (unsigned int)nlen);   pos += 4;
+        memcpy(ps2gsBlob + pos, names[k], (size_t)nlen);    pos += nlen;
+        ps2gsPutU32(ps2gsBlob + pos, (unsigned int)sz);     pos += 4;
+        got = 0;
+        while (got < sz) {
+            int r = rmfsRead(fd, ps2gsBlob + pos + got, sz - got);
+            if (r <= 0) {
+                break;
+            }
+            got += r;
+        }
+        rmfsClose(fd);
+        pos += sz;
+        fileCount++;
+        printf("[gamesave]   packed %s (%d bytes)\n", names[k], sz);
+    }
+
+    if (fileCount == 0) {
+        printf("[gamesave] game %d wrote no RecordStore -- nothing to save\n", ps2_chosen_game);
+        return;
+    }
+    ps2gsPutU32(ps2gsBlob + 0, PS2GS_MAGIC);
+    ps2gsPutU32(ps2gsBlob + 4, fileCount);
+
+    if (!ps2mc_available()) {
+        printf("[gamesave] no memory card -- '%s' (%d bytes) NOT written\n", savename, pos);
+        return;
+    }
+    printf("[gamesave] writing %s: %u file(s), %d bytes -> %s\n",
+           savename, fileCount, pos,
+           ps2mc_config_write(savename, ps2gsBlob, pos) == 0 ? "OK" : "FAIL");
+}
+
 /**
  * An entry point of a thread devoted to run java
  */
@@ -119,6 +247,11 @@ void JavaTask(void) {
                                              NULL);
             JavaTaskImpl(event.data.startMidletArbitraryArgEvent.argc,
                          event.data.startMidletArbitraryArgEvent.argv);
+
+            /* PS2: the game has now run and exited, but its RecordStores are still in the
+             * rmfs (midpFinalize() below frees them). Snapshot them to the memory card
+             * before that -- see ps2GameSaveSnapshot(). */
+            ps2GameSaveSnapshot();
 
             JavaTaskIsGoOn = JAVACALL_FALSE;
             break;

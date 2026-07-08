@@ -49,6 +49,9 @@ public class GameLoader extends MIDlet implements InstallListener, Runnable {
     private static native int chosenGame();
     /** Drop a stale native suite storage lock so remove() can free the suite. */
     private static native void clearSuiteLock(int id);
+    /** Restore the chosen game's RecordStores from the memory card into the rmfs, before
+     *  it runs (no-op when there is no card or no saved data). */
+    private static native void restoreGameSave();
 
     protected void startApp() {
         // Install can be slow; run it off the event thread (mirrors
@@ -77,6 +80,10 @@ public class GameLoader extends MIDlet implements InstallListener, Runnable {
             if (suiteId <= 0) {
                 throw new IOException("install returned " + suiteId);
             }
+
+            // Repopulate the game's RecordStores from the memory card before it runs, so
+            // its previous progress is there when it opens them (no-op if nothing saved).
+            restoreGameSave();
 
             MIDletSuiteStorage storage = MIDletSuiteStorage.getMIDletSuiteStorage();
             MIDletSuite suite = storage.getMIDletSuite(suiteId, false);
