@@ -986,33 +986,50 @@ void drawDetails(int viewCount, int selected, const int* view) {
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
 }
 
-void drawFooter(int activeTab) {
+// Context-aware button legend: only the actions available in the current context are
+// shown (e.g. no BACK at the root, no FAVORITE/SORT on SETTINGS or while the alphabet
+// column is focused). Glyph kind: 0=cross, 1=circle, 2=triangle, 3=square.
+void drawFooter(int activeTab, bool sidebarFocus) {
     rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
     for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
     const int cy = FOOTER_Y + FOOTER_H / 2;
 
-    // One legend entry: a face-button glyph (drawn by kind) + its label. The cross
-    // action reads "SELECT" on the SETTINGS tab, "LAUNCH" on the grid tabs.
-    const char* labels[4] = { activeTab == 2 ? "SELECT" : "LAUNCH",
-                              "BACK", "FAVORITE", "SORT BY..." };
+    const bool canBack = sidebarFocus || activeTab != 0;   // somewhere to go back to
+    int kinds[4];
+    const char* labels[4];
+    int n = 0;
+    if (activeTab == 2) {                       // SETTINGS
+        kinds[n] = 0; labels[n] = "SELECT"; ++n;
+        if (canBack) { kinds[n] = 1; labels[n] = "BACK"; ++n; }
+    } else if (sidebarFocus) {                  // alphabet column focused
+        kinds[n] = 0; labels[n] = "JUMP"; ++n;
+        kinds[n] = 1; labels[n] = "BACK"; ++n;
+    } else {                                     // ALL GAMES / FAVORITES grid
+        kinds[n] = 0; labels[n] = "LAUNCH"; ++n;
+        if (canBack) { kinds[n] = 1; labels[n] = "BACK"; ++n; }
+        kinds[n] = 2; labels[n] = "FAVORITE"; ++n;
+        kinds[n] = 3; labels[n] = "SORT BY..."; ++n;
+    }
+
     const int glyphW = 16;   // glyph column (centre at +7) before the label
     const int itemGap = 26;
 
-    // Measure so the whole legend can be centred across the footer.
     int total = 0;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < n; ++i) {
         total += glyphW + textWidth(labels[i], 15.0f);
-        if (i < 3) total += itemGap;
+        if (i < n - 1) total += itemGap;
     }
     int x = (g_w - total) / 2;
     if (x < MARGIN) x = MARGIN;
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < n; ++i) {
         const int gcx = x + 7;
-        if      (i == 0) glyphCross(gcx,    cy, 7, 100, 150, 235);
-        else if (i == 1) glyphCircle(gcx,   cy, 7, 235,  92,  92);
-        else if (i == 2) glyphTriangle(gcx, cy, 7,  92, 216, 150);
-        else             glyphSquare(gcx,   cy, 7, 230, 112, 190);
+        switch (kinds[i]) {
+            case 0: glyphCross(gcx,    cy, 7, 100, 150, 235); break;
+            case 1: glyphCircle(gcx,   cy, 7, 235,  92,  92); break;
+            case 2: glyphTriangle(gcx, cy, 7,  92, 216, 150); break;
+            case 3: glyphSquare(gcx,   cy, 7, 230, 112, 190); break;
+        }
         drawTextVC(x + glyphW, cy, labels[i], 232, 240, 250, 15.0f);
         x += glyphW + textWidth(labels[i], 15.0f) + itemGap;
     }
@@ -1082,7 +1099,7 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
     drawTabs(activeTab);
     const int curGame = viewCount > 0 ? view[selected] : -1;
     drawSidebar(curGame, sidebarFocus, sidebarSel);
-    drawFooter(activeTab);
+    drawFooter(activeTab, sidebarFocus);
 
     if (activeTab == 2) {                       // SETTINGS
         drawSettings(settingsSel);
@@ -1343,6 +1360,16 @@ int Ps2Frontend::pick() {
             if (b.l1 && !prev.l1 && activeTab > 0) {
                 activeTab--; rebuildView(activeTab, count);
                 selected = 0; topRow = 0; sidebarFocus = false; settingsSel = 0;
+            }
+            // Back (Circle): unfocus the sidebar, else return to ALL GAMES. At the root
+            // (ALL GAMES with nothing focused) it does nothing.
+            if (b.circle && !prev.circle) {
+                if (sidebarFocus) {
+                    sidebarFocus = false;
+                } else if (activeTab != 0) {
+                    activeTab = 0; rebuildView(activeTab, count);
+                    selected = 0; topRow = 0; settingsSel = 0;
+                }
             }
             if (activeTab == 2) {
                 // Settings navigation: up/down move; cross activates the row.
