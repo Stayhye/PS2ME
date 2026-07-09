@@ -1109,9 +1109,9 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-const int SETTINGS_COUNT = 6;
+const int SETTINGS_COUNT = 7;
 
-// The SETTINGS tab: a vertical list of options (two actions + three toggles). @p sel is
+// The SETTINGS tab: a vertical list of options (actions + toggles). @p sel is
 // the highlighted row.
 void drawSettings(int sel) {
     const int left  = GRID_X0;
@@ -1150,6 +1150,9 @@ void drawSettings(int sel) {
                     break;
             case 5: label = "FPS counter";
                     snprintf(value, sizeof(value), "%s", Settings::instance().fpsCounter() ? "On" : "Off");
+                    break;
+            case 6: label = "Menu music";
+                    snprintf(value, sizeof(value), "%s", Settings::instance().bgmEnabled() ? "On" : "Off");
                     break;
         }
         const int cy = y + rowH / 2;
@@ -1753,11 +1756,10 @@ int Ps2Frontend::pick() {
     // it too.
     Ps2MemCard::instance().setIoActivity(memCardIoActivity);
 
-    // Menu is up: start (or resume) the background music, and pause the streaming mixer --
-    // the menu's BGM plays on a hardware ADPCM voice, so the mixer (which only pushes silence
-    // here) would just fight it for SPU2 RAM / IOP-SIF bandwidth and stall the icon worker.
-    // Both are undone on the way out to a game (below). No-op if no BGM was loaded.
-    Ps2Audio::instance().startBgm();
+    // Menu is up: pause the streaming mixer -- the menu's BGM plays on a hardware ADPCM voice,
+    // so the mixer (which only pushes silence here) would just fight it for SPU2 RAM / IOP-SIF
+    // bandwidth and stall the icon worker. Undone on the way out to a game (below). The BGM
+    // itself is started below, once Settings is loaded (it's gated on the "Menu music" toggle).
     Ps2Audio::instance().pauseMixer();
 
     int count = hal::GameStorage::instance().list();
@@ -1777,6 +1779,15 @@ int Ps2Frontend::pick() {
     Resolutions::instance().load(count); // per-game canvas resolution overrides
     Settings::instance().load();         // launcher preferences
     g_sortMode = Settings::instance().defaultSort();   // startup sort order
+
+    // Start (or resume) the menu background music now that the toggle is known. Disabled ->
+    // stopBgm() keeps the voice muted (a safe no-op when it was never started). Persists the
+    // track position across menu visits, so returning from a game resumes where it left off.
+    if (Settings::instance().bgmEnabled()) {
+        Ps2Audio::instance().startBgm();
+    } else {
+        Ps2Audio::instance().stopBgm();
+    }
 
     // The pad backend is shared with the (not-yet-running) VM's Keypad, so we open
     // the controller exactly once; reading it here drives no VM code path. Do the
@@ -1878,6 +1889,15 @@ int Ps2Frontend::pick() {
                                     !Settings::instance().debugMode()); break;
                         case 5: Settings::instance().setFpsCounter(
                                     !Settings::instance().fpsCounter()); break;
+                        case 6: {
+                            // Toggle the menu BGM and apply it immediately -- the user is
+                            // sitting in the menu, so start/mute the hardware voice now.
+                            const bool on = !Settings::instance().bgmEnabled();
+                            Settings::instance().setBgmEnabled(on);
+                            if (on) Ps2Audio::instance().startBgm();
+                            else    Ps2Audio::instance().stopBgm();
+                            break;
+                        }
                     }
                     settingsChanged = true;
                 }

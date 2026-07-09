@@ -1,7 +1,8 @@
 // PS2 JavaCall port — platform layer. Settings implementation.
 //
-// A tiny key=value file "settings.txt" ("recent=0|1", "sort=0|1", "debug=0|1"), persisted
-// on the memory card (falling back to the boot directory) via Ps2MemCard. See Settings.hpp.
+// A tiny key=value file "settings.txt" ("recent=0|1", "sort=0|1", "debug=0|1", "fps=0|1",
+// "music=0|1"), persisted on the memory card (falling back to the boot directory) via
+// Ps2MemCard. See Settings.hpp.
 #include "Settings.hpp"
 
 #include "Ps2MemCard.hpp"
@@ -18,13 +19,15 @@ Settings& Settings::instance() {
 }
 
 Settings::Settings()
-    : showRecent_(true), defaultSort_(0), debugMode_(false), fpsCounter_(false), loaded_(false) {}
+    : showRecent_(true), defaultSort_(0), debugMode_(false), fpsCounter_(false),
+      bgmEnabled_(true), loaded_(false) {}
 
 void Settings::load() {
     showRecent_  = true;    // defaults
     defaultSort_ = 0;
     debugMode_   = false;
     fpsCounter_  = false;
+    bgmEnabled_  = true;
     loaded_ = true;
 
     char buf[512];
@@ -51,6 +54,8 @@ void Settings::load() {
             debugMode_ = (line[6] != '0');
         } else if (strncmp(line, "fps=", 4) == 0 && len >= 5) {
             fpsCounter_ = (line[4] != '0');
+        } else if (strncmp(line, "music=", 6) == 0 && len >= 7) {
+            bgmEnabled_ = (line[6] != '0');
         }
     }
 }
@@ -75,11 +80,17 @@ void Settings::setFpsCounter(bool on) {
     save();
 }
 
+void Settings::setBgmEnabled(bool on) {
+    bgmEnabled_ = on;
+    save();
+}
+
 void Settings::save() const {
     char buf[96];
-    const int n = snprintf(buf, (int)sizeof(buf), "recent=%d\nsort=%d\ndebug=%d\nfps=%d\n",
+    const int n = snprintf(buf, (int)sizeof(buf),
+                           "recent=%d\nsort=%d\ndebug=%d\nfps=%d\nmusic=%d\n",
                            showRecent_ ? 1 : 0, defaultSort_, debugMode_ ? 1 : 0,
-                           fpsCounter_ ? 1 : 0);
+                           fpsCounter_ ? 1 : 0, bgmEnabled_ ? 1 : 0);
     if (n > 0) {
         Ps2MemCard::instance().configWrite("settings.txt", buf, n);
     }
