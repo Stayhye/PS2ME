@@ -722,9 +722,12 @@ void formatClock(char* out, int cap) {
 
 // --- Region renderers -------------------------------------------------------------
 
-// Launcher version, shown as a small tag beside the PS2ME wordmark in the header. Comes
-// from the single source of truth in ps2/version.h (bump via version.sh, never here).
+// Launcher version, shown as a small tag in the bottom-right of the footer. Comes from
+// the single source of truth in ps2/version.h (bump via version.sh, never here).
 const char* const kAppVersion = PS2ME_VERSION_STRING;
+
+// Author credit, shown small and subtle beside the PS2ME wordmark in the header.
+const char* const kAppAuthor = "by Wellinator";
 
 void drawHeader() {
     rectVGrad(0, 0, g_w, HEADER_H, 40, 66, 120, 22, 38, 74);
@@ -737,9 +740,9 @@ void drawHeader() {
         tx = MARGIN + TITLE_ICON + 10;
     }
     drawTextVC(tx, HEADER_H / 2, "PS2ME", 240, 246, 255, 26.0f);
-    // Version tag, just right of the wordmark and dropped to its baseline.
+    // Author credit, small and subtle, just right of the wordmark on its baseline.
     drawTextVC(tx + textWidth("PS2ME", 26.0f) + 8, HEADER_H / 2 + 6,
-               kAppVersion, 130, 162, 205, 14.0f);
+               kAppAuthor, 104, 132, 172, 12.0f);
 
     // Right-aligned two-line clock ("SYSTEM" over the running MM:SS:mmm), as in the kit.
     char clk[16];
@@ -1050,6 +1053,11 @@ void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
     rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
     for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
     const int cy = FOOTER_Y + FOOTER_H / 2;
+
+    // Version tag, tucked into the bottom-right corner (the button legend is centred, so
+    // it never reaches this far right).
+    drawTextVC(g_w - MARGIN - textWidth(kAppVersion, 13.0f), cy,
+               kAppVersion, 110, 138, 178, 13.0f);
 
     const bool canBack = sidebarFocus || detailsFocus || activeTab != 0;
     int kinds[6];   // glyph kind: 0=cross 1=circle 2=triangle 3=square 4=up/down 5=select
