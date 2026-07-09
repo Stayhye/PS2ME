@@ -207,6 +207,14 @@ int main(int argc, char** argv) {
         if (ps2::platform::Ps2Storage::instance().bankPath(bankPath, sizeof(bankPath))) {
             ps2::platform::Ps2Audio::instance().loadBank(bankPath);
         }
+        // Menu background music: a looping SPU2 ADPCM sample beside the games. Uploaded to
+        // SPU2 RAM once here (still single-threaded), then looped in hardware -- the
+        // launcher starts/pauses it. Optional: missing file just leaves the menu silent.
+        char bgmPath[224];
+        if (ps2::platform::Ps2Storage::instance().diskPath("bgm.adpcm", bgmPath,
+                                                           sizeof(bgmPath))) {
+            ps2::platform::Ps2Audio::instance().loadBgm(bgmPath);
+        }
         ps2::platform::Ps2Audio::instance().startMixer();     // SIF-locked ring feeder
     }
 
@@ -274,6 +282,13 @@ int main(int argc, char** argv) {
 
         // 4) Run the VM until the chosen game (and the loader) finish.
         JavaTask();
+
+        // 4a) The VM is gone: silence the game audio right now, before the memory-card save
+        //     below. Otherwise the last game sound keeps playing (and its mixer SIF traffic
+        //     stutters against the MC write) during the "Saving" screen. The BGM stays off
+        //     until pick() brings it back with the games list. (pick() also pauses the mixer,
+        //     but that is after the save -- this is what makes the save itself silent.)
+        ps2::platform::Ps2Audio::instance().pauseMixer();
 
         // 4b) If the game just saved progress this run, give its memory-card save a real
         //     OSD-browser entry -- an icon.sys + a 3D icon textured with the game's own

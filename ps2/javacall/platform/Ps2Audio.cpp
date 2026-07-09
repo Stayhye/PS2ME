@@ -27,6 +27,15 @@ namespace platform {
 namespace {
 const int MIXER_STACK = 16 * 1024;   // mixer stack (tiny: just feeds the ring)
 
+// --- Menu BGM (SPU2-direct ADPCM voice) -------------------------------------------
+// State for the single looping background-music voice. Touched only from the main/menu
+// thread (loadBgm at boot, start/stopBgm from the launcher) -- never the mixer thread --
+// so it needs no lock. Kept here (file scope) so the audsrv.h type stays out of the header.
+audsrv_adpcm_t g_bgm;
+bool           g_bgmLoaded = false;
+int            g_bgmCh     = -1;              // SPU2 voice channel (-1 = not playing yet)
+const int      BGM_VOL     = 0x3000;         // ~75% of MAX_VOLUME (0x3fff): ambient level
+
 // Little-endian readers for the WAV header (bytes come straight off the Java array).
 inline unsigned int le16(const unsigned char* p) {
     return (unsigned int)(p[0] | (p[1] << 8));
@@ -152,7 +161,7 @@ Ps2Audio& Ps2Audio::instance() {
 Ps2Audio::Ps2Audio()
     : bank_(0), bankSize_(0), bankRate_(0), bankZones_(0),
       progDir_(0), drumDir_(0), zoneTab_(0), bankPcm_(0),
-      ready_(false), mixerStarted_(false), mixerId_(0), mixerStack_(0),
+      ready_(false), mixerStarted_(false), mixerPaused_(false), mixerId_(0), mixerStack_(0),
       voiceSema_(0), nextId_(0),
       midiCount_(0), midiEventIdx_(0), midiCurSample_(0), midiSongSamples_(0) {}
 
@@ -237,6 +246,106 @@ bool Ps2Audio::loadBank(const char* path) {
         javacall_print(m);
     }
     return true;
+}
+
+bool Ps2Audio::loadBgm(const char* path) {
+    if (g_bgmLoaded) {
+        return true;                          // idempotent
+    }
+    if (!ready_ || path == 0 || path[0] == '\0') {
+        return false;
+    }
+    const int fd = ::open(path, O_RDONLY);
+    if (fd < 0) {
+        javacall_print("[bgm] not found (menu stays silent)\n");
+        return false;
+    }
+    const long rawSize = (long)::lseek(fd, 0, SEEK_END);
+    ::lseek(fd, 0, SEEK_SET);
+    // We prepend a 16-byte header (see below), so the SPU2 payload is rawSize + 16.
+    if (rawSize < 16 || rawSize + 16 > 2 * 1024 * 1024) {   // must fit the SPU2's 2 MB local RAM
+        ::close(fd);
+        javacall_print("[bgm] bad size\n");
+        return false;
+    }
+    // ps2adpcm emits RAW PS-ADPCM blocks with NO header (it targets the ps2snd IRX). But audsrv's
+    // IRX assumes a 16-byte header which it SKIPS, reading pitch from word[2] and loop/channels
+    // from word[1]. With no real header, word[2] == 0 => SPU2 pitch 0 => the voice never advances
+    // => dead silence (this was the bug). So we build our own 16-byte header here and put the raw
+    // ADPCM right after it. The loop is already baked into the block flags by ps2adpcm -l0, so the
+    // 'loop'/'channels' header fields are cosmetic (audsrv's play path never reads them); only
+    // 'pitch' actually drives the hardware.
+    const long size = rawSize + 16;
+    // Read the ADPCM file into a temporary EE buffer just to hand it to the SPU2; audsrv_load_adpcm
+    // copies it into SPU2 RAM, so we free the EE copy right after -- the music then costs ZERO EE
+    // RAM (and ZERO EE CPU: the SPU2 loops it in hardware).
+    unsigned char* buf = (unsigned char*)memalign(64, (size_t)size);
+    if (buf == 0) {
+        ::close(fd);
+        javacall_print("[bgm] out of memory\n");
+        return false;
+    }
+    long off = 16;                               // raw ADPCM lands after the 16-byte header
+    while (off < size) {
+        const long want = (size - off > 262144) ? 262144 : (size - off);
+        const int r = (int)::read(fd, buf + off, (size_t)want);
+        if (r <= 0) break;
+        off += r;
+    }
+    ::close(fd);
+    if (off != size) {
+        free(buf);
+        javacall_print("[bgm] read failed\n");
+        return false;
+    }
+    // SPU2 pitch: 0x1000 (4096) == 48000 Hz native rate, so pitch = rate * 4096 / 48000 (rounded).
+    // BGM_RATE must match tools/mkbgm.sh RATE; bump it here if the track ever plays fast/slow.
+    const int      BGM_RATE  = 11025;
+    const unsigned bgmPitch  = (unsigned)((BGM_RATE * 4096 + 24000) / 48000);
+    unsigned* hdr = (unsigned*)buf;              // EE is little-endian; audsrv reads these as LE u32
+    hdr[0] = 0;                                  // not read by the IRX
+    hdr[1] = (1u << 16) | (1u << 8);             // loop=1, channels=1 (cosmetic)
+    hdr[2] = bgmPitch;                           // THE fix: real pitch (was 0 -> silent)
+    hdr[3] = 0;
+
+    audsrv_adpcm_init();
+
+    const int lr = audsrv_load_adpcm(&g_bgm, buf, (int)size);   // upload to SPU2 RAM
+    free(buf);                                                  // EE copy no longer needed
+    if (lr != AUDSRV_ERR_NOERROR) {
+        char m[64];
+        snprintf(m, sizeof m, "[bgm] load_adpcm failed (%d) -> menu stays silent\n", lr);
+        javacall_print(m);
+        return false;
+    }
+    g_bgmLoaded = true;
+    char m[80];
+    snprintf(m, sizeof m, "[bgm] loaded %ld bytes -> SPU2 (pitch=%d, loop=%d)\n",
+             size, g_bgm.pitch, g_bgm.loop);
+    javacall_print(m);
+    return true;
+}
+
+void Ps2Audio::startBgm() {
+    if (!g_bgmLoaded) {
+        return;
+    }
+    // audsrv is SIF RPC and the mixer thread is already feeding audsrv concurrently, so
+    // serialize on the shared SifLock (the non-reentrant SIF bus would otherwise clash).
+    SifGuard guard;
+    if (g_bgmCh < 0) {
+        g_bgmCh = audsrv_ch_play_adpcm(-1, &g_bgm);   // allocate a voice, start looping
+    }
+    if (g_bgmCh >= 0) {
+        audsrv_adpcm_set_volume_and_pan(g_bgmCh, BGM_VOL, 0);   // (un)mute to full
+    }
+}
+
+void Ps2Audio::stopBgm() {
+    if (g_bgmCh >= 0) {
+        SifGuard guard;
+        audsrv_adpcm_set_volume_and_pan(g_bgmCh, 0, 0);   // pause: mute, keep the voice looping
+    }
 }
 
 bool Ps2Audio::init() {
@@ -358,8 +467,30 @@ void Ps2Audio::mixerRun() {
     static short outBlock[BLOCK];   // single mixer thread -> static is safe
     const int blockBytes = BLOCK * 2;
     int sent = blockBytes;          // == blockBytes means "mix a fresh block"
+    bool paused = false;            // tracks the pause edge so we mute/re-mix exactly once
 
     for (;;) {
+        // Paused on the menu: the hardware ADPCM BGM owns the SPU2 there, so we push no
+        // streaming. On the pause EDGE, mute the streaming input (audsrv_stop_audio zeros
+        // the Core-1 data-input volume): the ring's DMA keeps looping the last game block,
+        // so without this the final game sound drones on under the BGM. Muting the input
+        // does NOT touch the ADPCM voice (it has its own voice volume). Done on this thread
+        // to avoid racing our own play_audio, which would re-activate the volume. play_audio
+        // re-activates it automatically on resume.
+        if (mixerPaused_) {
+            if (!paused) {
+                SifGuard guard;
+                audsrv_stop_audio();
+                paused = true;
+            }
+            DelayThread(10000);
+            continue;
+        }
+        if (paused) {               // just resumed for a game: drop the pre-pause block
+            paused = false;
+            sent   = blockBytes;    // force a fresh mix (else we'd flush a stale block)
+        }
+
         // Mix a NEW block only once the previous one has been fully queued. audsrv_play_
         // audio is non-blocking: it accepts only what currently fits in the IOP ring and
         // returns that count. If we mixed every tick and ignored the count, we'd advance
@@ -1545,6 +1676,23 @@ void Ps2Audio::startMixer() {
         javacall_print("[audio] mixer thread started\n");
     }
 }
+
+void Ps2Audio::pauseMixer() {
+    // Silence any game voice still sounding (e.g. the level music the player left playing)
+    // so the mix immediately goes quiet -- called the instant the VM exits, before the
+    // memory-card save, so the save runs in silence. The mixer thread then mutes the
+    // streaming input and stops feeding the ring (see mixerRun). The ADPCM BGM is a
+    // separate hardware voice and is untouched.
+    if (mixerStarted_) {
+        WaitSema(voiceSema_);
+        for (int v = 0; v < VOICES; ++v) {
+            voices_[v].active = false;
+        }
+        SignalSema(voiceSema_);
+    }
+    mixerPaused_ = true;
+}
+void Ps2Audio::resumeMixer() { mixerPaused_ = false; }
 
 } // namespace platform
 } // namespace ps2

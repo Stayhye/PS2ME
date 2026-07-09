@@ -198,6 +198,13 @@ $EE_CXX -T"$LINKFILE" -O2 -o "$OUT/j2me-midp.elf" \
         -lkernel -lc -lm -lgcc \
     -Wl,--end-group
 
+# Ship the menu background music (looping SPU2 ADPCM, built by tools/mkbgm.sh) beside the
+# ELF so the runtime loads it from the boot dir / host:. Optional -- absent = silent menu.
+if [ -f /work/assets/bgm.adpcm ]; then
+    cp /work/assets/bgm.adpcm "$OUT/bgm.adpcm"
+    echo "+ bundled bgm.adpcm ($(( $(stat -c%s "$OUT/bgm.adpcm") / 1024 )) KB) beside the ELF"
+fi
+
 echo "=================================================================="
 ls -la "$OUT/j2me-midp.elf"
 echo " OK -> build/ps2/j2me-midp.elf"

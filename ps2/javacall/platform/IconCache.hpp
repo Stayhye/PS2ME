@@ -57,6 +57,12 @@ public:
     /// Whether a decode is currently in flight on the worker.
     bool busy() const { return working_; }
 
+    /// True while any icon is still queued or decoding. The launcher holds the marquee
+    /// animation while this is set: the marquee would otherwise force a full-screen render
+    /// every frame, so the main thread never blocks on vsync and this low-priority worker
+    /// gets no idle CPU to run in. (Plain unlocked reads -- a stale frame is harmless.)
+    bool hasWork() const { return working_ || qHead_ != qTail_; }
+
     /// True (once) if the worker installed a new tile since the last call. Lets the
     /// render thread stay asleep -- yielding the CPU to the worker -- while the screen
     /// is unchanged, and wake to redraw only when a freshly decoded icon is ready.

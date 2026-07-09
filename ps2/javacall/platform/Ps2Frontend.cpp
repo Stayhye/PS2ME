@@ -29,6 +29,7 @@
 #include "Resolutions.hpp"
 #include "Ps2Storage.hpp"
 #include "Ps2MemCard.hpp"          // register the "saving" banner as its I/O-activity listener
+#include "Ps2Audio.hpp"            // menu background music (start on the menu, pause in-game)
 #include "../hal/GameStorage.hpp"
 #include "../hal/Keypad.hpp"
 #include "../hal/IPad.hpp"
@@ -1749,6 +1750,13 @@ int Ps2Frontend::pick() {
     // it too.
     Ps2MemCard::instance().setIoActivity(memCardIoActivity);
 
+    // Menu is up: start (or resume) the background music, and pause the streaming mixer --
+    // the menu's BGM plays on a hardware ADPCM voice, so the mixer (which only pushes silence
+    // here) would just fight it for SPU2 RAM / IOP-SIF bandwidth and stall the icon worker.
+    // Both are undone on the way out to a game (below). No-op if no BGM was loaded.
+    Ps2Audio::instance().startBgm();
+    Ps2Audio::instance().pauseMixer();
+
     int count = hal::GameStorage::instance().list();
     if (count < 0) {
         count = 0;
@@ -1977,10 +1985,13 @@ int Ps2Frontend::pick() {
         }
 
         // Does the active item's name overflow its cell? Only then must we keep
-        // redrawing every field to animate the marquee (grid tabs only).
+        // redrawing every field to animate the marquee (grid tabs only). But hold the
+        // animation while icons are still loading: a per-frame render keeps the main
+        // thread off the vsync block, starving the low-priority icon worker (it would
+        // never get the idle CPU to decode). The marquee resumes once the grid is filled.
         bool marquee = false;
         if (g_viewCount > 0 && !moved && !sidebarFocus && !detailsFocus &&
-            (activeTab == 0 || activeTab == 1)) {
+            (activeTab == 0 || activeTab == 1) && !IconCache::instance().hasWork()) {
             const char* nm = hal::GameStorage::instance().nameAt(g_view[selected]);
             char base[128];
             stripJar(base, (int)sizeof(base), nm != 0 ? nm : "?");
@@ -2018,6 +2029,12 @@ int Ps2Frontend::pick() {
         }
         waitFrame();
     }
+
+    // Pause the background music before handing off to a game so the game's audio plays
+    // alone (the SPU2 voice keeps looping silently; the next pick() unmutes it), and resume
+    // the streaming mixer the game needs for its own audio.
+    Ps2Audio::instance().stopBgm();
+    Ps2Audio::instance().resumeMixer();
 
     // Quiesce the icon worker before handing the CPU to the VM: drop queued work and
     // let any in-flight decode finish, so the worker is left blocked (idle).

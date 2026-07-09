@@ -65,6 +65,15 @@ public:
     /// Also wires the pre-allocated voice buffers and the voice-table lock.
     void startMixer();
 
+    /// Pause / resume the streaming mixer's ring feed. On the menu the mixer only pushes
+    /// silence, yet its audsrv streaming ring shares SPU2 RAM (and IOP/SIF bandwidth) with
+    /// the hardware ADPCM BGM -- running both starves the icon worker's SIF I/O and glitches
+    /// the BGM. So the launcher pauses the mixer while the menu's BGM plays and resumes it
+    /// before handing off to a game. Paused = the mixer loops on DelayThread only, touching
+    /// neither audsrv nor the SIF lock. Safe: no game audio exists on the menu.
+    void pauseMixer();
+    void resumeMixer();
+
     // --- Phase 2b: the Nokia Sound API submits game audio through these -------------
     //
     // A voice is one of two source kinds, both fed from pre-allocated static storage so
@@ -109,6 +118,29 @@ public:
 
     /// Number of concurrent voices the mixer supports (drives getConcurrentSoundCount).
     int voiceCount() const { return VOICES; }
+
+    // --- Menu background music (SPU2-direct, looping) --------------------------------
+    //
+    // The launcher's BGM is a looping SPU2 ADPCM sample (built offline by tools/mkbgm.sh
+    // from assets/bgm.mp3). It is uploaded once into the SPU2's own 2 MB local RAM and
+    // played on a hardware voice via audsrv, so it loops with ZERO EE CPU and ZERO EE RAM
+    // (the EE-side file buffer is freed right after the upload) -- completely independent
+    // of the software mixer above, which stays free for game audio. The launcher starts it
+    // on the menu and pauses it when a game runs (so the game's audio plays alone).
+
+    /// Load the looping ADPCM BGM from @p path (a "<bootdir>/bgm.adpcm") into SPU2 RAM and
+    /// prepare its voice. Call once at boot after init(). Returns true on success; on any
+    /// failure the menu simply stays silent.
+    bool loadBgm(const char* path);
+
+    /// Start, or resume, the background music at full volume. The voice is played once and
+    /// thereafter only unmuted, so the track keeps its position across menu visits. No-op
+    /// if no BGM loaded.
+    void startBgm();
+
+    /// Pause the background music (mute its voice) -- called when handing off to a game so
+    /// the game's own audio plays alone. The voice keeps looping silently; startBgm resumes.
+    void stopBgm();
 
 private:
     Ps2Audio();
@@ -295,6 +327,7 @@ private:
 
     bool  ready_;
     bool  mixerStarted_;
+    volatile bool mixerPaused_;     // menu: skip the ring feed so the BGM owns the SPU2/SIF
     int   mixerId_;
     void* mixerStack_;
 
