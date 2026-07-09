@@ -21,6 +21,10 @@ concurrency:
 
 jobs:
   deploy:
+    # GitHub Pages requires a public repository (or a paid plan). While this repo is private
+    # the job is skipped instead of failing; it starts deploying automatically once the repo
+    # is made public -- no edit needed.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
