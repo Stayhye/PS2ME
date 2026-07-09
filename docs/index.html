@@ -38,9 +38,10 @@
          each JAR, tabs, an alphabet sidebar, sorting, favorites, and recents.</p>
     </div>
     <div class="card">
-      <h3>Per-game display</h3>
-      <p>Resolution and orientation overrides per game, so both portrait and landscape
-         MIDlets fill the screen correctly.</p>
+      <h3>Landscape, portrait &amp; multi-screen</h3>
+      <p>Per-game orientation and resolution overrides, with 11 screen-size presets, so portrait,
+         landscape, and multi-screen MIDlets built for any phone all display correctly with their
+         aspect ratio preserved.</p>
     </div>
     <div class="card">
       <h3>Audio</h3>
@@ -63,15 +64,66 @@
   </div>
 </section>
 
-<!--
-  Screenshots: drop PNGs into docs/assets/ and uncomment this block, e.g.
-  <section class="section"><h2>Screenshots</h2>
-    <div class="shots">
-      <img src="assets/screenshot-menu.png" alt="PS2ME launcher grid">
-      <img src="assets/screenshot-settings.png" alt="PS2ME settings">
+<section class="section" id="screenshots">
+  <h2>Screenshots</h2>
+  <div class="carousel" data-carousel>
+    <button class="car-btn car-prev" data-car-prev aria-label="Previous screenshot">&#8249;</button>
+    <div class="car-track" data-car-track>
+      <figure class="car-slide">
+        <img src="assets/screenshots/menu.png" alt="PS2ME launcher: a 4x5 grid of game icons with a details panel" decoding="async">
+        <figcaption>The launcher &mdash; a 4&times;5 grid with icons decoded from each JAR</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/loading.png" alt="Friendly loading screen with a progress bar" loading="lazy" decoding="async">
+        <figcaption>A friendly loading screen while a game installs</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/game_3.png" alt="An isometric action game running full-screen" loading="lazy" decoding="async">
+        <figcaption>Landscape games use the full screen</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/game_5.png" alt="A top-down shooter running full-screen" loading="lazy" decoding="async">
+        <figcaption>Full-screen top-down action (landscape)</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/game_1.png" alt="A portrait game title screen, aspect-preserved" loading="lazy" decoding="async">
+        <figcaption>Portrait games, aspect-preserved</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/game_2.png" alt="A run-and-gun game running in portrait" loading="lazy" decoding="async">
+        <figcaption>Run-and-gun MIDlet in portrait</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/game_4.png" alt="A portrait title screen rendering crisply" loading="lazy" decoding="async">
+        <figcaption>Portrait title screens render crisp</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/settings.png" alt="The Settings tab with toggles" loading="lazy" decoding="async">
+        <figcaption>Settings &mdash; recents, favorites, sort, Debug mode, FPS counter</figcaption>
+      </figure>
+      <figure class="car-slide">
+        <img src="assets/screenshots/debug.png" alt="Debug split view: the game on the left, the app log on the right" loading="lazy" decoding="async">
+        <figcaption>Debug mode &mdash; the game on the left, the full app log on the right</figcaption>
+      </figure>
     </div>
-  </section>
--->
+    <button class="car-btn car-next" data-car-next aria-label="Next screenshot">&#8250;</button>
+    <div class="car-dots" data-car-dots></div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Debug mode</h2>
+  <p>Flip <strong>Debug mode</strong> on in <em>Settings</em> to turn the launcher into a diagnostics
+     tool &mdash; handy on real hardware, where the EE console is not visible:</p>
+  <ul class="bullets">
+    <li><strong>Split view while a game runs</strong> &mdash; the game is scaled on the left and the
+        full application log (install trace, <code>System.out</code>, errors) streams on the right.</li>
+    <li><strong>Storage diagnostics</strong> &mdash; when no games are found, the empty screen lists
+        the device probes and resolved paths, so you can see exactly where PS2ME looked.</li>
+    <li><strong>FPS counter</strong> &mdash; an opt-in overlay to check a game&rsquo;s frame rate.</li>
+  </ul>
+  <p class="hint">All of these are off by default, so the everyday experience stays clean.</p>
+</section>
 
 <section class="section">
   <h2>Getting started</h2>
@@ -115,5 +167,6 @@ mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
   </p>
 </footer>
 
+<script src="carousel.js" defer></script>
 </body>
 </html>
