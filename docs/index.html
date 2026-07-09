@@ -9,6 +9,7 @@
 <meta property="og:description" content="A native launcher and phoneME-based J2ME runtime for the PlayStation 2.">
 <meta property="og:type" content="website">
 <link rel="icon" type="image/png" href="assets/PS2ME_ICON.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -66,48 +67,48 @@
 
 <section class="section" id="screenshots">
   <h2>Screenshots</h2>
-  <div class="carousel" data-carousel>
-    <button class="car-btn car-prev" data-car-prev aria-label="Previous screenshot">&#8249;</button>
-    <div class="car-track" data-car-track>
-      <figure class="car-slide">
+  <div class="swiper screenshots-swiper">
+    <div class="swiper-wrapper">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/menu.png" alt="PS2ME launcher: a 4x5 grid of game icons with a details panel" decoding="async">
         <figcaption>The launcher &mdash; a 4&times;5 grid with icons decoded from each JAR</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/loading.png" alt="Friendly loading screen with a progress bar" loading="lazy" decoding="async">
         <figcaption>A friendly loading screen while a game installs</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/game_3.png" alt="An isometric action game running full-screen" loading="lazy" decoding="async">
         <figcaption>Landscape games use the full screen</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/game_5.png" alt="A top-down shooter running full-screen" loading="lazy" decoding="async">
         <figcaption>Full-screen top-down action (landscape)</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/game_1.png" alt="A portrait game title screen, aspect-preserved" loading="lazy" decoding="async">
         <figcaption>Portrait games, aspect-preserved</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/game_2.png" alt="A run-and-gun game running in portrait" loading="lazy" decoding="async">
         <figcaption>Run-and-gun MIDlet in portrait</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/game_4.png" alt="A portrait title screen rendering crisply" loading="lazy" decoding="async">
         <figcaption>Portrait title screens render crisp</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/settings.png" alt="The Settings tab with toggles" loading="lazy" decoding="async">
         <figcaption>Settings &mdash; recents, favorites, sort, Debug mode, FPS counter</figcaption>
       </figure>
-      <figure class="car-slide">
+      <figure class="swiper-slide">
         <img src="assets/screenshots/debug.png" alt="Debug split view: the game on the left, the app log on the right" loading="lazy" decoding="async">
         <figcaption>Debug mode &mdash; the game on the left, the full app log on the right</figcaption>
       </figure>
     </div>
-    <button class="car-btn car-next" data-car-next aria-label="Next screenshot">&#8250;</button>
-    <div class="car-dots" data-car-dots></div>
+    <div class="swiper-button-prev" aria-label="Previous screenshot"></div>
+    <div class="swiper-button-next" aria-label="Next screenshot"></div>
+    <div class="swiper-pagination"></div>
   </div>
 </section>
 
@@ -167,6 +168,7 @@ mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
   </p>
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
 <script src="carousel.js" defer></script>
 </body>
 </html>
