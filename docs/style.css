@@ -137,10 +137,34 @@ main { max-width: 980px; margin: 0 auto; padding: 0 1.25rem; }
   gap: 1rem;
 }
 .card {
+  position: relative;
   background: linear-gradient(180deg, var(--panel), var(--panel-2));
   border: 1px solid var(--edge);
   border-radius: 12px;
-  padding: 1.2rem 1.3rem;
+  padding: 1.3rem 1.3rem 1.4rem;
+  transition: transform 0.14s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.card:hover {
+  transform: translateY(-3px);
+  border-color: var(--cyan);
+  box-shadow: 0 12px 30px rgba(53, 200, 255, 0.15);
+}
+.card-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 0.9rem;
+  border-radius: 12px;
+  color: var(--cyan-soft);
+  background: linear-gradient(180deg, rgba(53, 200, 255, 0.16), rgba(74, 134, 255, 0.08));
+  border: 1px solid rgba(53, 200, 255, 0.30);
+  transition: color 0.2s ease, box-shadow 0.2s ease;
+}
+.card-icon svg { width: 23px; height: 23px; display: block; }
+.card:hover .card-icon {
+  color: var(--cyan);
+  box-shadow: 0 0 0 1px rgba(53, 200, 255, 0.35), 0 6px 18px rgba(53, 200, 255, 0.20);
 }
 .card h3 { margin: 0 0 0.4rem; color: var(--cyan-soft); font-size: 1.1rem; }
 .card p { margin: 0; color: var(--ink-dim); }
