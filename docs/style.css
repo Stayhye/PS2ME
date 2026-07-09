@@ -86,6 +86,16 @@ code, pre {
   background-clip: text;
   color: transparent;
 }
+.hero-title-wrap { display: table; margin: 0 auto; }   /* own line, shrinks to title width */
+.hero-title-wrap .hero-title { margin-bottom: 0; line-height: 1; }
+.hero-by {
+  margin: -0.1rem 0 0.5rem;    /* tucked right under the wordmark */
+  text-align: right;            /* aligned to the title's right edge */
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.hero-by a { color: var(--cyan-soft); }
 .hero-tagline { font-size: clamp(1.1rem, 3vw, 1.4rem); margin: 0.25rem 0; }
 .hero-sub { color: var(--ink-dim); max-width: 620px; margin: 0.6rem auto 0; }
 
@@ -343,3 +353,4 @@ pre code { color: #cfe3ff; font-size: 0.9rem; }
   border-top: 1px solid var(--edge);
 }
 .footer-links { margin-top: 0.4rem; }
+.footer-credit { margin-top: 0.9rem; font-size: 0.9rem; color: var(--ink-dim); }

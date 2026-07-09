@@ -113,6 +113,11 @@ The distributed ELF incorporates the **phoneME Feature** VM and class library (G
 which is why the project as a whole is GPLv2. It also builds against the **PS2 SDK**
 (ps2dev) and includes **stb_image** (public domain / MIT).
 
+## Author
+
+Created and maintained by **Wellinator** —
+[GitHub](https://github.com/Wellinator) · [wellcoj@gmail.com](mailto:wellcoj@gmail.com).
+
 ## Acknowledgements
 
 - [phoneME Feature](https://github.com/OpenJDK/phoneme) — the CLDC/MIDP reference VM.
