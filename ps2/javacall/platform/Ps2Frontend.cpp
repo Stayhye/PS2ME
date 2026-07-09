@@ -141,6 +141,11 @@ int g_sortMode = 0;
 // the sorted rest starts at index COLS.
 int g_recentBand = 0;
 
+// The game index we last launched (-1 = none). Persists across pick() calls so that
+// returning from a game restores the cursor onto that game rather than resetting to the
+// first cell. Set when a game is launched, consumed on the next pick() entry.
+int g_restoreGame = -1;
+
 // Frame counter for the active item's name auto-shift (marquee); reset when the
 // selection changes so each newly-active long name scrolls from the start.
 unsigned g_marqueeTick = 0;
@@ -1802,6 +1807,16 @@ int Ps2Frontend::pick() {
     hal::PadButtons prev;         // all-false initial snapshot
     rebuildView(activeTab, count);   // initial view (all games)
 
+    // Coming back from a game: put the cursor back on the game we just launched (in the
+    // ALL GAMES view we start on) instead of resetting to the first cell. The row-clamp in
+    // the loop below scrolls it into view. One-shot: cleared once consumed.
+    if (g_restoreGame >= 0) {
+        for (int i = 0; i < g_viewCount; ++i) {
+            if (g_view[i] == g_restoreGame) { selected = i; break; }
+        }
+        g_restoreGame = -1;
+    }
+
     while (chosen < 0) {
         // Poll the pad every field so input stays responsive even when we skip the
         // (expensive) redraw below.
@@ -2014,9 +2029,11 @@ int Ps2Frontend::pick() {
         graph_remove_vsync_handler(g_vsyncCb);
         g_vsyncCb = -1;
     }
-    // Record the launch so it heads the recent row next time (worker is idle now).
+    // Record the launch so it heads the recent row next time (worker is idle now), and
+    // remember it so the next pick() restores the cursor onto it instead of cell 0.
     if (chosen >= 0) {
         Recent::instance().push(chosen);
+        g_restoreGame = chosen;
     }
     return chosen;
 }
