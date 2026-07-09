@@ -1207,26 +1207,45 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
         return;
     }
     if (activeTab == 0 && viewCount <= 0) {
-        // No games: show the storage-resolution trace in the grid area (the EE console
-        // is invisible on real hardware booted standalone from USB).
-        drawText(GRID_X0, GRID_Y0 + 2, "No games found. Diagnostics:", 235, 120, 120, NAME_PX + 2);
-        const char* p = Ps2Storage::instance().diagText();
-        int ly = GRID_Y0 + 28;
-        char lineBuf[160];
-        int li = 0;
-        for (;; ++p) {
-            if (*p == '\n' || *p == '\0') {
-                lineBuf[li] = '\0';
-                if (li > 0) {
-                    drawText(GRID_X0, ly, lineBuf, 200, 214, 235, 15.0f);
-                    ly += 19;
+        if (Settings::instance().debugMode()) {
+            // Debug mode: dump the raw storage-probe trace in the grid area (the EE console
+            // is invisible on real hardware booted standalone from USB).
+            drawText(GRID_X0, GRID_Y0 + 2, "No games found. Diagnostics:", 235, 120, 120, NAME_PX + 2);
+            const char* p = Ps2Storage::instance().diagText();
+            int ly = GRID_Y0 + 28;
+            char lineBuf[160];
+            int li = 0;
+            for (;; ++p) {
+                if (*p == '\n' || *p == '\0') {
+                    lineBuf[li] = '\0';
+                    if (li > 0) {
+                        drawText(GRID_X0, ly, lineBuf, 200, 214, 235, 15.0f);
+                        ly += 19;
+                    }
+                    li = 0;
+                    if (*p == '\0') break;
+                } else if (li < (int)sizeof(lineBuf) - 1) {
+                    lineBuf[li++] = *p;
                 }
-                li = 0;
-                if (*p == '\0') break;
-            } else if (li < (int)sizeof(lineBuf) - 1) {
-                lineBuf[li++] = *p;
             }
+            return;
         }
+        // Friendly empty state (default): tell the user where to drop their games. The raw
+        // storage diagnostics stay one toggle away under Settings > Debug mode.
+        const int left = GRID_X0, right = DET_X + DET_W;
+        const int cx = (left + right) / 2;
+        const int cy = (CONTENT_Y + CONTENT_BOTTOM) / 2;
+        const char* title = "No games found";
+        const char* l1    = "Add your .jar games to this folder:";
+        const char* dir   = Ps2Storage::instance().gamesDir();
+        const char* l3    = "then relaunch PS2ME.";
+        const char* hint  = "Enable Debug mode in Settings for storage details.";
+        int w;
+        w = textWidth(title, 26.0f); drawTextVC(cx - w / 2, cy - 44, title, 232, 240, 252, 26.0f);
+        w = textWidth(l1,    16.0f); drawTextVC(cx - w / 2, cy -  6, l1,    165, 192, 224, 16.0f);
+        w = textWidth(dir,   15.0f); drawTextVC(cx - w / 2, cy + 18, dir,   120, 210, 245, 15.0f);
+        w = textWidth(l3,    16.0f); drawTextVC(cx - w / 2, cy + 44, l3,    165, 192, 224, 16.0f);
+        w = textWidth(hint,  12.0f); drawTextVC(cx - w / 2, cy + 74, hint,  110, 132, 165, 12.0f);
         return;
     }
 
