@@ -39,7 +39,22 @@ mips64r5900el-ps2-elf-strip --strip-all "$OUT/PS2ME-$VER.elf"
 AFTER=$(stat -c%s "$OUT/PS2ME-$VER.elf")
 echo "+ stripped release ELF: $BEFORE -> $AFTER bytes"
 
+# Bundle the release into a single drop-in zip so the menu music (bgm.adpcm) always
+# travels with the ELF. It extracts straight onto a FAT32 USB root, reproducing the
+# expected layout: mass:/PS2ME/<elf>, mass:/PS2ME/bgm.adpcm, mass:/PS2ME/games/.
+OUT_ABS="$(pwd)/$OUT"
+ZIP="$OUT_ABS/PS2ME-$VER.zip"
+STAGE="$(mktemp -d)"
+mkdir -p "$STAGE/PS2ME/games"
+cp "$OUT_ABS/PS2ME-$VER.elf" "$STAGE/PS2ME/"
+[ -f "$OUT_ABS/bgm.adpcm" ] && cp "$OUT_ABS/bgm.adpcm" "$STAGE/PS2ME/"
+printf 'Put your J2ME MIDlets (.jar files) in this folder.\n' > "$STAGE/PS2ME/games/README.txt"
+rm -f "$ZIP"
+( cd "$STAGE" && zip -r -q -X "$ZIP" PS2ME )
+rm -rf "$STAGE"
+echo "+ bundled drop-in zip -> $OUT/PS2ME-$VER.zip"
+
 echo "=================================================================="
-ls -la "$OUT/PS2ME-$VER.elf"
-echo " RELEASE OK (stripped) -> $OUT/PS2ME-$VER.elf"
+ls -la "$OUT/PS2ME-$VER.elf" "$OUT/PS2ME-$VER.zip"
+echo " RELEASE OK (stripped ELF + zip bundle) -> $OUT/PS2ME-$VER.{elf,zip}"
 echo "=================================================================="

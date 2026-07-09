@@ -4,7 +4,8 @@
 # The release ELF is built locally (the phoneME toolchain is not available in CI), so this
 # helper ties the pieces together: it verifies the built stripped ELF exists, tags the current
 # commit vX.Y.Z, pushes main + the tag (which triggers .github/workflows/release.yml), and
-# uploads the ELF (+ bgm.adpcm) to the GitHub Release. It is idempotent with the workflow:
+# uploads the drop-in zip (ELF + bgm.adpcm) and the standalone ELF to the GitHub Release.
+# It is idempotent with the workflow:
 # whichever creates the release first wins; this script then uploads/refreshes the assets.
 #
 # Prerequisites: a stripped build (docker/phoneme-cross/build-release-ps2.sh) and an
@@ -16,7 +17,7 @@ cd "$(dirname "$0")/.."
 
 VER="$(./version.sh show)"          # e.g. v1.2.0
 ELF="build/ps2/PS2ME-$VER.elf"
-BGM="build/ps2/bgm.adpcm"
+ZIP="build/ps2/PS2ME-$VER.zip"      # drop-in bundle: ELF + bgm.adpcm + games/
 
 if [ ! -f "$ELF" ]; then
   echo "error: $ELF not found -- run docker/phoneme-cross/build-release-ps2.sh first" >&2
@@ -40,9 +41,11 @@ fi
 git push origin main
 git push origin "$VER"
 
-# Assemble the asset list (bgm.adpcm is optional).
+# Assemble the asset list: the drop-in zip (ELF + bgm together) is the headline download;
+# the standalone stripped ELF stays for the direct "Download ELF" link. bgm.adpcm is no
+# longer uploaded loose -- it lives inside the zip.
 assets=("$ELF")
-[ -f "$BGM" ] && assets+=("$BGM")
+[ -f "$ZIP" ] && assets+=("$ZIP")
 
 # Create the release, or update assets/notes if the workflow already created it.
 if gh release view "$VER" >/dev/null 2>&1; then
