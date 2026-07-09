@@ -21,10 +21,12 @@ public:
     bool showRecent() const  { return showRecent_; }   // default: true
     int  defaultSort() const { return defaultSort_; }  // default: 0 (A-Z); 1 = Z-A
     bool debugMode() const   { return debugMode_; }    // default: false (friendly loader)
+    bool fpsCounter() const  { return fpsCounter_; }   // default: false (in-game FPS overlay)
 
     void setShowRecent(bool on);
     void setDefaultSort(int mode);
     void setDebugMode(bool on);
+    void setFpsCounter(bool on);
 
 private:
     Settings();
@@ -36,6 +38,7 @@ private:
     bool showRecent_;
     int  defaultSort_;
     bool debugMode_;
+    bool fpsCounter_;
     bool loaded_;
 };
 

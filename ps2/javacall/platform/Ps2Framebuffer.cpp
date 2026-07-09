@@ -2,7 +2,9 @@
 #include "Ps2Framebuffer.hpp"
 #include "GsDisplay.hpp"
 #include "Ps2Frontend.hpp"
+#include "Settings.hpp"              // opt-in in-game FPS overlay
 #include "../hal/LcdDevice.hpp"
+#include "../hal/SystemClock.hpp"    // per-second FPS measurement
 
 #include <malloc.h>   // memalign / free (128-byte aligned for DMA)
 
@@ -52,10 +54,36 @@ void Ps2Framebuffer::unmap() {
     height_ = 0;
 }
 
+namespace {
+
+// FPS state: updated once per presented frame on the single VM thread, so no lock needed.
+// The overlay itself is drawn by GsDisplay (on the letterboxed screen, OUTSIDE the game
+// canvas); here we only measure and hand the value over.
+long long g_fpsLastMs = 0;
+int       g_fpsFrames = 0;
+int       g_fpsValue  = 0;
+
+// Count a game frame and recompute the FPS once a second has elapsed.
+void fpsTick() {
+    ++g_fpsFrames;
+    const long long now = ps2::hal::SystemClock::instance().elapsedMillis();
+    if (g_fpsLastMs == 0) { g_fpsLastMs = now; return; }
+    const long long dt = now - g_fpsLastMs;
+    if (dt >= 1000) {
+        g_fpsValue  = (int)((g_fpsFrames * 1000LL) / dt);
+        g_fpsFrames = 0;
+        g_fpsLastMs = now;
+    }
+}
+
+} // namespace
+
 void Ps2Framebuffer::present() {
     if (raster_ == 0 || gsBuf_ == 0) {
         return;
     }
+    // Count every presented game frame for the FPS metric (measured even in debug view).
+    fpsTick();
     // Debug mode: the front-end composites a split view (game on the left, the full app
     // log on the right) and presents it itself -- we are done for this frame.
     if (Ps2Frontend::instance().debugPresent(
@@ -85,6 +113,10 @@ void Ps2Framebuffer::present() {
         const unsigned b =  p        & 0x1F;
         gsBuf_[i] = static_cast<javacall_pixel>(r | ((g >> 1) << 5) | (b << 10) | 0x8000);
     }
+
+    // Opt-in performance metric (Settings -> FPS counter, default off): hand the frame rate
+    // to GsDisplay, which draws it on the letterbox border OUTSIDE the game canvas.
+    gs.setFpsOverlay(Settings::instance().fpsCounter(), g_fpsValue);
 
     gs.present(reinterpret_cast<const u16*>(gsBuf_), width_, height_);
 }

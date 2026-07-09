@@ -67,6 +67,91 @@ void setRect(texrect_t* r, float x0, float y0, float x1, float y1,
     r->color.r = 0x80; r->color.g = 0x80; r->color.b = 0x80;
     r->color.a = 0x80; r->color.q = 1.0f;
 }
+
+// --- FPS overlay ---------------------------------------------------------------------
+// 5x7 bitmap font: digits 0-9 then F, P, S. Each row is 5 bits, bit 4 = leftmost column.
+const unsigned char kFont5x7[13][7] = {
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
+    {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E}, // 3
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // F
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // P
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, // S
+};
+
+// Emit one filled screen-space rectangle.
+qword_t* fpsRect(qword_t* q, int ctx, float x0, float y0, float x1, float y1,
+                 int r, int g, int b) {
+    rect_t rc;
+    rc.v0.x = x0; rc.v0.y = y0; rc.v0.z = 0;
+    rc.v1.x = x1; rc.v1.y = y1; rc.v1.z = 0;
+    rc.color.r = (u8)r; rc.color.g = (u8)g; rc.color.b = (u8)b;
+    rc.color.a = 0x80;  rc.color.q = 1.0f;
+    return draw_rect_filled(q, ctx, &rc);
+}
+
+// Draw "<fps> FPS" as filled rectangles in the TOP-RIGHT of the screen, over the border
+// (pillarbox/letterbox) outside the game canvas. Glyph pixels are coalesced into horizontal
+// runs to keep the rectangle (and thus qword) count low. Returns the advanced packet ptr.
+qword_t* drawFpsRects(qword_t* q, int ctx, int fps, int scrW, int /*scrH*/) {
+    const int scale = 2;
+    const int gadv  = 6 * scale;   // per-glyph horizontal advance
+    const int gh    = 7 * scale;
+
+    int gl[8];
+    int n = 0;
+    int v = fps;
+    if (v < 0)   v = 0;
+    if (v > 999) v = 999;
+    if (v >= 100) { gl[n++] = v / 100; gl[n++] = (v / 10) % 10; gl[n++] = v % 10; }
+    else if (v >= 10) { gl[n++] = v / 10; gl[n++] = v % 10; }
+    else { gl[n++] = v; }
+    gl[n++] = -1;                          // space
+    gl[n++] = 10; gl[n++] = 11; gl[n++] = 12;   // F P S
+
+    const int textW  = n * gadv - scale;
+    const int margin = 10;
+    const int x0 = scrW - textW - margin;
+    const int y0 = margin;
+
+    // dark backdrop for legibility
+    q = fpsRect(q, ctx, (float)(x0 - 5), (float)(y0 - 4),
+                (float)(x0 + textW + 5), (float)(y0 + gh + 4), 0, 0, 0);
+
+    // bright-green glyphs, one rectangle per horizontal run
+    int gx = x0;
+    for (int i = 0; i < n; ++i) {
+        const int idx = gl[i];
+        if (idx >= 0) {
+            const unsigned char* f = kFont5x7[idx];
+            for (int ry = 0; ry < 7; ++ry) {
+                const unsigned bits = f[ry];
+                int rx = 0;
+                while (rx < 5) {
+                    if ((bits >> (4 - rx)) & 1) {
+                        int run = 1;
+                        while (rx + run < 5 && ((bits >> (4 - (rx + run))) & 1)) ++run;
+                        const float px = (float)(gx + rx * scale);
+                        const float py = (float)(y0 + ry * scale);
+                        q = fpsRect(q, ctx, px, py, px + run * scale, py + scale, 80, 255, 90);
+                        rx += run;
+                    } else {
+                        ++rx;
+                    }
+                }
+            }
+        }
+        gx += gadv;
+    }
+    return q;
+}
 } // namespace
 
 GsDisplay& GsDisplay::instance() {
@@ -114,7 +199,8 @@ bool GsDisplay::init() {
     initSampling(&lod_, &clut_);
 
     xfer_ = packet_init(128, PACKET_NORMAL);
-    draw_ = packet_init(128, PACKET_NORMAL);
+    // Room for the clear + sprite plus the FPS overlay's filled rectangles (3 qwords each).
+    draw_ = packet_init(512, PACKET_NORMAL);
     if (xfer_ == 0 || draw_ == 0) {
         return false;
     }
@@ -126,7 +212,8 @@ bool GsDisplay::init() {
 // Shared upload + textured-sprite draw + tear-free flip. Uploads a w x h RGBA5551
 // raster into @p tb and draws @p rect over a cleared BACK buffer, then swaps that
 // buffer to the CRTC on the next vblank.
-void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect) {
+void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect,
+                     bool overlay) {
     // Cache coherency before the DMA reads the EE RAM.
     const u32 bytes = (u32)w * (u32)h * sizeof(u16);
     SyncDCache((void*)raster, (u8*)raster + bytes);
@@ -145,6 +232,11 @@ void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t
     q = draw_texture_sampling(q, 0, &lod_);
     q = draw_texturebuffer(q, 0, tb, &clut_);
     q = draw_rect_textured(q, 0, rect);
+    // FPS overlay: drawn after the game sprite so it sits on top of the border, outside the
+    // canvas (top-right of the screen). Only the game present path passes overlay=true.
+    if (overlay && fpsShow_) {
+        q = drawFpsRects(q, 0, fpsValue_, SCR_W, SCR_H);
+    }
     q = draw_finish(q);
     dma_channel_send_normal(DMA_CHANNEL_GIF, draw_->data, q - draw_->data, 0, 0);
     dma_wait_fast();
@@ -177,7 +269,7 @@ void GsDisplay::present(const u16* rgba5551, int w, int h) {
     const float dx = ((float)SCR_W - dw) * 0.5f;
     const float dy = ((float)SCR_H - dh) * 0.5f;
     setRect(&rect_, dx, dy, dx + dw, dy + dh, (float)w, (float)h);
-    blit(rgba5551, w, h, &texbuf_, &rect_);
+    blit(rgba5551, w, h, &texbuf_, &rect_, true);   // game path: allow the FPS overlay
 }
 
 void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
@@ -190,7 +282,7 @@ void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
         setRect(&fsRect_, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, (float)w, (float)h);
         fsTexReady_ = true;
     }
-    blit(rgba5551, w, h, &fsTexbuf_, &fsRect_);
+    blit(rgba5551, w, h, &fsTexbuf_, &fsRect_, false);   // menu: never the FPS overlay
 }
 
 } // namespace platform

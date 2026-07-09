@@ -17,12 +17,14 @@ Settings& Settings::instance() {
     return inst;
 }
 
-Settings::Settings() : showRecent_(true), defaultSort_(0), debugMode_(false), loaded_(false) {}
+Settings::Settings()
+    : showRecent_(true), defaultSort_(0), debugMode_(false), fpsCounter_(false), loaded_(false) {}
 
 void Settings::load() {
     showRecent_  = true;    // defaults
     defaultSort_ = 0;
     debugMode_   = false;
+    fpsCounter_  = false;
     loaded_ = true;
 
     char buf[512];
@@ -47,6 +49,8 @@ void Settings::load() {
             defaultSort_ = (line[5] == '1') ? 1 : 0;
         } else if (strncmp(line, "debug=", 6) == 0 && len >= 7) {
             debugMode_ = (line[6] != '0');
+        } else if (strncmp(line, "fps=", 4) == 0 && len >= 5) {
+            fpsCounter_ = (line[4] != '0');
         }
     }
 }
@@ -66,10 +70,16 @@ void Settings::setDebugMode(bool on) {
     save();
 }
 
+void Settings::setFpsCounter(bool on) {
+    fpsCounter_ = on;
+    save();
+}
+
 void Settings::save() const {
     char buf[96];
-    const int n = snprintf(buf, (int)sizeof(buf), "recent=%d\nsort=%d\ndebug=%d\n",
-                           showRecent_ ? 1 : 0, defaultSort_, debugMode_ ? 1 : 0);
+    const int n = snprintf(buf, (int)sizeof(buf), "recent=%d\nsort=%d\ndebug=%d\nfps=%d\n",
+                           showRecent_ ? 1 : 0, defaultSort_, debugMode_ ? 1 : 0,
+                           fpsCounter_ ? 1 : 0);
     if (n > 0) {
         Ps2MemCard::instance().configWrite("settings.txt", buf, n);
     }

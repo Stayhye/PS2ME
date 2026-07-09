@@ -49,22 +49,30 @@ public:
     /// allocated on the first call.
     void presentFullscreen(const u16* rgba5551, int w, int h);
 
+    /// Set the in-game FPS overlay: when @p show is true, present() draws "<fps> FPS" on
+    /// the pillarbox/letterbox border, OUTSIDE the game canvas (a small vector-drawn label,
+    /// not part of the game texture). Off by default; the launcher toggles it via Settings.
+    void setFpsOverlay(bool show, int fps) { fpsShow_ = show; fpsValue_ = fps; }
+
 private:
     GsDisplay()
         : ready_(false), gameTexReady_(false), fsTexReady_(false),
-          drawIdx_(0), xfer_(0), draw_(0) {}
+          drawIdx_(0), fpsShow_(false), fpsValue_(0), xfer_(0), draw_(0) {}
     GsDisplay(const GsDisplay&);
     GsDisplay& operator=(const GsDisplay&);
 
     /// Upload @p raster into @p tb, draw @p rect over a cleared back buffer, then flip
-    /// that buffer to the CRTC on vblank. Shared by both present paths.
-    void blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect);
+    /// that buffer to the CRTC on vblank. Shared by both present paths. When @p overlay is
+    /// true and the FPS overlay is enabled, the FPS label is drawn over the border.
+    void blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t* rect, bool overlay);
 
     bool ready_;         // framebuffer + environment up
     bool gameTexReady_;  // pillarbox game texture allocated
     bool fsTexReady_;    // fullscreen UI texture allocated
 
     int  drawIdx_;       // back-buffer index (the one we draw into this frame)
+    bool fpsShow_;       // draw the in-game FPS overlay this frame
+    int  fpsValue_;      // most recent measured FPS (drawn when fpsShow_)
     framebuffer_t frame_[2];  // double-buffered TV framebuffers (draw back, show front)
     zbuffer_t     z_;
     lod_t         lod_;    // NEAREST sampling, shared by both textures

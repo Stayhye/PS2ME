@@ -1109,7 +1109,7 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-const int SETTINGS_COUNT = 5;
+const int SETTINGS_COUNT = 6;
 
 // The SETTINGS tab: a vertical list of options (two actions + three toggles). @p sel is
 // the highlighted row.
@@ -1147,6 +1147,9 @@ void drawSettings(int sel) {
                     break;
             case 4: label = "Debug mode";
                     snprintf(value, sizeof(value), "%s", Settings::instance().debugMode() ? "On" : "Off");
+                    break;
+            case 5: label = "FPS counter";
+                    snprintf(value, sizeof(value), "%s", Settings::instance().fpsCounter() ? "On" : "Off");
                     break;
         }
         const int cy = y + rowH / 2;
@@ -1873,6 +1876,8 @@ int Ps2Frontend::pick() {
                         }
                         case 4: Settings::instance().setDebugMode(
                                     !Settings::instance().debugMode()); break;
+                        case 5: Settings::instance().setFpsCounter(
+                                    !Settings::instance().fpsCounter()); break;
                     }
                     settingsChanged = true;
                 }
