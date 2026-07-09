@@ -1,0 +1,15 @@
+# Shell/Python/awk run under Linux (Docker) — they must stay LF regardless of host.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.awk   text eol=lf
+mergelib text eol=lf
+
+# Binary assets: no line-ending munging, no textual diffs.
+*.png   binary
+*.mp3   binary
+*.adpcm binary
+*.bin   binary
+*.elf   binary
+*.vag   binary
+*.sf2   binary
+*.jar   binary

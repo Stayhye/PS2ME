@@ -1,0 +1,42 @@
+name: Release
+
+# Creating a release is triggered by pushing a semver tag (e.g. v1.2.0).
+#
+# The PS2 ELF is NOT built here: the phoneME toolchain and source tree are external and are
+# not available in CI (see README "Building from source"). This workflow creates the GitHub
+# Release and fills its notes from the matching CHANGELOG.md section. The stripped ELF and
+# bgm.adpcm are attached from a local machine by tools/publish-release.sh, which is idempotent
+# with this workflow (whichever runs first creates the release; the other updates it).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract changelog section
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[" ver "\\]" { p = 1; next }
+            p && /^## \[/ { exit }
+            p { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "PS2ME ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          fi
+          echo "----- release notes -----"; cat RELEASE_NOTES.md
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PS2ME ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
