@@ -13,8 +13,6 @@
 </head>
 <body>
 
-<!-- Replace OWNER with the GitHub owner/org once the repository exists. -->
-
 <header class="hero">
   <div class="hero-inner">
     <img class="hero-logo" src="assets/PS2ME_ICON.png" alt="PS2ME logo" width="112" height="112">
@@ -23,8 +21,8 @@
     <p class="hero-sub">A native launcher and a port of the open-source <em>phoneME&nbsp;Feature</em> VM &mdash;
        with PS2 controller input, SPU2 audio, and memory-card saves.</p>
     <div class="hero-cta">
-      <a class="btn btn-primary" href="https://github.com/OWNER/PS2ME/releases/latest">Download latest</a>
-      <a class="btn btn-ghost" href="https://github.com/OWNER/PS2ME">View on GitHub</a>
+      <a class="btn btn-primary" href="https://github.com/Wellinator/PS2ME/releases/latest">Download latest</a>
+      <a class="btn btn-ghost" href="https://github.com/Wellinator/PS2ME">View on GitHub</a>
     </div>
   </div>
 </header>
@@ -79,7 +77,7 @@
   <h2>Getting started</h2>
   <ol class="steps">
     <li>Download <code>PS2ME-vX.Y.Z.elf</code> (and the optional <code>bgm.adpcm</code>) from the
-      <a href="https://github.com/OWNER/PS2ME/releases">Releases</a> page.</li>
+      <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> page.</li>
     <li>On a FAT32 USB drive, create this layout:
       <pre><code>mass:/PS2ME/PS2ME-vX.Y.Z.elf
 mass:/PS2ME/bgm.adpcm        (optional menu music)
@@ -100,20 +98,20 @@ mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
      are not vendored, so builds are produced locally.</p>
   <pre><code>docker run --rm -v "$(pwd)":/work -v phoneme_build:/build \
   phoneme-cross bash /work/docker/phoneme-cross/build-release-ps2.sh</code></pre>
-  <p>See the <a href="https://github.com/OWNER/PS2ME#building-from-source">README</a> for details.</p>
+  <p>See the <a href="https://github.com/Wellinator/PS2ME#building-from-source">README</a> for details.</p>
 </section>
 
 </main>
 
 <footer class="footer">
   <p><strong>PS2ME</strong> is free software under the
-     <a href="https://github.com/OWNER/PS2ME/blob/main/LICENSE">GNU GPL&#8209;2.0</a>.
+     <a href="https://github.com/Wellinator/PS2ME/blob/main/LICENSE">GNU GPL&#8209;2.0</a>.
      Built on <a href="https://github.com/OpenJDK/phoneme">phoneME&nbsp;Feature</a> and
      <a href="https://github.com/ps2dev/ps2sdk">ps2sdk</a>.</p>
   <p class="footer-links">
-    <a href="https://github.com/OWNER/PS2ME">GitHub</a> ·
-    <a href="https://github.com/OWNER/PS2ME/releases">Releases</a> ·
-    <a href="https://github.com/OWNER/PS2ME/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/Wellinator/PS2ME">GitHub</a> ·
+    <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> ·
+    <a href="https://github.com/Wellinator/PS2ME/blob/main/CHANGELOG.md">Changelog</a>
   </p>
 </footer>
 

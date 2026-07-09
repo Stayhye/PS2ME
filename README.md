@@ -6,9 +6,9 @@
 
 **Run J2ME (CLDC 1.1 / MIDP 2.0) games on the PlayStation 2.**
 
-[![Release](https://img.shields.io/github/v/release/OWNER/PS2ME?sort=semver)](https://github.com/OWNER/PS2ME/releases)
+[![Release](https://img.shields.io/github/v/release/Wellinator/PS2ME?sort=semver)](https://github.com/Wellinator/PS2ME/releases)
 [![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-GitHub%20Pages-2ea44f)](https://OWNER.github.io/PS2ME/)
+[![Website](https://img.shields.io/badge/website-GitHub%20Pages-2ea44f)](https://wellinator.github.io/PS2ME/)
 
 </div>
 
@@ -18,8 +18,8 @@ lists the JARs on your USB drive with their own icons, and runs them through a p
 the open-source **phoneME Feature** virtual machine, with PS2 controller input, SPU2
 audio, and per-game saves on the memory card.
 
-> Download the latest ELF from the [**Releases**](https://github.com/OWNER/PS2ME/releases)
-> page, or visit the [**project website**](https://OWNER.github.io/PS2ME/).
+> Download the latest ELF from the [**Releases**](https://github.com/Wellinator/PS2ME/releases)
+> page, or visit the [**project website**](https://wellinator.github.io/PS2ME/).
 
 ## Features
 
@@ -46,7 +46,7 @@ audio, and per-game saves on the memory card.
 ## Install & run
 
 1. Download `PS2ME-vX.Y.Z.elf` (and `bgm.adpcm`) from the
-   [Releases](https://github.com/OWNER/PS2ME/releases) page.
+   [Releases](https://github.com/Wellinator/PS2ME/releases) page.
 2. On your USB drive, create a `PS2ME` folder and copy the files so you have:
 
    ```

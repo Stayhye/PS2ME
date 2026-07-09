@@ -58,6 +58,6 @@ launcher and runs J2ME (CLDC 1.1 / MIDP 2.0) MIDlets through a ported phoneME Fe
 - Unaligned 64-bit field access and framebuffer stores on the EE (R5900).
 - A multi-game crash caused by a use-after-free of the RAM filesystem backing store.
 
-[1.2.0]: https://github.com/OWNER/PS2ME/releases/tag/v1.2.0
-[1.1.0]: https://github.com/OWNER/PS2ME/releases/tag/v1.1.0
-[1.0.0]: https://github.com/OWNER/PS2ME/releases/tag/v1.0.0
+[1.2.0]: https://github.com/Wellinator/PS2ME/releases/tag/v1.2.0
+[1.1.0]: https://github.com/Wellinator/PS2ME/releases/tag/v1.1.0
+[1.0.0]: https://github.com/Wellinator/PS2ME/releases/tag/v1.0.0
