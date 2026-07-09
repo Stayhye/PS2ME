@@ -1,66 +1,120 @@
-# j2me-ps2
+<div align="center">
 
-Runtime **J2ME (CLDC 1.1 / MIDP 2.0)** para o **PlayStation 2** — permitir jogar a
-biblioteca de jogos Java (MIDlets) em hardware PS2. Inspirado no que a **PSPKVM**
-fez no PSP.
+<img src="assets/PS2ME_ICON.png" width="96" alt="PS2ME logo">
 
-## Estratégia
+# PS2ME
 
-Não escrevemos uma JVM do zero. Portamos o **phoneME Feature** (implementação de
-referência open-source de CLDC/MIDP da Sun), usando a **PSPKVM como mapa** — PSP e
-PS2 são ambos **MIPS little-endian 32-bit**, então boa parte da camada de plataforma
-é adaptável em vez de reescrita.
+**Run J2ME (CLDC 1.1 / MIDP 2.0) games on the PlayStation 2.**
 
-O trabalho concentra-se na **camada nativa (HAL)**: vídeo, input, áudio, storage,
-ciclo de vida do MIDlet. A VM e as bibliotecas de classe são C portável + ROM image.
+[![Release](https://img.shields.io/github/v/release/OWNER/PS2ME?sort=semver)](https://github.com/OWNER/PS2ME/releases)
+[![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/website-GitHub%20Pages-2ea44f)](https://OWNER.github.io/PS2ME/)
 
-Ver análise completa e roadmap no histórico do projeto.
+</div>
 
-## Estrutura
+PS2ME brings the huge library of Java **MIDlets** — the games that shipped on feature
+phones through the 2000s — to the **PlayStation 2**. It boots into a native launcher,
+lists the JARs on your USB drive with their own icons, and runs them through a port of
+the open-source **phoneME Feature** virtual machine, with PS2 controller input, SPU2
+audio, and per-game saves on the memory card.
 
-```
-src/            código EE (HAL + bring-up)
-include/        headers do projeto
-references/     ps2sdk-master, ps2_drivers-main (somente leitura)
-Makefile        build EE (usa gsKit + libgraph/dma/packet)
-build.sh        wrapper: compila dentro do container Docker
-```
+> Download the latest ELF from the [**Releases**](https://github.com/OWNER/PS2ME/releases)
+> page, or visit the [**project website**](https://OWNER.github.io/PS2ME/).
 
-## Build
+## Features
 
-Requer Docker com a imagem `rsdk-ps2-builder` (ps2dev + make + gsKit).
+- **Native launcher** — a full-screen 640×448 dashboard with a 4×5 grid of game icons
+  decoded straight from each JAR, tabs (All Games / Favorites / Settings), an alphabet
+  sidebar, sorting, favorites, and recents.
+- **Per-game settings** — canvas resolution and orientation overrides so both portrait
+  and landscape games display correctly.
+- **Audio** — menu background music played on a hardware SPU2 ADPCM voice, the Nokia
+  Sound API (tone / OTA melody / WAV), and MMAPI MIDI through an offline-built wavetable
+  synth.
+- **Memory-card saves** — MIDlet RecordStore data is persisted per game, and each save
+  shows up in the console's OSD browser with its own icon and title.
+- **Quality-of-life** — friendly loading screen, optional debug split view, and an
+  opt-in in-game FPS counter.
+
+## Requirements
+
+- **Real hardware:** a PlayStation 2 able to run homebrew ELFs (e.g. launched from USB
+  via uLaunchELF / wLaunchELF), plus a FAT32 USB drive and a memory card for saves.
+- **Emulator:** [PCSX2](https://pcsx2.net/) works well for testing.
+- **Games:** standard J2ME `.jar` MIDlets.
+
+## Install & run
+
+1. Download `PS2ME-vX.Y.Z.elf` (and `bgm.adpcm`) from the
+   [Releases](https://github.com/OWNER/PS2ME/releases) page.
+2. On your USB drive, create a `PS2ME` folder and copy the files so you have:
+
+   ```
+   mass:/PS2ME/PS2ME-vX.Y.Z.elf
+   mass:/PS2ME/bgm.adpcm          (optional — the menu is silent without it)
+   mass:/PS2ME/games/*.jar        (your MIDlets)
+   ```
+
+3. Launch the ELF from your homebrew loader (or in PCSX2: *Run ELF…*).
+4. Pick a game from the grid and press **✕**.
+
+**Controls (launcher):** D-pad navigates · **✕** launches · **○** back · **△** favorite ·
+**□** sort · **L1/R1** switch tabs · **L2/R2** page · **Select** opens per-game options.
+
+## Building from source
+
+The build runs entirely inside Docker. It is a two-stage toolchain: a host image
+(`phoneme-host`, JDK 8 + `gcc-multilib`) that romizes the class library, and a
+cross image (`phoneme-cross`) that adds the PS2 EE toolchain (`mips64r5900el-ps2-elf-*`,
+from a `rsdk-ps2-builder` image) and links the final ELF.
+
+> **Note:** the phoneME Feature source tree and the PS2 SDK are **not** vendored in this
+> repository. They are bind-mounted from the host at `references/phoneme` and provided by
+> the `rsdk-ps2-builder` image. See the Dockerfiles under `docker/` for the expected
+> layout. Because of this, builds are produced locally rather than in CI.
+
+Once the images and `references/phoneme` are in place, produce a release ELF with:
 
 ```sh
-./build.sh          # compila -> j2me.elf
-./build.sh clean
+docker run --rm \
+  -v "$(pwd)":/work -v phoneme_build:/build \
+  phoneme-cross bash /work/docker/phoneme-cross/build-release-ps2.sh
+# -> build/ps2/PS2ME-vX.Y.Z.elf (stripped) + build/ps2/bgm.adpcm
 ```
 
-No Windows (Git Bash), direto:
+For a debug build that keeps the EE console alive (useful under PCSX2), add
+`-e PS2ME_NO_IOP_RESET=1` and run `build-elf-midp-ps2.sh`.
 
-```sh
-MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W)":/src -w /src \
-  rsdk-ps2-builder:latest sh -c "make clean; make all"
+## Project layout
+
+```
+ps2/                Our PS2 port (the code that lives in this repo)
+  version.h           Single source of truth for the version
+  vm/                 Entrypoint (Ps2MidpMain.cpp) + KNI native-method bridges
+  javacall/           JavaCall port: contract / hal / platform (ps2sdk backends)
+    platform/           Frontend, storage, audio, pad, memory card, display, ...
+  phoneme/            Build-system overlay for the ps2_mips target
+docker/               Multi-stage Docker build (host + cross) and build scripts
+tools/                Offline tooling (SF2 wavetable bank builder, mkbgm, ...)
+assets/               Brand icon + menu background music source
+docs/                 Project website (GitHub Pages)
 ```
 
-## Rodar / Testar
+## Versioning & releases
 
-**PCSX2:**
-```sh
-"/c/Program Files/PCSX2/pcsx2-qt.exe" -elf "D:\PS2DEV\ports\j2me\j2me.elf"
-```
+Versions follow [SemVer](https://semver.org/). Bump with `./version.sh {major|minor|patch}`
+(edits `ps2/version.h`), rebuild, tag `vX.Y.Z`, and publish. See
+[`CHANGELOG.md`](CHANGELOG.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## Roadmap
+## License
 
-- [x] **M0 — Prova do caminho de vídeo.** Framebuffer software RGBA5551 (tela virtual
-  240×320) via `libdraw` → DMA → GS como sprite escalonada. *(feito e testado)*
-- [x] **M1 — Input via libpad.** Módulo `src/input.c` mapeia controle PS2 → keypad
-  J2ME; caixa controlável pelo D-pad, Cross muda cor. *(feito)*
-- [ ] **M1.5 — Ciclo de vida + double-buffer.** Flip de framebuffer (sem tearing),
-  tela virtual redimensionável, abstração de eventos.
-- [ ] **M2 — Integrar phoneME.** Compilar o interpretador CLDC no toolchain do
-  ps2sdk; rodar bytecode Java simples (stdout).
-- [ ] **M3 — LCDUI real.** Plugar o rasterizador do phoneME (gxj) no flush do M0;
-  rodar um MIDlet com `Canvas`.
-- [ ] **M4 — Compatibilidade.** MIDP 2.0 Game API, RMS (save), loader de JAR/JAD.
-- [ ] **M5 — Áudio.** PCM via SPU2; MIDI depois.
-```
+PS2ME is released under the **GNU General Public License v2.0** — see [`LICENSE`](LICENSE).
+The distributed ELF incorporates the **phoneME Feature** VM and class library (GPLv2),
+which is why the project as a whole is GPLv2. It also builds against the **PS2 SDK**
+(ps2dev) and includes **stb_image** (public domain / MIT).
+
+## Acknowledgements
+
+- [phoneME Feature](https://github.com/OpenJDK/phoneme) — the CLDC/MIDP reference VM.
+- [PSPKVM](https://sourceforge.net/projects/pspkvm/) — prior art for a MIPS J2ME port.
+- [ps2dev / ps2sdk](https://github.com/ps2dev/ps2sdk) — the PlayStation 2 homebrew SDK.
