@@ -31,7 +31,15 @@ VER="v$(field MAJOR).$(field MINOR).$(field PATCH)"
 OUT="build/ps2"
 cp "$OUT/j2me-midp.elf" "$OUT/PS2ME-$VER.elf"
 
+# Strip the release ELF: PS2 loaders only need the program headers, so dropping the symbol
+# and debug tables shrinks the download with no runtime effect. The unstripped j2me-midp.elf
+# is kept as-is for debugging (crash-address lookups, disassembly).
+BEFORE=$(stat -c%s "$OUT/PS2ME-$VER.elf")
+mips64r5900el-ps2-elf-strip --strip-all "$OUT/PS2ME-$VER.elf"
+AFTER=$(stat -c%s "$OUT/PS2ME-$VER.elf")
+echo "+ stripped release ELF: $BEFORE -> $AFTER bytes"
+
 echo "=================================================================="
 ls -la "$OUT/PS2ME-$VER.elf"
-echo " RELEASE OK -> $OUT/PS2ME-$VER.elf"
+echo " RELEASE OK (stripped) -> $OUT/PS2ME-$VER.elf"
 echo "=================================================================="
