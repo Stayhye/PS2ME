@@ -1111,16 +1111,31 @@ void drawContentMessage(const char* msg) {
 
 const int SETTINGS_COUNT = 7;
 
-// The SETTINGS tab: a vertical list of options (actions + toggles). @p sel is
-// the highlighted row.
+// The SETTINGS tab: a vertical list of options (actions + toggles). @p sel is the
+// highlighted row. The list scrolls: only the rows that fit at a comfortable size are
+// drawn, and the visible window follows the selection so the list can keep growing.
 void drawSettings(int sel) {
     const int left  = GRID_X0;
     const int right = DET_X + DET_W;
     const int rowH = 42, gap = 12;
-    const int totalH = SETTINGS_COUNT * rowH + (SETTINGS_COUNT - 1) * gap;
-    int y = CONTENT_Y + ((CONTENT_BOTTOM - CONTENT_Y) - totalH) / 2;
+    const int availH = CONTENT_BOTTOM - CONTENT_Y;
 
-    for (int i = 0; i < SETTINGS_COUNT; ++i) {
+    // Rows that fit at this size; scroll when there are more than the window holds.
+    int visible = (availH + gap) / (rowH + gap);
+    if (visible < 1)              visible = 1;
+    if (visible > SETTINGS_COUNT) visible = SETTINGS_COUNT;
+
+    // Window top that keeps the selection in view (stateless: derived from sel each frame).
+    int top = 0;
+    if (sel >= visible)                  top = sel - visible + 1;
+    if (top > SETTINGS_COUNT - visible)  top = SETTINGS_COUNT - visible;
+    if (top < 0)                         top = 0;
+
+    const int totalH = visible * rowH + (visible - 1) * gap;
+    int y = CONTENT_Y + (availH - totalH) / 2;
+
+    for (int k = 0; k < visible; ++k) {
+        const int i = top + k;
         const bool s = (i == sel);
         if (s) {
             roundRectFillA(left - 2, y - 2, (right - left) + 4, rowH + 4, 10, 90, 215, 255, 255);
@@ -1162,9 +1177,16 @@ void drawSettings(int sel) {
         y += rowH + gap;
     }
 
-    const char* hint = "X: select / toggle";
-    const int hw = textWidth(hint, 13.0f);
-    drawText(left + (right - left - hw) / 2, y + 2, hint, 150, 180, 215, 13.0f);
+    // Scroll indicators: an up chevron when rows are hidden above, a down chevron below.
+    const int acx = (left + right) / 2;
+    if (top > 0) {
+        const int ay = CONTENT_Y + 1;
+        fillTriangle(acx, ay, acx - 7, ay + 9, acx + 7, ay + 9, 150, 195, 240);
+    }
+    if (top + visible < SETTINGS_COUNT) {
+        const int by = CONTENT_BOTTOM - 1;
+        fillTriangle(acx, by, acx - 7, by - 9, acx + 7, by - 9, 150, 195, 240);
+    }
 }
 
 void render(int viewCount, int selected, int topRow, int activeTab, const int* view,
