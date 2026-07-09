@@ -23,12 +23,14 @@ public:
     bool debugMode() const   { return debugMode_; }    // default: false (friendly loader)
     bool fpsCounter() const  { return fpsCounter_; }   // default: false (in-game FPS overlay)
     bool bgmEnabled() const  { return bgmEnabled_; }   // default: true (menu background music)
+    int  controlLayout() const { return controlLayout_; } // default: 0 (Simple); 1 = Complete
 
     void setShowRecent(bool on);
     void setDefaultSort(int mode);
     void setDebugMode(bool on);
     void setFpsCounter(bool on);
     void setBgmEnabled(bool on);
+    void setControlLayout(int mode);
 
 private:
     Settings();
@@ -42,6 +44,7 @@ private:
     bool debugMode_;
     bool fpsCounter_;
     bool bgmEnabled_;
+    int  controlLayout_;   // global default control layout (0 = Simple, 1 = Complete)
     bool loaded_;
 };
 

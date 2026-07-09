@@ -37,9 +37,11 @@ extern "C" {
 #include "../javacall/platform/Ps2Audio.hpp"
 #include "../javacall/platform/Settings.hpp"
 #include "../javacall/platform/Resolutions.hpp"
+#include "../javacall/platform/ControlLayouts.hpp"
 #include "../javacall/platform/SifLock.hpp"
 #include "../javacall/hal/LcdDevice.hpp"
 #include "../javacall/hal/GameStorage.hpp"
+#include "../javacall/hal/Keypad.hpp"
 #include "../version.h"   // PS2ME_VERSION_STRING (boot banner)
 
 #include <stdio.h>    // snprintf (per-game save icon path building)
@@ -246,6 +248,21 @@ int main(int argc, char** argv) {
                 jcapp_get_screen_buffer(ps2::hal::LcdDevice::PRIMARY_ID);
             }
             lcdUp = true;
+        }
+
+        // 1c) Resolve this game's control layout and install it on the Keypad before the
+        //     VM runs. A per-game override wins; GLOBAL defers to the Settings default.
+        {
+            using ps2::platform::ControlLayouts;
+            const int cl = ControlLayouts::instance().indexFor(idx);
+            bool complete;
+            if (cl == ControlLayouts::SIMPLE)        complete = false;
+            else if (cl == ControlLayouts::COMPLETE) complete = true;
+            else /* GLOBAL */                        complete =
+                     (ps2::platform::Settings::instance().controlLayout() == 1);
+            ps2::hal::Keypad::instance().setLayout(
+                complete ? ps2::hal::Keypad::LAYOUT_COMPLETE
+                         : ps2::hal::Keypad::LAYOUT_SIMPLE);
         }
 
         // 2) Bring up MIDP once, lazily, only after a game has been chosen.

@@ -155,6 +155,7 @@ JC_SRCS="
     platform/Recent.cpp
     platform/Settings.cpp
     platform/Resolutions.cpp
+    platform/ControlLayouts.cpp
     platform/Ps2Frontend.cpp
 "
 JC_OBJS=""

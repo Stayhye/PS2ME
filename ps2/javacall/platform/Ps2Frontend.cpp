@@ -27,6 +27,7 @@
 #include "Recent.hpp"
 #include "Settings.hpp"
 #include "Resolutions.hpp"
+#include "ControlLayouts.hpp"
 #include "Ps2Storage.hpp"
 #include "Ps2MemCard.hpp"          // register the "saving" banner as its I/O-activity listener
 #include "Ps2Audio.hpp"            // menu background music (start on the menu, pause in-game)
@@ -975,7 +976,32 @@ void drawGrid(int viewCount, int selected, int topRow, const int* view, bool gri
     }
 }
 
-void drawDetails(int viewCount, int selected, const int* view, bool detailsFocus) {
+// One focusable field in the details panel: a rounded pill with a left caption and a
+// right-aligned value, highlighted (with up/down chevrons at its right edge) when it
+// currently holds the focus.
+void drawDetailPill(int x, int y, int w, int h, const char* caption, const char* value,
+                    bool focused) {
+    if (focused) {
+        roundRectFillA(x - 2, y - 2, w + 4, h + 4, 7, 90, 215, 255, 255);
+        roundRectVGrad(x, y, w, h, 6, 46, 88, 148, 30, 54, 100);
+    } else {
+        roundRectVGrad(x, y, w, h, 6, 34, 52, 92, 22, 36, 68);
+    }
+    const int my = y + h / 2;
+    drawTextVC(x + 8, my, caption, focused ? 235 : 150, focused ? 245 : 185, 255, 12.0f);
+    int valRight = x + w - 8;
+    if (focused) {
+        const int ax = x + w - 10, ay = my;
+        fillTriangle(ax, ay - 7, ax - 5, ay - 1, ax + 5, ay - 1, 210, 235, 255);
+        fillTriangle(ax - 5, ay + 1, ax + 5, ay + 1, ax, ay + 7, 210, 235, 255);
+        valRight = ax - 12;
+    }
+    const int vw = textWidth(value, 13.0f);
+    drawTextVC(valRight - vw, my, value, focused ? 255 : 210, focused ? 255 : 220, 255, 13.0f);
+}
+
+// detailsFocus: 0 = panel not focused, 1 = SCREEN pill focused, 2 = CONTROL pill focused.
+void drawDetails(int viewCount, int selected, const int* view, int detailsFocus) {
     const int px = DET_X, py = CONTENT_Y, pw = DET_W, ph = CONTENT_BOTTOM - CONTENT_Y;
     panel(px, py, pw, ph, 10);
     drawText(px + 10, py + 8, "GAME DETAILS", 150, 185, 220, 12.0f);
@@ -984,11 +1010,12 @@ void drawDetails(int viewCount, int selected, const int* view, bool detailsFocus
     }
     const int game = view[selected];
 
-    // Vertically centre the preview + name + counter + screen-size block in the panel body
-    // (below the "GAME DETAILS" caption), so the panel reads balanced rather than top-heavy.
+    // Vertically centre the preview + name + counter + screen-size + control-layout block
+    // in the panel body (below the "GAME DETAILS" caption), so it reads balanced rather
+    // than top-heavy.
     const int prev = pw - 26;
-    const int gap1 = 12, nameH = 16, gap2 = 8, infoH = 14, gap3 = 12, screenH = 24;
-    const int blockH = prev + gap1 + nameH + gap2 + infoH + gap3 + screenH;
+    const int gap1 = 12, nameH = 16, gap2 = 8, infoH = 14, gap3 = 12, pillH = 24, gap4 = 8;
+    const int blockH = prev + gap1 + nameH + gap2 + infoH + gap3 + pillH + gap4 + pillH;
     const int regTop = py + 26, regBot = py + ph - 8;
     int top = regTop + ((regBot - regTop) - blockH) / 2;
     if (top < regTop) top = regTop;
@@ -1021,39 +1048,26 @@ void drawDetails(int viewCount, int selected, const int* view, bool detailsFocus
     const int iw = textWidth(info, 13.0f);
     drawText(px + (pw - iw) / 2, prevY + prev + gap1 + nameH + gap2, info, 150, 180, 215, 13.0f);
 
-    // Per-game screen size, editable when the panel is focused (up/down cycle presets).
+    const int pillX = px + 12, pillW = pw - 24;
+
+    // Per-game screen size (up/down cycle presets when this pill is focused).
     int rw = 0, rh = 0;
     Resolutions::instance().get(game, &rw, &rh);
     char res[16];
     snprintf(res, (int)sizeof(res), "%dx%d", rw, rh);
     const int scy = prevY + prev + gap1 + nameH + gap2 + infoH + gap3;
-    const int pillX = px + 12, pillW = pw - 24;
-    if (detailsFocus) {
-        roundRectFillA(pillX - 2, scy - 2, pillW + 4, screenH + 4, 7, 90, 215, 255, 255);
-        roundRectVGrad(pillX, scy, pillW, screenH, 6, 46, 88, 148, 30, 54, 100);
-    } else {
-        roundRectVGrad(pillX, scy, pillW, screenH, 6, 34, 52, 92, 22, 36, 68);
-    }
-    const int scmy = scy + screenH / 2;
-    drawTextVC(pillX + 8, scmy, "SCREEN", detailsFocus ? 235 : 150,
-               detailsFocus ? 245 : 185, 255, 12.0f);
-    int valRight = pillX + pillW - 8;
-    if (detailsFocus) {
-        // Up/down chevrons at the right edge; the value sits to their left.
-        const int ax = pillX + pillW - 10, ay = scmy;
-        fillTriangle(ax, ay - 7, ax - 5, ay - 1, ax + 5, ay - 1, 210, 235, 255);
-        fillTriangle(ax - 5, ay + 1, ax + 5, ay + 1, ax, ay + 7, 210, 235, 255);
-        valRight = ax - 12;
-    }
-    const int vw = textWidth(res, 13.0f);
-    drawTextVC(valRight - vw, scmy, res, detailsFocus ? 255 : 210,
-               detailsFocus ? 255 : 220, 255, 13.0f);
+    drawDetailPill(pillX, scy, pillW, pillH, "SCREEN", res, detailsFocus == 1);
+
+    // Per-game control layout (Global / Simple / Complete).
+    const char* clv = ControlLayouts::preset(ControlLayouts::instance().indexFor(game));
+    const int cly = scy + pillH + gap4;
+    drawDetailPill(pillX, cly, pillW, pillH, "PAD", clv, detailsFocus == 2);
 }
 
 // Context-aware button legend: only the actions available in the current context are
 // shown (e.g. no BACK at the root, no FAVORITE/SORT on SETTINGS or while the alphabet
 // column is focused). Glyph kind: 0=cross, 1=circle, 2=triangle, 3=square.
-void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
+void drawFooter(int activeTab, bool sidebarFocus, int detailsFocus) {
     rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
     for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);   // top hairline
     const int cy = FOOTER_Y + FOOTER_H / 2;
@@ -1063,8 +1077,8 @@ void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
     drawTextVC(g_w - MARGIN - textWidth(kAppVersion, 13.0f), cy,
                kAppVersion, 110, 138, 178, 13.0f);
 
-    const bool canBack = sidebarFocus || detailsFocus || activeTab != 0;
-    int kinds[6];   // glyph kind: 0=cross 1=circle 2=triangle 3=square 4=up/down 5=select
+    const bool canBack = sidebarFocus || detailsFocus != 0 || activeTab != 0;
+    int kinds[6];   // glyph kind: 0=cross 1=circle 2=triangle 3=square 4=up/down 5=select 6=left/right
     const char* labels[6];
     int n = 0;
     if (activeTab == 2) {                       // SETTINGS
@@ -1073,8 +1087,9 @@ void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
     } else if (sidebarFocus) {                  // alphabet column focused
         kinds[n] = 0; labels[n] = "JUMP"; ++n;
         kinds[n] = 1; labels[n] = "BACK"; ++n;
-    } else if (detailsFocus) {                  // details panel focused (screen size)
-        kinds[n] = 4; labels[n] = "SCREEN SIZE"; ++n;
+    } else if (detailsFocus != 0) {             // details panel focused (screen / pad)
+        kinds[n] = 4; labels[n] = "FIELD"; ++n;    // up/down: pick the field
+        kinds[n] = 6; labels[n] = "CHANGE"; ++n;   // left/right: change its value
         kinds[n] = 0; labels[n] = "LAUNCH"; ++n;
         kinds[n] = 1; labels[n] = "BACK"; ++n;
     } else {                                     // ALL GAMES / FAVORITES grid
@@ -1107,6 +1122,9 @@ void drawFooter(int activeTab, bool sidebarFocus, bool detailsFocus) {
                     fillTriangle(gcx - 5, cy + 1, gcx + 5, cy + 1, gcx, cy + 7, 150, 210, 245);
                     break;
             case 5: glyphSelect(gcx, cy, 150, 210, 245); break;
+            case 6: fillTriangle(gcx - 7, cy, gcx - 1, cy - 5, gcx - 1, cy + 5, 150, 210, 245);
+                    fillTriangle(gcx + 1, cy - 5, gcx + 7, cy, gcx + 1, cy + 5, 150, 210, 245);
+                    break;
         }
         drawTextVC(x + glyphW, cy, labels[i], 232, 240, 250, 15.0f);
         x += glyphW + textWidth(labels[i], 15.0f) + itemGap;
@@ -1121,7 +1139,7 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-const int SETTINGS_COUNT = 7;
+const int SETTINGS_COUNT = 8;
 
 // The SETTINGS tab: a vertical list of options (actions + toggles). @p sel is the
 // highlighted row. The list scrolls: only the rows that fit at a comfortable size are
@@ -1181,6 +1199,10 @@ void drawSettings(int sel) {
             case 6: label = "Menu music";
                     snprintf(value, sizeof(value), "%s", Settings::instance().bgmEnabled() ? "On" : "Off");
                     break;
+            case 7: label = "Control layout";
+                    snprintf(value, sizeof(value), "%s",
+                             Settings::instance().controlLayout() == 1 ? "Complete" : "Simple");
+                    break;
         }
         const int cy = y + rowH / 2;
         drawTextVC(left + 14, cy, label, s ? 255 : 220, s ? 255 : 228, 255, 17.0f);
@@ -1202,7 +1224,7 @@ void drawSettings(int sel) {
 }
 
 void render(int viewCount, int selected, int topRow, int activeTab, const int* view,
-            bool sidebarFocus, int sidebarSel, int settingsSel, bool detailsFocus) {
+            bool sidebarFocus, int sidebarSel, int settingsSel, int detailsFocus) {
     memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));   // baked background
     drawHeader();
     drawTabs(activeTab);
@@ -1263,7 +1285,7 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
 
     drawScrollbar(viewCount, topRow);
     drawDetails(viewCount, selected, view, detailsFocus);
-    drawGrid(viewCount, selected, topRow, view, !sidebarFocus && !detailsFocus);
+    drawGrid(viewCount, selected, topRow, view, !sidebarFocus && detailsFocus == 0);
 }
 
 // Bake the static background (vertical gradient + radial vignette) into g_bg once, so
@@ -1856,8 +1878,9 @@ int Ps2Frontend::pick() {
     buildInitials(count);         // alphabet sidebar contents (once)
     Favorites::instance().load(count);   // persisted favourites -> game indices
     Recent::instance().load(count);      // recently-launched games -> game indices
-    Resolutions::instance().load(count); // per-game canvas resolution overrides
-    Settings::instance().load();         // launcher preferences
+    Resolutions::instance().load(count);    // per-game canvas resolution overrides
+    ControlLayouts::instance().load(count); // per-game control layout overrides
+    Settings::instance().load();            // launcher preferences
     g_sortMode = Settings::instance().defaultSort();   // startup sort order
 
     // Start (or resume) the menu background music now that the toggle is known. Disabled ->
@@ -1901,8 +1924,8 @@ int Ps2Frontend::pick() {
     int  sidebarSel = 0;          // highlighted letter while focused
     bool lastSbFocus = false;
     int  lastSbSel = -1;
-    bool detailsFocus = false;    // d-pad moved into the details panel (screen size)
-    bool lastDetailsFocus = false;
+    int  detailsFocus = 0;        // details panel focus: 0=off, 1=SCREEN field, 2=PAD field
+    int  lastDetailsFocus = -1;
     int  settingsSel = 0;         // highlighted SETTINGS row
     int  lastSettingsSel = -1;
     bool firstFrame = true;
@@ -1931,19 +1954,19 @@ int Ps2Frontend::pick() {
             // Tab switching (L1/R1): resets the view + selection + sidebar/details/settings focus.
             if (b.r1 && !prev.r1 && activeTab < 2) {
                 activeTab++; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = false; settingsSel = 0;
+                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = 0; settingsSel = 0;
             }
             if (b.l1 && !prev.l1 && activeTab > 0) {
                 activeTab--; rebuildView(activeTab, count);
-                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = false; settingsSel = 0;
+                selected = 0; topRow = 0; sidebarFocus = false; detailsFocus = 0; settingsSel = 0;
             }
             // Back (Circle): unfocus the sidebar or details panel, else return to ALL GAMES.
             // At the root (ALL GAMES with nothing focused) it does nothing.
             if (b.circle && !prev.circle) {
                 if (sidebarFocus) {
                     sidebarFocus = false;
-                } else if (detailsFocus) {
-                    detailsFocus = false;
+                } else if (detailsFocus != 0) {
+                    detailsFocus = 0;
                 } else if (activeTab != 0) {
                     activeTab = 0; rebuildView(activeTab, count);
                     selected = 0; topRow = 0; settingsSel = 0;
@@ -1978,6 +2001,8 @@ int Ps2Frontend::pick() {
                             else    Ps2Audio::instance().stopBgm();
                             break;
                         }
+                        case 7: Settings::instance().setControlLayout(
+                                    Settings::instance().controlLayout() ^ 1); break;
                     }
                     settingsChanged = true;
                 }
@@ -1985,7 +2010,7 @@ int Ps2Frontend::pick() {
                 // Select toggles the details panel (per-game screen size). Dedicated button
                 // so focusing it never moves the grid selection.
                 if (b.select && !prev.select && !sidebarFocus) {
-                    detailsFocus = !detailsFocus;
+                    detailsFocus = detailsFocus ? 0 : 1;   // open on the SCREEN field
                 }
                 if (sidebarFocus) {
                     // Alphabet column focused: up/down pick a letter; cross/right jumps
@@ -2000,12 +2025,19 @@ int Ps2Frontend::pick() {
                     if (b.left && !prev.left) {
                         sidebarFocus = false;   // cancel back to the grid
                     }
-                } else if (detailsFocus) {
-                    // Details panel focused: up/down cycle the selected game's screen size
-                    // preset (persisted); left/cross-to-launch handled below; back unfocuses.
-                    if (b.up   && !prev.up)   { Resolutions::instance().cycle(g_view[selected], -1); resChanged = true; }
-                    if (b.down && !prev.down) { Resolutions::instance().cycle(g_view[selected], +1); resChanged = true; }
-                    if (b.left && !prev.left) { detailsFocus = false; }   // back to the grid
+                } else if (detailsFocus != 0) {
+                    // Details panel focused: up/down pick the field (1=screen, 2=pad);
+                    // left/right change the focused field's value (persisted); circle backs
+                    // out (handled above); cross launches.
+                    if (b.up   && !prev.up)   { detailsFocus = 1; }
+                    if (b.down && !prev.down) { detailsFocus = 2; }
+                    if (detailsFocus == 1) {
+                        if (b.left  && !prev.left)  { Resolutions::instance().cycle(g_view[selected], -1); resChanged = true; }
+                        if (b.right && !prev.right) { Resolutions::instance().cycle(g_view[selected], +1); resChanged = true; }
+                    } else {
+                        if (b.left  && !prev.left)  { ControlLayouts::instance().cycle(g_view[selected], -1); resChanged = true; }
+                        if (b.right && !prev.right) { ControlLayouts::instance().cycle(g_view[selected], +1); resChanged = true; }
+                    }
                     if (b.cross && !prev.cross) { chosen = g_view[selected]; }
                 } else {
                     // Grid navigation (skips the recent row's empty pad cells).

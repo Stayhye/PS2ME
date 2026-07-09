@@ -1,8 +1,8 @@
 // PS2 JavaCall port — platform layer. Settings implementation.
 //
 // A tiny key=value file "settings.txt" ("recent=0|1", "sort=0|1", "debug=0|1", "fps=0|1",
-// "music=0|1"), persisted on the memory card (falling back to the boot directory) via
-// Ps2MemCard. See Settings.hpp.
+// "music=0|1", "controllayout=0|1"), persisted on the memory card (falling back to the
+// boot directory) via Ps2MemCard. See Settings.hpp.
 #include "Settings.hpp"
 
 #include "Ps2MemCard.hpp"
@@ -20,14 +20,15 @@ Settings& Settings::instance() {
 
 Settings::Settings()
     : showRecent_(true), defaultSort_(0), debugMode_(false), fpsCounter_(false),
-      bgmEnabled_(true), loaded_(false) {}
+      bgmEnabled_(true), controlLayout_(0), loaded_(false) {}
 
 void Settings::load() {
-    showRecent_  = true;    // defaults
-    defaultSort_ = 0;
-    debugMode_   = false;
-    fpsCounter_  = false;
-    bgmEnabled_  = true;
+    showRecent_    = true;    // defaults
+    defaultSort_   = 0;
+    debugMode_     = false;
+    fpsCounter_    = false;
+    bgmEnabled_    = true;
+    controlLayout_ = 0;
     loaded_ = true;
 
     char buf[512];
@@ -56,6 +57,8 @@ void Settings::load() {
             fpsCounter_ = (line[4] != '0');
         } else if (strncmp(line, "music=", 6) == 0 && len >= 7) {
             bgmEnabled_ = (line[6] != '0');
+        } else if (strncmp(line, "controllayout=", 14) == 0 && len >= 15) {
+            controlLayout_ = (line[14] == '1') ? 1 : 0;
         }
     }
 }
@@ -85,12 +88,17 @@ void Settings::setBgmEnabled(bool on) {
     save();
 }
 
+void Settings::setControlLayout(int mode) {
+    controlLayout_ = (mode == 1) ? 1 : 0;
+    save();
+}
+
 void Settings::save() const {
-    char buf[96];
+    char buf[128];
     const int n = snprintf(buf, (int)sizeof(buf),
-                           "recent=%d\nsort=%d\ndebug=%d\nfps=%d\nmusic=%d\n",
+                           "recent=%d\nsort=%d\ndebug=%d\nfps=%d\nmusic=%d\ncontrollayout=%d\n",
                            showRecent_ ? 1 : 0, defaultSort_, debugMode_ ? 1 : 0,
-                           fpsCounter_ ? 1 : 0, bgmEnabled_ ? 1 : 0);
+                           fpsCounter_ ? 1 : 0, bgmEnabled_ ? 1 : 0, controlLayout_);
     if (n > 0) {
         Ps2MemCard::instance().configWrite("settings.txt", buf, n);
     }

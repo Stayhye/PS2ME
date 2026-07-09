@@ -52,12 +52,42 @@ bool Ps2Pad::stableState() {
     return state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1;
 }
 
+// Ask a DualShock to enter locked analog mode, once, so read() gets live stick axes.
+// Fire-and-forget: padSetMainMode kicks off an async command (the pad goes busy, so the
+// next stableState() is briefly false and read() skips a cycle -- harmless). Runs only
+// when the pad is already stable. A digital-only pad has no analog mode in its table, so
+// we skip the request but still mark it done (its axes stay centred -> no effect).
+void Ps2Pad::enableAnalog() {
+    SifGuard guard;   // padInfoMode / padSetMainMode are padman SIF calls
+    const int modes = padInfoMode(PORT, SLOT, PAD_MODETABLE, -1);
+    if (modes <= 0) {
+        return;       // mode table not identified yet -> retry next cycle
+    }
+    bool hasAnalog = false;
+    for (int i = 0; i < modes; ++i) {
+        if (padInfoMode(PORT, SLOT, PAD_MODETABLE, i) == PAD_TYPE_DUALSHOCK) {
+            hasAnalog = true;
+            break;
+        }
+    }
+    if (hasAnalog) {
+        padSetMainMode(PORT, SLOT, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
+    }
+    analogInit_ = true;   // don't probe again regardless (digital pads have no analog)
+}
+
 bool Ps2Pad::ensureReady() {
     if (!opened_ && !open()) {
         return false;
     }
     // Don't block: report ready only once the pad has left its transient state.
-    return stableState();
+    if (!stableState()) {
+        return false;
+    }
+    if (!analogInit_) {
+        enableAnalog();
+    }
+    return true;
 }
 
 bool Ps2Pad::read(hal::PadButtons* out) {
@@ -88,6 +118,14 @@ bool Ps2Pad::read(hal::PadButtons* out) {
     out->r2       = (d & PAD_R2)       != 0;
     out->select   = (d & PAD_SELECT)   != 0;
     out->start    = (d & PAD_START)    != 0;
+    out->l3       = (d & PAD_L3)        != 0;
+    out->r3       = (d & PAD_R3)        != 0;
+    // Analog axes (0..255, 128 = centre). On a digital pad or before analog mode is
+    // negotiated these read as the neutral centre, so the sticks contribute nothing.
+    out->lx = b.ljoy_h;
+    out->ly = b.ljoy_v;
+    out->rx = b.rjoy_h;
+    out->ry = b.rjoy_v;
     return true;
 }
 
