@@ -8,7 +8,7 @@
 <meta property="og:title" content="PS2ME — Run J2ME games on the PlayStation 2">
 <meta property="og:description" content="A native launcher and phoneME-based J2ME runtime for the PlayStation 2.">
 <meta property="og:type" content="website">
-<link rel="icon" type="image/png" href="assets/PS2ME_ICON.png">
+<link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -16,13 +16,14 @@
 
 <header class="hero">
   <div class="hero-inner">
-    <img class="hero-logo" src="assets/PS2ME_ICON.png" alt="PS2ME logo" width="112" height="112">
+    <img class="hero-logo" src="assets/icon.png" data-animated="assets/icon.apng.png"
+         alt="PS2ME logo" width="112" height="112" decoding="async">
     <h1 class="hero-title">PS2ME</h1>
     <p class="hero-tagline">Run <strong>J2ME</strong> (CLDC&nbsp;1.1 / MIDP&nbsp;2.0) games on the <strong>PlayStation&nbsp;2</strong>.</p>
     <p class="hero-sub">A native launcher and a port of the open-source <em>phoneME&nbsp;Feature</em> VM &mdash;
        with PS2 controller input, SPU2 audio, and memory-card saves.</p>
     <div class="hero-cta">
-      <a class="btn btn-primary" href="https://github.com/Wellinator/PS2ME/releases/latest">Download latest</a>
+      <a class="btn btn-primary" href="https://github.com/Wellinator/PS2ME/releases/latest">Download ELF</a>
       <a class="btn btn-ghost" href="https://github.com/Wellinator/PS2ME">View on GitHub</a>
     </div>
   </div>
@@ -110,6 +111,14 @@
     <div class="swiper-button-next" aria-label="Next screenshot"></div>
     <div class="swiper-pagination"></div>
   </div>
+  <p class="hint screenshot-note">Screenshots captured in the <a href="https://pcsx2.net/">PCSX2</a> emulator.</p>
+</section>
+
+<section class="section" id="releases">
+  <h2>Releases</h2>
+  <div id="releases-root" class="releases" data-repo="Wellinator/PS2ME">
+    <p class="rel-status">Loading releases from GitHub&hellip;</p>
+  </div>
 </section>
 
 <section class="section">
@@ -168,7 +177,22 @@ mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
   </p>
 </footer>
 
+<script>
+// Progressive enhancement: paint the small static logo first, then swap in the
+// larger animated APNG once it has fully downloaded — no flash, no blocking.
+(function () {
+  var logo = document.querySelector('.hero-logo[data-animated]');
+  if (!logo) return;
+  var src = logo.getAttribute('data-animated');
+  var anim = new Image();
+  anim.onload = function () { logo.src = src; };
+  anim.src = src;
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="symbols.js" defer></script>
 <script src="carousel.js" defer></script>
+<script src="releases.js" defer></script>
 </body>
 </html>
