@@ -29,6 +29,17 @@ const int GAME_TEX_H = 512;
 // Power-of-two VRAM texture for the fullscreen UI (holds the 640x448 native raster).
 const int FS_TEX_W = 1024;
 const int FS_TEX_H = 512;
+// Power-of-two VRAM texture for the boot splash (also holds the 640x448 raster). Only
+// alive during the splash: allocated in showSplash() and freed before it returns.
+const int SPLASH_TEX_W = 1024;
+const int SPLASH_TEX_H = 512;
+
+// Ease-in-out on [0,1]: the classic smoothstep 3t^2 - 2t^3 (zero slope at both ends).
+float easeInOut(float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
 
 // Fill in the NEAREST-sampling, no-CLUT descriptors both textures use.
 void initSampling(lod_t* lod, clutbuffer_t* clut) {
@@ -283,6 +294,75 @@ void GsDisplay::presentFullscreen(const u16* rgba5551, int w, int h) {
         fsTexReady_ = true;
     }
     blit(rgba5551, w, h, &fsTexbuf_, &fsRect_, false);   // menu: never the FPS overlay
+}
+
+void GsDisplay::showSplash(const u16* rgba5551, int w, int h) {
+    if (!ready_ || rgba5551 == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+
+    // Dedicated VRAM texture, sized to hold the fullscreen raster. Allocated here and
+    // FREED before returning, so it occupies no VRAM once the menu (which allocates its
+    // own textures lazily) starts. It is the most recent allocation when freed, so the
+    // reclaim is clean regardless of the allocator's free policy.
+    texbuffer_t tb;
+    tb.width           = SPLASH_TEX_W;
+    tb.psm             = GS_PSM_16;
+    tb.address         = graph_vram_allocate(SPLASH_TEX_W, SPLASH_TEX_H, GS_PSM_16,
+                                             GRAPH_ALIGN_BLOCK);
+    tb.info.width      = draw_log2(SPLASH_TEX_W);
+    tb.info.height     = draw_log2(SPLASH_TEX_H);
+    tb.info.components = TEXTURE_COMPONENTS_RGBA;
+    tb.info.function   = TEXTURE_FUNCTION_MODULATE;
+
+    texrect_t rect;
+    setRect(&rect, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, (float)w, (float)h);
+
+    // Upload the raster to VRAM once -- only the modulation colour animates each frame,
+    // so the (large) texture never has to be re-sent.
+    const u32 bytes = (u32)w * (u32)h * sizeof(u16);
+    SyncDCache((void*)rgba5551, (u8*)rgba5551 + bytes);
+    qword_t* q = xfer_->data;
+    q = draw_texture_transfer(q, (void*)rgba5551, w, h, GS_PSM_16, tb.address, tb.width);
+    q = draw_texture_flush(q);
+    dma_channel_send_chain(DMA_CHANNEL_GIF, xfer_->data, q - xfer_->data, 0, 0);
+    dma_wait_fast();
+
+    // Three-phase envelope (frames at ~60 Hz fields): ease-in-out fade in, hold, ease-in-
+    // out fade out. MODULATE means out = texel * colour / 0x80, so a colour of 0..0x80
+    // fades the image from black to full brightness and back.
+    const int FADE_IN = 24, HOLD = 45, FADE_OUT = 24;   // ~0.4s / 0.75s / 0.4s
+    const int TOTAL = FADE_IN + HOLD + FADE_OUT;
+    for (int f = 0; f <= TOTAL; ++f) {
+        float a;
+        if (f < FADE_IN) {
+            a = easeInOut((float)f / (float)FADE_IN);
+        } else if (f < FADE_IN + HOLD) {
+            a = 1.0f;
+        } else {
+            a = 1.0f - easeInOut((float)(f - FADE_IN - HOLD) / (float)FADE_OUT);
+        }
+        const u8 k = (u8)(a * 128.0f + 0.5f);
+        rect.color.r = k; rect.color.g = k; rect.color.b = k;
+
+        q = draw_->data;
+        q = draw_setup_environment(q, 0, &frame_[drawIdx_], &z_);
+        q = draw_clear(q, 0, 0.0f, 0.0f, (float)SCR_W, (float)SCR_H, 0x00, 0x00, 0x00);
+        q = draw_texture_sampling(q, 0, &lod_);
+        q = draw_texturebuffer(q, 0, &tb, &clut_);
+        q = draw_rect_textured(q, 0, &rect);
+        q = draw_finish(q);
+        dma_channel_send_normal(DMA_CHANNEL_GIF, draw_->data, q - draw_->data, 0, 0);
+        dma_wait_fast();
+        draw_wait_finish();
+
+        graph_set_framebuffer_filtered(frame_[drawIdx_].address, SCR_W, GS_PSM_32, 0, 0);
+        graph_wait_vsync();
+        drawIdx_ ^= 1;
+    }
+
+    // Reclaim the splash texture's VRAM before the menu allocates its own textures.
+    graph_vram_free(tb.address);
 }
 
 } // namespace platform

@@ -218,6 +218,10 @@ int main(int argc, char** argv) {
         ps2::platform::Ps2Audio::instance().startMixer();     // SIF-locked ring feeder
     }
 
+    // Boot splash: a brief branded screen with an ease-in-out fade in/out, shown once
+    // before the menu. Brings up video here; its VRAM texture is freed on return.
+    ps2::platform::Ps2Frontend::instance().splash();
+
     for (;;) {
         // 1) Standalone native front-end. No VM is running here: it owns the screen,
         //    the pad and the games list on its own. Returns the chosen game or -1.

@@ -23,6 +23,12 @@ public:
     /// Self-contained: brings up video, input and storage as needed; touches no VM.
     int pick();
 
+    /// Boot splash: decode the embedded SPLASH.png and show it full-screen through the
+    /// shared GsDisplay with an ease-in-out fade in and out, then return. Brings up video
+    /// as needed and frees the splash's VRAM texture on the way out. Call once from main()
+    /// before the first pick(). Touches no VM; a no-op if video can't come up.
+    void splash();
+
     /// Begin/end the debug overlay (developer view, shown only with "Debug mode" on).
     /// logEnable(true) starts the split view directly (game left, full app log right) --
     /// see debugPresent(); it clears the rolling log and paints the initial "loading"

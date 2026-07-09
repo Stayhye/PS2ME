@@ -55,6 +55,10 @@
 // startup via MidletIcon::decodePng and drawn beside the title. -I<repo>/assets.
 #include "ps2me_icon.h"
 
+// Embedded boot splash (assets/SPLASH.png -> byte array). Decoded once by splash() and
+// shown full-screen with a fade before the menu. -I<repo>/assets.
+#include "splash_png.h"
+
 namespace ps2 {
 namespace platform {
 
@@ -1723,6 +1727,33 @@ void memCardIoActivity(int phase) {
 Ps2Frontend& Ps2Frontend::instance() {
     static Ps2Frontend inst;
     return inst;
+}
+
+void Ps2Frontend::splash() {
+    // Bring up the raster + shared GS (same path the menu uses). If video can't come up
+    // there is nothing to show, so bail quietly.
+    if (!ensureVideo()) {
+        return;
+    }
+    int w = 0, h = 0;
+    unsigned char* px = MidletIcon::decodePng(g_splash_png, (int)g_splash_png_len, &w, &h);
+    if (px == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    // Convert the decoded RGBA8888 into the native RGBA5551 raster, nearest-fit to the
+    // full screen (the asset is authored at 640x448, so this is 1:1 in practice).
+    for (int y = 0; y < g_h; ++y) {
+        const int sy = (h == g_h) ? y : (y * h / g_h);
+        u16* row = g_ras + (size_t)y * g_w;
+        const unsigned char* srow = px + (size_t)sy * w * 4;
+        for (int x = 0; x < g_w; ++x) {
+            const int sx = (w == g_w) ? x : (x * w / g_w);
+            const unsigned char* s = srow + (size_t)sx * 4;
+            row[x] = rgba5551(s[0], s[1], s[2]);
+        }
+    }
+    MidletIcon::release(px);
+    GsDisplay::instance().showSplash(g_ras, g_w, g_h);
 }
 
 void Ps2Frontend::logEnable(bool on) {

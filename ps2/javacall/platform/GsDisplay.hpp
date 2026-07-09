@@ -49,6 +49,12 @@ public:
     /// allocated on the first call.
     void presentFullscreen(const u16* rgba5551, int w, int h);
 
+    /// Show @p rgba5551 (@p w x @p h, 128-byte aligned) full-screen as a boot splash with
+    /// an ease-in-out fade IN and OUT, then return (blocks ~1.5s). Uses a DEDICATED VRAM
+    /// texture that is freed before returning, so the splash costs no VRAM once the menu
+    /// comes up. No-op until init() has succeeded.
+    void showSplash(const u16* rgba5551, int w, int h);
+
     /// Set the in-game FPS overlay: when @p show is true, present() draws "<fps> FPS" on
     /// the pillarbox/letterbox border, OUTSIDE the game canvas (a small vector-drawn label,
     /// not part of the game texture). Off by default; the launcher toggles it via Settings.
