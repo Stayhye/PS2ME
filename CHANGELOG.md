@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version number lives in a single source of truth, `ps2/version.h`, and is bumped
 with `./version.sh {major|minor|patch}`.
 
+## [1.2.1] - 2026-07-09
+
+### Added
+- A boot splash screen, shown once at startup and fading in and out with an ease-in-out
+  curve before the menu appears. Its VRAM texture is freed as soon as the splash ends.
+- An author credit ("by Wellinator") beside the launcher wordmark in the header.
+- A project website (`docs/`) with a feature overview, a screenshot carousel, and a
+  releases list generated live from the GitHub API.
+
+### Changed
+- The launcher's version number moved from the header to the bottom-right of the footer.
+- The "no games found" screen now shows a friendly empty state by default; the raw
+  storage diagnostics (device probes and resolved paths) appear only with Debug mode on.
+
 ## [1.2.0] - 2026-07-09
 
 ### Added

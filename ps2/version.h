@@ -14,7 +14,7 @@
 
 #define PS2ME_VERSION_MAJOR 1
 #define PS2ME_VERSION_MINOR 2
-#define PS2ME_VERSION_PATCH 0
+#define PS2ME_VERSION_PATCH 1
 
 /* Derive "vMAJOR.MINOR.PATCH" from the numbers above (two-step stringize). */
 #define PS2ME_VERSION_STR2(x) #x
