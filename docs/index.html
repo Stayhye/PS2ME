@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PS2ME — Run J2ME games on the PlayStation 2</title>
+<meta name="description" content="PS2ME brings J2ME (CLDC 1.1 / MIDP 2.0) MIDlets to the PlayStation 2: a native launcher, PS2 controller input, SPU2 audio, and memory-card saves, powered by a port of phoneME Feature.">
+<meta property="og:title" content="PS2ME — Run J2ME games on the PlayStation 2">
+<meta property="og:description" content="A native launcher and phoneME-based J2ME runtime for the PlayStation 2.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="assets/PS2ME_ICON.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Replace OWNER with the GitHub owner/org once the repository exists. -->
+
+<header class="hero">
+  <div class="hero-inner">
+    <img class="hero-logo" src="assets/PS2ME_ICON.png" alt="PS2ME logo" width="112" height="112">
+    <h1 class="hero-title">PS2ME</h1>
+    <p class="hero-tagline">Run <strong>J2ME</strong> (CLDC&nbsp;1.1 / MIDP&nbsp;2.0) games on the <strong>PlayStation&nbsp;2</strong>.</p>
+    <p class="hero-sub">A native launcher and a port of the open-source <em>phoneME&nbsp;Feature</em> VM &mdash;
+       with PS2 controller input, SPU2 audio, and memory-card saves.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="https://github.com/OWNER/PS2ME/releases/latest">Download latest</a>
+      <a class="btn btn-ghost" href="https://github.com/OWNER/PS2ME">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section class="section">
+  <h2>Features</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Native launcher</h3>
+      <p>A full-screen 640×448 dashboard with a 4×5 grid of game icons decoded straight from
+         each JAR, tabs, an alphabet sidebar, sorting, favorites, and recents.</p>
+    </div>
+    <div class="card">
+      <h3>Per-game display</h3>
+      <p>Resolution and orientation overrides per game, so both portrait and landscape
+         MIDlets fill the screen correctly.</p>
+    </div>
+    <div class="card">
+      <h3>Audio</h3>
+      <p>Menu music on a hardware SPU2 voice, the Nokia Sound API, and MMAPI MIDI through an
+         offline-built wavetable synth.</p>
+    </div>
+    <div class="card">
+      <h3>Memory-card saves</h3>
+      <p>MIDlet RecordStore data is saved per game and appears in the console's OSD browser
+         with its own icon and title.</p>
+    </div>
+    <div class="card">
+      <h3>Quality of life</h3>
+      <p>A friendly loading screen, a debug split view, and an opt-in in-game FPS counter.</p>
+    </div>
+    <div class="card">
+      <h3>Open source</h3>
+      <p>Built on phoneME Feature and the PS2 SDK, released under the GPL&#8209;2.0 license.</p>
+    </div>
+  </div>
+</section>
+
+<!--
+  Screenshots: drop PNGs into docs/assets/ and uncomment this block, e.g.
+  <section class="section"><h2>Screenshots</h2>
+    <div class="shots">
+      <img src="assets/screenshot-menu.png" alt="PS2ME launcher grid">
+      <img src="assets/screenshot-settings.png" alt="PS2ME settings">
+    </div>
+  </section>
+-->
+
+<section class="section">
+  <h2>Getting started</h2>
+  <ol class="steps">
+    <li>Download <code>PS2ME-vX.Y.Z.elf</code> (and the optional <code>bgm.adpcm</code>) from the
+      <a href="https://github.com/OWNER/PS2ME/releases">Releases</a> page.</li>
+    <li>On a FAT32 USB drive, create this layout:
+      <pre><code>mass:/PS2ME/PS2ME-vX.Y.Z.elf
+mass:/PS2ME/bgm.adpcm        (optional menu music)
+mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
+    </li>
+    <li>Launch the ELF from a homebrew loader (uLaunchELF / wLaunchELF), or open it in
+      <a href="https://pcsx2.net/">PCSX2</a>.</li>
+    <li>Pick a game and press <strong>✕</strong>.</li>
+  </ol>
+  <p class="hint"><strong>Launcher controls:</strong> D-pad move · ✕ launch · ○ back · △ favorite ·
+     □ sort · L1/R1 tabs · L2/R2 page · Select options.</p>
+</section>
+
+<section class="section">
+  <h2>Build from source</h2>
+  <p>The build runs entirely in Docker (a JDK-8 host image that romizes the class library, plus a
+     PS2 EE cross image that links the ELF). The phoneME source tree and PS2 SDK are external and
+     are not vendored, so builds are produced locally.</p>
+  <pre><code>docker run --rm -v "$(pwd)":/work -v phoneme_build:/build \
+  phoneme-cross bash /work/docker/phoneme-cross/build-release-ps2.sh</code></pre>
+  <p>See the <a href="https://github.com/OWNER/PS2ME#building-from-source">README</a> for details.</p>
+</section>
+
+</main>
+
+<footer class="footer">
+  <p><strong>PS2ME</strong> is free software under the
+     <a href="https://github.com/OWNER/PS2ME/blob/main/LICENSE">GNU GPL&#8209;2.0</a>.
+     Built on <a href="https://github.com/OpenJDK/phoneme">phoneME&nbsp;Feature</a> and
+     <a href="https://github.com/ps2dev/ps2sdk">ps2sdk</a>.</p>
+  <p class="footer-links">
+    <a href="https://github.com/OWNER/PS2ME">GitHub</a> ·
+    <a href="https://github.com/OWNER/PS2ME/releases">Releases</a> ·
+    <a href="https://github.com/OWNER/PS2ME/blob/main/CHANGELOG.md">Changelog</a>
+  </p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,143 @@
+/* PS2ME project site — "console dashboard" blue-metallic theme, self-contained. */
+
+:root {
+  --bg:        #0a1020;
+  --bg-2:      #0d1730;
+  --panel:     #12203c;
+  --panel-2:   #0e1a30;
+  --edge:      #23406e;
+  --ink:       #e6eefc;
+  --ink-dim:   #9fb2d4;
+  --cyan:      #35c8ff;
+  --cyan-soft: #6fd8ff;
+  --accent:    #4a86ff;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.6;
+}
+
+a { color: var(--cyan-soft); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre {
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* ---- Hero ---------------------------------------------------------------- */
+.hero {
+  position: relative;
+  text-align: center;
+  padding: 5.5rem 1.25rem 4.5rem;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, rgba(53, 200, 255, 0.16), transparent 60%),
+    linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+  border-bottom: 1px solid var(--edge);
+}
+.hero-inner { max-width: 780px; margin: 0 auto; }
+.hero-logo {
+  image-rendering: pixelated;
+  filter: drop-shadow(0 6px 22px rgba(53, 200, 255, 0.35));
+  margin-bottom: 0.75rem;
+}
+.hero-title {
+  margin: 0.2rem 0 0.4rem;
+  font-size: clamp(2.8rem, 8vw, 4.6rem);
+  letter-spacing: 0.06em;
+  font-weight: 800;
+  background: linear-gradient(180deg, #ffffff, var(--cyan-soft));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero-tagline { font-size: clamp(1.1rem, 3vw, 1.4rem); margin: 0.25rem 0; }
+.hero-sub { color: var(--ink-dim); max-width: 620px; margin: 0.6rem auto 0; }
+
+.hero-cta { margin-top: 1.8rem; display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
+
+.btn {
+  display: inline-block;
+  padding: 0.7rem 1.5rem;
+  border-radius: 10px;
+  font-weight: 600;
+  border: 1px solid var(--edge);
+  transition: transform 0.08s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn-primary {
+  color: #04121f;
+  background: linear-gradient(180deg, var(--cyan-soft), var(--cyan));
+  border-color: var(--cyan);
+  box-shadow: 0 6px 20px rgba(53, 200, 255, 0.35);
+}
+.btn-ghost { color: var(--ink); background: rgba(74, 134, 255, 0.10); }
+.btn-ghost:hover { background: rgba(74, 134, 255, 0.20); }
+
+/* ---- Sections ------------------------------------------------------------ */
+main { max-width: 980px; margin: 0 auto; padding: 0 1.25rem; }
+.section { padding: 3.2rem 0; border-bottom: 1px solid rgba(35, 64, 110, 0.5); }
+.section:last-child { border-bottom: none; }
+.section h2 {
+  font-size: 1.7rem;
+  margin: 0 0 1.4rem;
+  letter-spacing: 0.02em;
+}
+.section h2::before { content: "▸ "; color: var(--cyan); }
+
+/* ---- Feature cards ------------------------------------------------------- */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+.card {
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  padding: 1.2rem 1.3rem;
+}
+.card h3 { margin: 0 0 0.4rem; color: var(--cyan-soft); font-size: 1.1rem; }
+.card p { margin: 0; color: var(--ink-dim); }
+
+/* ---- Steps & code -------------------------------------------------------- */
+.steps { padding-left: 1.2rem; }
+.steps li { margin-bottom: 0.7rem; }
+.hint { color: var(--ink-dim); margin-top: 1rem; }
+
+pre {
+  background: #060c18;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+}
+pre code { color: #cfe3ff; font-size: 0.9rem; }
+:not(pre) > code {
+  background: rgba(74, 134, 255, 0.14);
+  border: 1px solid rgba(74, 134, 255, 0.25);
+  border-radius: 5px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.9em;
+}
+
+/* ---- Screenshots (optional) --------------------------------------------- */
+.shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+.shots img { width: 100%; border: 1px solid var(--edge); border-radius: 10px; }
+
+/* ---- Footer -------------------------------------------------------------- */
+.footer {
+  text-align: center;
+  padding: 2.5rem 1.25rem 3rem;
+  color: var(--ink-dim);
+  background: var(--bg-2);
+  border-top: 1px solid var(--edge);
+}
+.footer-links { margin-top: 0.4rem; }
