@@ -1541,7 +1541,7 @@ void waitFrame() {
 // --- Memory-card "saving" spinner -------------------------------------------------
 // A memory-card write (a favourite/setting/resolution change now; a game save later) is
 // issued to the IOP and Ps2MemCard polls it to completion. Between polls it calls
-// memCardIoActivity(kIoTick) so we can animate a small, discreet "Salvando" spinner in the
+// memCardIoActivity(kIoTick) so we can animate a small, discreet "Saving" spinner in the
 // bottom-right corner -- the UI stays alive through the write instead of freezing. We keep
 // a backup of just the spinner's box so each frame restores the menu underneath before
 // redrawing the rotated spinner (no trails, no full re-render), and on kIoEnd we hold it a
@@ -1594,7 +1594,7 @@ void spinDot(int cx, int cy, int rad, int r, int g, int b, int a) {
     }
 }
 
-// Draw the badge (rounded pill + rotating ring of dots + "Salvando" label) at rotation
+// Draw the badge (rounded pill + rotating ring of dots + "Saving" label) at rotation
 // phase @p tick, over the already-restored menu pixels.
 void drawSpinBadge(int tick) {
     const int bx = spinX(), by = spinY();
@@ -1614,7 +1614,7 @@ void drawSpinBadge(int tick) {
         spinDot(cx + SDX[k], cy + SDY[k], 2, 255, 205, 110, a);
     }
 
-    drawTextVC(bx + 36, cy, "Salvando", 236, 224, 190, 15.0f);
+    drawTextVC(bx + 36, cy, "Saving", 236, 224, 190, 15.0f);
 }
 
 // Draw one spinner frame: restore the clean menu box, draw the badge at the current phase,
