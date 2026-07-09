@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
 
     // Returning from main() resets the console and scrolls the EE Console away.
     // Halt instead so the log stays on screen for inspection.
-    javacall_print("j2me-ps2: launcher exited; halting (no reboot).\n");
+    javacall_print("PS2ME: launcher exited; halting (no reboot).\n");
     for (;;) {
         SleepThread();
     }

@@ -56,7 +56,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
     /* Sign of life straight through our javacall layer, before the VM starts:
      * proves libjavacall + the print path linked and run on real hardware. */
-    javacall_print("j2me-ps2: booting phoneME Feature CLDC VM\n");
+    javacall_print("PS2ME: booting phoneME Feature CLDC VM\n");
 
 #if ENABLE_PCSL
     pcsl_mem_initialize(NULL, -1);
@@ -101,7 +101,7 @@ end:
      * and scrolls the log away, so halt here instead: this keeps the EE Console
      * output on screen for inspection. SleepThread() parks this (only) thread
      * forever. */
-    javacall_print("j2me-ps2: VM exited; halting (no reboot).\n");
+    javacall_print("PS2ME: VM exited; halting (no reboot).\n");
     for (;;) {
         SleepThread();
     }
