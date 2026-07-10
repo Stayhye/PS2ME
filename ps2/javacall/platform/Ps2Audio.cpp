@@ -310,6 +310,15 @@ bool Ps2Audio::loadBgm(const char* path) {
 
     audsrv_adpcm_init();
 
+    // CRITICAL (HW-only bug): audsrv_load_adpcm ships this buffer to the IOP via sceSifSetDma
+    // WITHOUT writing back the EE data cache first. The 16-byte header we just built with CPU
+    // stores still sits in the EE's write-back cache, so the EE->IOP DMA reads STALE main RAM
+    // (pitch == 0 => SPU2 voice never advances => silent). The ADPCM payload survives because
+    // ::read() DMA'd it straight to RAM, but the CPU-written header does not. PCSX2 hid this by
+    // treating the cache as coherent. Write the EE data cache back to RAM so the real header
+    // reaches the IOP (WRITEBACK_DCACHE flushes dirty lines, covering our CPU-written header).
+    FlushCache(WRITEBACK_DCACHE);
+
     const int lr = audsrv_load_adpcm(&g_bgm, buf, (int)size);   // upload to SPU2 RAM
     free(buf);                                                  // EE copy no longer needed
     if (lr != AUDSRV_ERR_NOERROR) {
