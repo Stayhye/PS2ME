@@ -1831,15 +1831,12 @@ int effectiveLayout(int game) {
     return Settings::instance().controlLayout() == 1 ? 1 : 0;   // GLOBAL
 }
 
-} // namespace
-
-void Ps2Frontend::controlsGuide(int layout) {
-    if (!ensureVideo()) {
-        return;
-    }
-    int kw = 0, kh = 0;
-    unsigned char* kb = MidletIcon::decodePng(g_keyboard_png, (int)g_keyboard_png_len, &kw, &kh);
-
+// Render the on-screen keyboard + one layout's DS2 overlay (static markers + legend) plus
+// the live "button pressed" highlights into g_ras. The caller owns the header bar, the
+// footer, the decoded keyboard and the frame loop -- so both the guide and the first-run
+// picker reuse this exact body.
+void drawControlsBody(int layout, const unsigned char* kb, int kw, int kh,
+                      bool ok, const hal::PadButtons& b) {
     // Keyboard placement + per-key anchor table, in the asset's 256x256 space. Centres were
     // measured from keyboard.png (groove/centroid analysis), not eyeballed: columns at
     // x=50/127/203, rows at y=95/132/170/208, soft keys and D-pad located directly.
@@ -1861,53 +1858,19 @@ void Ps2Frontend::controlsGuide(int layout) {
     const int chw = 31 * kbW / 256;   // key cell half-extents on screen (~42 x 21)
     const int chh = 16 * kbH / 256;
 
-    hal::IPad* pad = hal::Keypad::instance().pad();
-    // Exit on HOLD (not tap) so START itself stays testable: a quick press highlights it
-    // like any other button; holding it for HOLD_MS leaves. Arm only after START has been
-    // released once, so the press that opened the guide doesn't immediately count.
-    const unsigned HOLD_MS = 2000;
-    bool     armed = false;
-    unsigned holdBegin = 0;
+    if (kb != 0) {
+        blitKeyboard(kb, kw, kh, kx, ky, kbW, kbH);
+    }
 
-    for (;;) {
-        hal::PadButtons b;
-        const bool ok = (pad != 0 && pad->ensureReady() && pad->read(&b));
-        const unsigned now = (unsigned)hal::SystemClock::instance().elapsedMillis();
-        unsigned heldMs = 0;
-        if (ok) {
-            if (!b.start) {
-                armed = true;
-                holdBegin = 0;
-            } else if (armed) {
-                if (holdBegin == 0) holdBegin = now ? now : 1;
-                heldMs = now - holdBegin;
-            }
-        }
-        // When the hold completes, render THIS frame with the bar full (clamp), present it
-        // and leave at once -- no waiting for release (the caller ignores the held START).
-        const bool doExit = (heldMs >= HOLD_MS);
-        if (doExit) heldMs = HOLD_MS;
+    // Shared directional read (D-pad OR left stick) and D-pad arm offset.
+    const int DZ = 40;
+    const bool up    = ok && (b.up    || b.ly < 128 - DZ);
+    const bool down  = ok && (b.down  || b.ly > 128 + DZ);
+    const bool left  = ok && (b.left  || b.lx < 128 - DZ);
+    const bool right = ok && (b.right || b.lx > 128 + DZ);
+    const int dOff = (24 * kbW / 256) * 6 / 10;   // ~19 px
 
-        // --- render -------------------------------------------------------------
-        memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
-        rectVGrad(0, 0, g_w, 34, 26, 42, 78, 14, 24, 50);
-        for (int x = 0; x < g_w; ++x) plotA(x, 34, 60, 90, 140, 255);
-        drawTextVC(MARGIN, 17, layout == 1 ? "CONTROLS  -  COMPLETE"
-                                           : "CONTROLS  -  SIMPLE", 210, 228, 248, 18.0f);
-
-        if (kb != 0) {
-            blitKeyboard(kb, kw, kh, kx, ky, kbW, kbH);
-        }
-
-        // Shared directional read (D-pad OR left stick) and D-pad arm offset.
-        const int DZ = 40;
-        const bool up    = ok && (b.up    || b.ly < 128 - DZ);
-        const bool down  = ok && (b.down  || b.ly > 128 + DZ);
-        const bool left  = ok && (b.left  || b.lx < 128 - DZ);
-        const bool right = ok && (b.right || b.lx > 128 + DZ);
-        const int dOff = (24 * kbW / 256) * 6 / 10;   // ~19 px
-
-        if (layout == 1) {
+    if (layout == 1) {
             // ===== COMPLETE: full phone keypad =====
             // Live highlights: light the key(s) each pressed button drives. The D-pad
             // lights only the pressed ARM, so the direction is unambiguous.
@@ -2027,6 +1990,51 @@ void Ps2Frontend::controlsGuide(int layout) {
             drawText(lx, ly, "Other buttons", 150, 175, 205, 12.0f);
             drawText(vx, ly, "unused", 150, 175, 205, 12.0f);
         }
+}
+
+} // namespace
+
+void Ps2Frontend::controlsGuide(int layout) {
+    if (!ensureVideo()) {
+        return;
+    }
+    int kw = 0, kh = 0;
+    unsigned char* kb = MidletIcon::decodePng(g_keyboard_png, (int)g_keyboard_png_len, &kw, &kh);
+
+    hal::IPad* pad = hal::Keypad::instance().pad();
+    // Exit on HOLD (not tap) so START itself stays testable: a quick press highlights it
+    // like any other button; holding it for HOLD_MS leaves. Arm only after START has been
+    // released once, so the press that opened the guide doesn't immediately count.
+    const unsigned HOLD_MS = 2000;
+    bool     armed = false;
+    unsigned holdBegin = 0;
+
+    for (;;) {
+        hal::PadButtons b;
+        const bool ok = (pad != 0 && pad->ensureReady() && pad->read(&b));
+        const unsigned now = (unsigned)hal::SystemClock::instance().elapsedMillis();
+        unsigned heldMs = 0;
+        if (ok) {
+            if (!b.start) {
+                armed = true;
+                holdBegin = 0;
+            } else if (armed) {
+                if (holdBegin == 0) holdBegin = now ? now : 1;
+                heldMs = now - holdBegin;
+            }
+        }
+        // When the hold completes, render THIS frame with the bar full (clamp), present it
+        // and leave at once -- no waiting for release (the caller ignores the held START).
+        const bool doExit = (heldMs >= HOLD_MS);
+        if (doExit) heldMs = HOLD_MS;
+
+        memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
+        rectVGrad(0, 0, g_w, 34, 26, 42, 78, 14, 24, 50);
+        for (int x = 0; x < g_w; ++x) plotA(x, 34, 60, 90, 140, 255);
+        drawTextVC(MARGIN, 17, layout == 1 ? "CONTROLS  -  COMPLETE"
+                                           : "CONTROLS  -  SIMPLE", 210, 228, 248, 18.0f);
+
+        drawControlsBody(layout, kb, kw, kh, ok, b);
 
         // Footer hint + hold-to-exit progress (fills the footer's top hairline as START
         // is held; START stays free to test with a quick press).
@@ -2049,6 +2057,95 @@ void Ps2Frontend::controlsGuide(int layout) {
         GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
         if (doExit) break;   // the full-bar frame is on screen now -- return immediately
         waitFrame();
+    }
+
+    if (kb != 0) {
+        MidletIcon::release(kb);
+    }
+}
+
+void Ps2Frontend::chooseLayout() {
+    if (!ensureVideo()) {
+        return;
+    }
+    int kw = 0, kh = 0;
+    unsigned char* kb = MidletIcon::decodePng(g_keyboard_png, (int)g_keyboard_png_len, &kw, &kh);
+
+    hal::IPad* pad = hal::Keypad::instance().pad();
+    int layout = Settings::instance().controlLayout() == 1 ? 1 : 0;   // seed from current default
+    hal::PadButtons prev;
+    bool pnl = false, pnr = false;   // previous left/right nav state (D-pad OR left stick)
+    bool confirmed = false;
+
+    for (;;) {
+        hal::PadButtons b;
+        const bool ok = (pad != 0 && pad->ensureReady() && pad->read(&b));
+        if (ok) {
+            // Switch with LEFT/RIGHT from the D-pad OR the left analog stick (the picker's
+            // guide is static, so the stick has no other job here).
+            const bool nl = b.left  || b.lx < 128 - 40;
+            const bool nr = b.right || b.lx > 128 + 40;
+            if (nl && !pnl) layout = 0;   // SIMPLE
+            if (nr && !pnr) layout = 1;   // COMPLETE
+            pnl = nl; pnr = nr;
+            if (b.cross && !prev.cross) confirmed = true;
+            prev = b;
+        }
+
+        memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
+
+        // Header: prompt on the left + a SIMPLE | COMPLETE segmented toggle on the right.
+        rectVGrad(0, 0, g_w, 40, 26, 42, 78, 14, 24, 50);
+        for (int x = 0; x < g_w; ++x) plotA(x, 40, 60, 90, 140, 255);
+        drawTextVC(MARGIN, 20, "CHOOSE YOUR CONTROL LAYOUT", 210, 228, 248, 15.0f);
+        {
+            const char* names[2] = { "SIMPLE", "COMPLETE" };
+            const int pw = 104, ph = 24, gap = 8, py = 8;
+            const int px0 = g_w - MARGIN - (pw * 2 + gap);
+            for (int i = 0; i < 2; ++i) {
+                const int px = px0 + i * (pw + gap);
+                const bool sel = (layout == i);
+                if (sel) {
+                    roundRectFillA(px - 2, py - 2, pw + 4, ph + 4, 8, 90, 215, 255, 255);
+                    roundRectVGrad(px, py, pw, ph, 7, 46, 88, 148, 30, 54, 100);
+                } else {
+                    roundRectVGrad(px, py, pw, ph, 7, 34, 52, 92, 22, 36, 68);
+                }
+                const int tw = textWidth(names[i], 14.0f);
+                drawTextVC(px + (pw - tw) / 2, py + ph / 2, names[i],
+                           sel ? 255 : 170, sel ? 255 : 195, 255, 14.0f);
+            }
+        }
+
+        // Static preview only (ok = false): the picker's guide is purely visual -- it does
+        // not react to button presses, only shows the selected layout's mapping.
+        drawControlsBody(layout, kb, kw, kh, false, b);
+
+        // Footer.
+        rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
+        for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);
+        drawTextVC(MARGIN, FOOTER_Y + FOOTER_H / 2, "LEFT / RIGHT: SWITCH", 190, 210, 235, 14.0f);
+        {
+            const char* c = "CROSS: CONFIRM";
+            drawTextVC(g_w - MARGIN - textWidth(c, 14.0f), FOOTER_Y + FOOTER_H / 2, c, 190, 210, 235, 14.0f);
+        }
+
+        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+        if (confirmed) break;
+        waitFrame();
+    }
+
+    // Persist the choice as the global default and mark the picker done (so it is a
+    // one-time, first-run screen).
+    Settings::instance().setControlLayout(layout);
+    Settings::instance().setLayoutChosen(true);
+
+    // Swallow the confirm press so the menu grid doesn't read it as a game launch.
+    {
+        hal::PadButtons r;
+        while (pad != 0 && pad->ensureReady() && pad->read(&r) && r.cross) {
+            waitFrame();
+        }
     }
 
     if (kb != 0) {
@@ -2189,6 +2286,13 @@ int Ps2Frontend::pick() {
     }
     g_vsyncCb = graph_add_vsync_handler(onVsync);
     IconCache::instance().begin(count, ICON);
+
+    // First run only (after the splash, before the menu is shown): let the user pick the
+    // global control layout, live-previewing each guide. Persists the choice and a "done"
+    // flag so it never shows again. Needs the pad + vsync pacing up (both are, above).
+    if (!Settings::instance().layoutChosen()) {
+        chooseLayout();
+    }
 
     int selected = 0;
     int topRow = 0;

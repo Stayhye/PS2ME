@@ -36,6 +36,12 @@ public:
     /// only valid while pick() is running (its vsync pacing must be installed). No VM.
     void controlsGuide(int layout);
 
+    /// First-run layout picker: a full-screen chooser (SIMPLE | COMPLETE) that live-previews
+    /// each layout's guide as the user switches, and on CROSS persists the pick as the global
+    /// default and marks the picker done. Shown once, from pick(), after the splash. Same
+    /// video/pad/vsync requirements as controlsGuide().
+    void chooseLayout();
+
     /// Begin/end the debug overlay (developer view, shown only with "Debug mode" on).
     /// logEnable(true) starts the split view directly (game left, full app log right) --
     /// see debugPresent(); it clears the rolling log and paints the initial "loading"

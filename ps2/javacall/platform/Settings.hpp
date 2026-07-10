@@ -24,6 +24,7 @@ public:
     bool fpsCounter() const  { return fpsCounter_; }   // default: false (in-game FPS overlay)
     bool bgmEnabled() const  { return bgmEnabled_; }   // default: true (menu background music)
     int  controlLayout() const { return controlLayout_; } // default: 0 (Simple); 1 = Complete
+    bool layoutChosen() const  { return layoutChosen_; }  // default: false (first-run picker)
 
     void setShowRecent(bool on);
     void setDefaultSort(int mode);
@@ -31,6 +32,7 @@ public:
     void setFpsCounter(bool on);
     void setBgmEnabled(bool on);
     void setControlLayout(int mode);
+    void setLayoutChosen(bool on);
 
 private:
     Settings();
@@ -45,6 +47,7 @@ private:
     bool fpsCounter_;
     bool bgmEnabled_;
     int  controlLayout_;   // global default control layout (0 = Simple, 1 = Complete)
+    bool layoutChosen_;    // has the first-run layout picker been completed?
     bool loaded_;
 };
 
