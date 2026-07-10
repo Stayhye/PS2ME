@@ -1821,9 +1821,19 @@ char kbStickDigit(int dx, int dy) {
     return uy > 0 ? '2' : '8';
 }
 
+// Resolve the control layout a game will actually run under (per-game override, else the
+// global default), as 0 = SIMPLE / 1 = COMPLETE. game < 0 -> the global default.
+int effectiveLayout(int game) {
+    const int cl = (game >= 0) ? ControlLayouts::instance().indexFor(game)
+                               : (int)ControlLayouts::GLOBAL;
+    if (cl == ControlLayouts::SIMPLE)   return 0;
+    if (cl == ControlLayouts::COMPLETE) return 1;
+    return Settings::instance().controlLayout() == 1 ? 1 : 0;   // GLOBAL
+}
+
 } // namespace
 
-void Ps2Frontend::controlsGuide() {
+void Ps2Frontend::controlsGuide(int layout) {
     if (!ensureVideo()) {
         return;
     }
@@ -1841,7 +1851,7 @@ void Ps2Frontend::controlsGuide() {
         { 50,132}, {127,132}, {203,132},
         { 50,170}, {127,170}, {203,170},
         { 50,208}, {127,208}, {203,208},
-        { 54, 24}, {197, 23}, {126, 43},
+        { 54, 24}, {197, 23}, {129, 38},
     };
     int cx[15], cy[15];
     for (int i = 0; i < 15; ++i) {
@@ -1852,132 +1862,192 @@ void Ps2Frontend::controlsGuide() {
     const int chh = 16 * kbH / 256;
 
     hal::IPad* pad = hal::Keypad::instance().pad();
-    hal::PadButtons prev;
-    bool first = true;
+    // Exit on HOLD (not tap) so START itself stays testable: a quick press highlights it
+    // like any other button; holding it for HOLD_MS leaves. Arm only after START has been
+    // released once, so the press that opened the guide doesn't immediately count.
+    const unsigned HOLD_MS = 2000;
+    bool     armed = false;
+    unsigned holdBegin = 0;
 
     for (;;) {
         hal::PadButtons b;
         const bool ok = (pad != 0 && pad->ensureReady() && pad->read(&b));
+        const unsigned now = (unsigned)hal::SystemClock::instance().elapsedMillis();
+        unsigned heldMs = 0;
         if (ok) {
-            if (b.start && !prev.start && !first) {
-                // Swallow the release so the caller's poll doesn't re-open the guide.
-                while (pad->ensureReady() && pad->read(&prev) && prev.start) {
-                    // brief spin until START lifts
-                    memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
-                    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
-                    waitFrame();
-                }
-                break;
+            if (!b.start) {
+                armed = true;
+                holdBegin = 0;
+            } else if (armed) {
+                if (holdBegin == 0) holdBegin = now ? now : 1;
+                heldMs = now - holdBegin;
             }
-            prev  = b;
-            first = false;
         }
+        // When the hold completes, render THIS frame with the bar full (clamp), present it
+        // and leave at once -- no waiting for release (the caller ignores the held START).
+        const bool doExit = (heldMs >= HOLD_MS);
+        if (doExit) heldMs = HOLD_MS;
 
         // --- render -------------------------------------------------------------
         memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
         rectVGrad(0, 0, g_w, 34, 26, 42, 78, 14, 24, 50);
         for (int x = 0; x < g_w; ++x) plotA(x, 34, 60, 90, 140, 255);
-        drawTextVC(MARGIN, 17, "CONTROLS", 210, 228, 248, 18.0f);
+        drawTextVC(MARGIN, 17, layout == 1 ? "CONTROLS  -  COMPLETE"
+                                           : "CONTROLS  -  SIMPLE", 210, 228, 248, 18.0f);
 
         if (kb != 0) {
             blitKeyboard(kb, kw, kh, kx, ky, kbW, kbH);
         }
 
-        // Live highlights: light the key(s) each pressed button drives. The D-pad lights
-        // only the pressed ARM (not the whole cross), so the direction is unambiguous.
-        if (ok) {
-            const int DZ = 40;
-            const bool up    = b.up    || b.ly < 128 - DZ;
-            const bool down  = b.down  || b.ly > 128 + DZ;
-            const bool left  = b.left  || b.lx < 128 - DZ;
-            const bool right = b.right || b.lx > 128 + DZ;
-            bool on[12] = { false };
-            on[0] = b.l1;  on[2] = b.r1;  on[6] = b.l2;  on[8] = b.r2;         // 1 3 7 9
-            on[4] = b.cross || b.r3;                                           // 5
-            on[9] = b.square; on[10] = b.triangle; on[11] = b.circle;          // * 0 #
-            on[1] = up; on[7] = down; on[3] = left; on[5] = right;            // 2 8 4 6
-            const int rdx = b.rx - 128, rdy = b.ry - 128;
-            if (rdx * rdx + rdy * rdy > DZ * DZ) {
-                const char d = kbStickDigit(rdx, rdy);
-                if (d >= '1' && d <= '9') on[d - '1'] = true;
+        // Shared directional read (D-pad OR left stick) and D-pad arm offset.
+        const int DZ = 40;
+        const bool up    = ok && (b.up    || b.ly < 128 - DZ);
+        const bool down  = ok && (b.down  || b.ly > 128 + DZ);
+        const bool left  = ok && (b.left  || b.lx < 128 - DZ);
+        const bool right = ok && (b.right || b.lx > 128 + DZ);
+        const int dOff = (24 * kbW / 256) * 6 / 10;   // ~19 px
+
+        if (layout == 1) {
+            // ===== COMPLETE: full phone keypad =====
+            // Live highlights: light the key(s) each pressed button drives. The D-pad
+            // lights only the pressed ARM, so the direction is unambiguous.
+            if (ok) {
+                bool on[12] = { false };
+                on[0] = b.l1;  on[2] = b.r1;  on[6] = b.l2;  on[8] = b.r2;     // 1 3 7 9
+                on[4] = b.cross || b.r3;                                       // 5
+                on[9] = b.square; on[10] = b.triangle; on[11] = b.circle;      // * 0 #
+                on[1] = up; on[7] = down; on[3] = left; on[5] = right;        // 2 8 4 6
+                const int rdx = b.rx - 128, rdy = b.ry - 128;
+                if (rdx * rdx + rdy * rdy > DZ * DZ) {
+                    const char d = kbStickDigit(rdx, rdy);
+                    if (d >= '1' && d <= '9') on[d - '1'] = true;
+                }
+                for (int i = 0; i < 12; ++i) {
+                    if (on[i]) kbHilite(cx[i], cy[i], chw, chh);
+                }
+                if (b.select) kbHilite(cx[12], cy[12], chw - 2, 8);
+                if (b.start)  kbHilite(cx[13], cy[13], chw - 2, 8);
+                if (up)    kbHilite(cx[14], cy[14] - dOff, 6, 6);
+                if (down)  kbHilite(cx[14], cy[14] + dOff, 6, 6);
+                if (left)  kbHilite(cx[14] - dOff, cy[14], 6, 6);
+                if (right) kbHilite(cx[14] + dOff, cy[14], 6, 6);
             }
+            // Static DS2 markers, centred in each key's top strip (uniform anchor).
             for (int i = 0; i < 12; ++i) {
-                if (on[i]) kbHilite(cx[i], cy[i], chw, chh);
+                const int ax = cx[i], ay = cy[i] - chh + 2;
+                switch (i) {
+                    case 4:  glyphCross   (ax, ay, 6, 120, 160, 235); break;   // 5 = Cross
+                    case 9:  glyphSquare  (ax, ay, 6, 230, 112, 190); break;   // * = Square
+                    case 10: glyphTriangle(ax, ay, 6,  92, 216, 150); break;   // 0 = Triangle
+                    case 11: glyphCircle  (ax, ay, 6, 235,  92,  92); break;   // # = Circle
+                    case 1:  fillTriangle(ax, ay - 5, ax - 4, ay + 3, ax + 4, ay + 3, 150, 210, 245); break; // 2 up
+                    case 7:  fillTriangle(ax - 4, ay - 3, ax + 4, ay - 3, ax, ay + 5, 150, 210, 245); break; // 8 down
+                    case 3:  fillTriangle(ax - 5, ay, ax + 3, ay - 4, ax + 3, ay + 4, 150, 210, 245); break; // 4 left
+                    case 5:  fillTriangle(ax + 5, ay, ax - 3, ay - 4, ax - 3, ay + 4, 150, 210, 245); break; // 6 right
+                    case 0:  drawTextVC(ax - textWidth("L1", 11.0f) / 2, ay, "L1", 200, 220, 245, 11.0f); break;
+                    case 2:  drawTextVC(ax - textWidth("R1", 11.0f) / 2, ay, "R1", 200, 220, 245, 11.0f); break;
+                    case 6:  drawTextVC(ax - textWidth("L2", 11.0f) / 2, ay, "L2", 200, 220, 245, 11.0f); break;
+                    case 8:  drawTextVC(ax - textWidth("R2", 11.0f) / 2, ay, "R2", 200, 220, 245, 11.0f); break;
+                }
             }
-            // Soft keys: a wide, short glow over the trace.
-            if (b.select) kbHilite(cx[12], cy[12], chw - 2, 8);
-            if (b.start)  kbHilite(cx[13], cy[13], chw - 2, 8);
-            // D-pad: glow only the pressed arm, shifted off-centre in that direction.
-            const int dOff = (24 * kbW / 256) * 6 / 10;
-            if (up)    kbHilite(cx[14], cy[14] - dOff, 6, 6);
-            if (down)  kbHilite(cx[14], cy[14] + dOff, 6, 6);
-            if (left)  kbHilite(cx[14] - dOff, cy[14], 6, 6);
-            if (right) kbHilite(cx[14] + dOff, cy[14], 6, 6);
+            drawTextVC(cx[12] - textWidth("SELECT", 11.0f) / 2, cy[12], "SELECT", 190, 214, 240, 11.0f);
+            drawTextVC(cx[13] - textWidth("START",  11.0f) / 2, cy[13], "START",  190, 214, 240, 11.0f);
+
+            // Legend.
+            int lx = kx + kbW + 22, ly = ky + 6;
+            drawText(lx, ly, "MAPPING", 150, 185, 220, 14.0f); ly += 26;
+            const int gx = lx + 8, tx = lx + 22, vx = lx + 150;
+            glyphCross(gx, ly + 6, 6, 120, 160, 235);
+            drawText(tx, ly, "Cross", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "5 / Fire", 160, 195, 235, 13.0f); ly += 22;
+            glyphSquare(gx, ly + 6, 6, 230, 112, 190);
+            drawText(tx, ly, "Square", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "*", 160, 195, 235, 13.0f); ly += 22;
+            glyphTriangle(gx, ly + 6, 6, 92, 216, 150);
+            drawText(tx, ly, "Triangle", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "0", 160, 195, 235, 13.0f); ly += 22;
+            glyphCircle(gx, ly + 6, 6, 235, 92, 92);
+            drawText(tx, ly, "Circle", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "#", 160, 195, 235, 13.0f); ly += 24;
+            drawText(lx, ly, "L1 R1 L2 R2", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "1 3 7 9", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "Select / Start", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Soft 1/2", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "D-pad / L-stick", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Arrows", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "R-stick", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Numpad aim", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "R3", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "5", 160, 195, 235, 13.0f);
+        } else {
+            // ===== SIMPLE: only the D-pad (arrows), Cross (fire) and L1/R1 (soft keys) =====
+            const int dcx = cx[14], dcy = cy[14];
+            // Arrow reach onto the D-pad arms. The raised face (measured) is x[103,150],
+            // y[21,61] -> half ~32 px wide / ~27 px tall on screen; keep the arrows inside
+            // it so they don't touch the rims. The live glows sit at the same spots.
+            const int dax = 24, day = 19;
+            // Dim the whole numpad + face keys to signal "unused in this layout".
+            for (int i = 0; i < 12; ++i) {
+                roundRectFillA(cx[i] - chw, cy[i] - chh, 2 * chw, 2 * chh, 8, 8, 12, 22, 150);
+            }
+            // Live highlights.
+            if (ok) {
+                if (up)    kbHilite(dcx, dcy - day, 6, 6);
+                if (down)  kbHilite(dcx, dcy + day, 6, 6);
+                if (left)  kbHilite(dcx - dax, dcy, 6, 6);
+                if (right) kbHilite(dcx + dax, dcy, 6, 6);
+                if (b.cross) kbHilite(dcx, dcy, 7, 7);                 // fire (D-pad centre)
+                if (b.l1) kbHilite(cx[12], cy[12], chw - 2, 8);
+                if (b.r1) kbHilite(cx[13], cy[13], chw - 2, 8);
+            }
+            // Static markers: arrows out on the four arms, Cross (fire) in the centre.
+            fillTriangle(dcx, dcy - day - 4, dcx - 5, dcy - day + 3, dcx + 5, dcy - day + 3, 150, 210, 245);
+            fillTriangle(dcx - 5, dcy + day - 3, dcx + 5, dcy + day - 3, dcx, dcy + day + 4, 150, 210, 245);
+            fillTriangle(dcx - dax - 4, dcy, dcx - dax + 3, dcy - 5, dcx - dax + 3, dcy + 5, 150, 210, 245);
+            fillTriangle(dcx + dax + 4, dcy, dcx + dax - 3, dcy - 5, dcx + dax - 3, dcy + 5, 150, 210, 245);
+            glyphCross(dcx, dcy, 7, 120, 160, 235);                    // Cross = Fire
+            // Soft keys: the trace IS the button; label it just above (the short "L1"/"R1"
+            // centred ON the wider trace read as misaligned, so caption it instead).
+            drawTextVC(cx[12] - textWidth("L1", 11.0f) / 2, cy[12] - 12, "L1", 200, 220, 245, 11.0f);
+            drawTextVC(cx[13] - textWidth("R1", 11.0f) / 2, cy[13] - 12, "R1", 200, 220, 245, 11.0f);
+
+            // Legend.
+            int lx = kx + kbW + 22, ly = ky + 6;
+            drawText(lx, ly, "MAPPING", 150, 185, 220, 14.0f); ly += 26;
+            const int gx = lx + 8, tx = lx + 22, vx = lx + 150;
+            drawText(lx, ly, "D-pad / L-stick", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Arrows", 160, 195, 235, 13.0f); ly += 22;
+            glyphCross(gx, ly + 6, 6, 120, 160, 235);
+            drawText(tx, ly, "Cross", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Fire", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "L1", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Soft 1", 160, 195, 235, 13.0f); ly += 22;
+            drawText(lx, ly, "R1", 220, 230, 245, 13.0f);
+            drawText(vx, ly, "Soft 2", 160, 195, 235, 13.0f); ly += 26;
+            drawText(lx, ly, "Other buttons", 150, 175, 205, 12.0f);
+            drawText(vx, ly, "unused", 150, 175, 205, 12.0f);
         }
 
-        // Static DS2 markers: every label centred horizontally on its key, in the top
-        // strip above the digit -- a uniform anchor for all keys (the printed digit sits
-        // on a different side per column, so a top-centre badge avoids collisions).
-        for (int i = 0; i < 12; ++i) {
-            const int ax = cx[i], ay = cy[i] - chh + 2;
-            switch (i) {
-                case 4:  glyphCross   (ax, ay, 6, 120, 160, 235); break;   // 5 = Cross
-                case 9:  glyphSquare  (ax, ay, 6, 230, 112, 190); break;   // * = Square
-                case 10: glyphTriangle(ax, ay, 6,  92, 216, 150); break;   // 0 = Triangle
-                case 11: glyphCircle  (ax, ay, 6, 235,  92,  92); break;   // # = Circle
-                case 1:  fillTriangle(ax, ay - 5, ax - 4, ay + 3, ax + 4, ay + 3, 150, 210, 245); break; // 2 up
-                case 7:  fillTriangle(ax - 4, ay - 3, ax + 4, ay - 3, ax, ay + 5, 150, 210, 245); break; // 8 down
-                case 3:  fillTriangle(ax - 5, ay, ax + 3, ay - 4, ax + 3, ay + 4, 150, 210, 245); break; // 4 left
-                case 5:  fillTriangle(ax + 5, ay, ax - 3, ay - 4, ax - 3, ay + 4, 150, 210, 245); break; // 6 right
-                case 0:  drawTextVC(ax - textWidth("L1", 11.0f) / 2, ay, "L1", 200, 220, 245, 11.0f); break;
-                case 2:  drawTextVC(ax - textWidth("R1", 11.0f) / 2, ay, "R1", 200, 220, 245, 11.0f); break;
-                case 6:  drawTextVC(ax - textWidth("L2", 11.0f) / 2, ay, "L2", 200, 220, 245, 11.0f); break;
-                case 8:  drawTextVC(ax - textWidth("R2", 11.0f) / 2, ay, "R2", 200, 220, 245, 11.0f); break;
-            }
-        }
-        // Soft keys: centred text label over each trace (uniform with the numpad marks).
-        drawTextVC(cx[12] - textWidth("SELECT", 11.0f) / 2, cy[12], "SELECT", 190, 214, 240, 11.0f);
-        drawTextVC(cx[13] - textWidth("START",  11.0f) / 2, cy[13], "START",  190, 214, 240, 11.0f);
-
-        // Right-hand legend.
-        int lx = kx + kbW + 22, ly = ky + 6;
-        drawText(lx, ly, "MAPPING", 150, 185, 220, 14.0f); ly += 26;
-        const int gx = lx + 8, tx = lx + 22, vx = lx + 150;
-        glyphCross(gx, ly + 6, 6, 120, 160, 235);
-        drawText(tx, ly, "Cross", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "5 / Fire", 160, 195, 235, 13.0f); ly += 22;
-        glyphSquare(gx, ly + 6, 6, 230, 112, 190);
-        drawText(tx, ly, "Square", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "*", 160, 195, 235, 13.0f); ly += 22;
-        glyphTriangle(gx, ly + 6, 6, 92, 216, 150);
-        drawText(tx, ly, "Triangle", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "0", 160, 195, 235, 13.0f); ly += 22;
-        glyphCircle(gx, ly + 6, 6, 235, 92, 92);
-        drawText(tx, ly, "Circle", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "#", 160, 195, 235, 13.0f); ly += 24;
-        drawText(lx, ly, "L1 R1 L2 R2", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "1 3 7 9", 160, 195, 235, 13.0f); ly += 22;
-        drawText(lx, ly, "Select / Start", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "Soft 1/2", 160, 195, 235, 13.0f); ly += 22;
-        drawText(lx, ly, "D-pad / L-stick", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "Arrows", 160, 195, 235, 13.0f); ly += 22;
-        drawText(lx, ly, "R-stick", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "Numpad aim", 160, 195, 235, 13.0f); ly += 22;
-        drawText(lx, ly, "R3", 220, 230, 245, 13.0f);
-        drawText(vx, ly, "5", 160, 195, 235, 13.0f);
-
-        // Footer hint.
+        // Footer hint + hold-to-exit progress (fills the footer's top hairline as START
+        // is held; START stays free to test with a quick press).
         rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
         for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);
         drawTextVC(MARGIN, FOOTER_Y + FOOTER_H / 2,
                    "Press any button to test the mapping", 190, 210, 235, 14.0f);
         {
-            const char* back = "START: BACK";
+            const char* back = "HOLD START: EXIT";
             drawTextVC(g_w - MARGIN - textWidth(back, 14.0f), FOOTER_Y + FOOTER_H / 2,
-                       back, 190, 210, 235, 14.0f);
+                       back, heldMs > 0 ? 130 : 190, heldMs > 0 ? 225 : 210, 255, 14.0f);
+        }
+        if (heldMs > 0) {
+            int fw = (int)((unsigned long long)g_w * heldMs / HOLD_MS);
+            if (fw > g_w) fw = g_w;
+            for (int yy = FOOTER_Y; yy <= FOOTER_Y + 2; ++yy)
+                for (int x = 0; x < fw; ++x) plotA(x, yy, 120, 225, 255, 255);
         }
 
         GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+        if (doExit) break;   // the full-bar frame is on screen now -- return immediately
         waitFrame();
     }
 
@@ -2137,6 +2207,7 @@ int Ps2Frontend::pick() {
     int  settingsSel = 0;         // highlighted SETTINGS row
     int  lastSettingsSel = -1;
     bool firstFrame = true;
+    bool startStuck = false;      // ignore a START still held after the controls guide exits
     hal::PadButtons prev;         // all-false initial snapshot
     rebuildView(activeTab, count);   // initial view (all games)
 
@@ -2180,11 +2251,17 @@ int Ps2Frontend::pick() {
                     selected = 0; topRow = 0; settingsSel = 0;
                 }
             }
-            // START (from anywhere): open the controls guide / live tester, then repaint
-            // the menu over its last frame on return.
-            if (b.start && !prev.start) {
-                controlsGuide();
+            // START (from anywhere): open the controls guide / live tester for the layout
+            // in effect -- the selected game's (grid) or the global default -- then repaint
+            // the menu over its last frame on return. The guide exits on a held START, so
+            // ignore that still-down START here until it is released (startStuck).
+            if (!b.start) startStuck = false;
+            if (b.start && !prev.start && !startStuck) {
+                const int g = ((activeTab == 0 || activeTab == 1) && g_viewCount > 0)
+                                  ? g_view[selected] : -1;
+                controlsGuide(effectiveLayout(g));
                 firstFrame = true;
+                startStuck = true;
             }
             if (activeTab == 2) {
                 // Settings navigation: up/down move; cross activates the row.
@@ -2217,7 +2294,8 @@ int Ps2Frontend::pick() {
                         }
                         case 7: Settings::instance().setControlLayout(
                                     Settings::instance().controlLayout() ^ 1); break;
-                        case 8: controlsGuide(); break;   // open the guide / live tester
+                        case 8: controlsGuide(effectiveLayout(-1));           // global layout
+                                startStuck = true; break;   // swallow the held START on exit
                     }
                     settingsChanged = true;
                 }
