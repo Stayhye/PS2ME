@@ -331,7 +331,10 @@ void GsDisplay::showSplash(const u16* rgba5551, int w, int h) {
     // Three-phase envelope (frames at ~60 Hz fields): ease-in-out fade in, hold, ease-in-
     // out fade out. MODULATE means out = texel * colour / 0x80, so a colour of 0..0x80
     // fades the image from black to full brightness and back.
-    const int FADE_IN = 24, HOLD = 45, FADE_OUT = 24;   // ~0.4s / 0.75s / 0.4s
+    // The video signal only comes up HERE (ensureVideo on the splash), so on real hardware
+    // the TV/monitor is often still syncing when the splash starts -- a short hold vanished
+    // before any image appeared. Hold at full brightness long enough for the display to wake.
+    const int FADE_IN = 24, HOLD = 180, FADE_OUT = 24;   // ~0.4s / ~3.0s / 0.4s
     const int TOTAL = FADE_IN + HOLD + FADE_OUT;
     for (int f = 0; f <= TOTAL; ++f) {
         float a;
