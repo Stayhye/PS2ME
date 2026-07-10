@@ -29,6 +29,13 @@ public:
     /// before the first pick(). Touches no VM; a no-op if video can't come up.
     void splash();
 
+    /// Controls guide + live tester: decode the embedded on-screen keyboard, overlay the
+    /// DualShock 2 mapping (which pad button drives each phone key) and, reading the pad
+    /// live, highlight each key as its button is pressed. Blocks until START. Reuses the
+    /// menu's video/raster/pad, so it is only valid while pick() is running (its vsync
+    /// pacing must be installed). Touches no VM.
+    void controlsGuide();
+
     /// Begin/end the debug overlay (developer view, shown only with "Debug mode" on).
     /// logEnable(true) starts the split view directly (game left, full app log right) --
     /// see debugPresent(); it clears the rolling log and paints the initial "loading"

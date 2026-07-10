@@ -60,6 +60,10 @@
 // shown full-screen with a fade before the menu. -I<repo>/assets.
 #include "splash_png.h"
 
+// Embedded on-screen keyboard (assets/keyboard.png -> byte array). Decoded by
+// controlsGuide() to render the DualShock 2 mapping + live button tester. -I<repo>/assets.
+#include "keyboard_png.h"
+
 namespace ps2 {
 namespace platform {
 
@@ -1139,7 +1143,7 @@ void drawContentMessage(const char* msg) {
     drawTextVC(left + (right - left - w) / 2, cy, msg, 150, 185, 220, 18.0f);
 }
 
-const int SETTINGS_COUNT = 8;
+const int SETTINGS_COUNT = 9;
 
 // The SETTINGS tab: a vertical list of options (actions + toggles). @p sel is the
 // highlighted row. The list scrolls: only the rows that fit at a comfortable size are
@@ -1202,6 +1206,9 @@ void drawSettings(int sel) {
             case 7: label = "Control layout";
                     snprintf(value, sizeof(value), "%s",
                              Settings::instance().controlLayout() == 1 ? "Complete" : "Simple");
+                    break;
+            case 8: label = "Controls guide";
+                    snprintf(value, sizeof(value), "%s", "View");
                     break;
         }
         const int cy = y + rowH / 2;
@@ -1778,6 +1785,207 @@ void Ps2Frontend::splash() {
     GsDisplay::instance().showSplash(g_ras, g_w, g_h);
 }
 
+namespace {
+
+// Scale-and-blit the decoded RGBA keyboard into the raster at (dx,dy) sized dw x dh,
+// nearest-sampled, honouring the source alpha (the asset's rounded corners are
+// transparent, so the panelled background shows through).
+void blitKeyboard(const unsigned char* rgba, int kw, int kh, int dx, int dy, int dw, int dh) {
+    for (int y = 0; y < dh; ++y) {
+        int sy = y * kh / dh; if (sy >= kh) sy = kh - 1;
+        const int ty = dy + y;
+        if ((unsigned)ty >= (unsigned)g_h) continue;
+        const unsigned char* srow = rgba + (size_t)sy * kw * 4;
+        for (int x = 0; x < dw; ++x) {
+            int sx = x * kw / dw; if (sx >= kw) sx = kw - 1;
+            const unsigned char* s = srow + (size_t)sx * 4;
+            const int a = s[3];
+            if (a > 4) plotA(dx + x, ty, s[0], s[1], s[2], a);
+        }
+    }
+}
+
+// A translucent cyan glow over one key cell -- the live "this button is pressed" cue.
+void kbHilite(int cx, int cy, int hw, int hh) {
+    roundRectFillA(cx - hw - 4, cy - hh - 4, 2 * hw + 8, 2 * hh + 8, 9,  90, 215, 255,  60);
+    roundRectFillA(cx - hw - 1, cy - hh - 1, 2 * hw + 2, 2 * hh + 2, 8, 150, 235, 255, 130);
+}
+
+// Right-stick offset (screen +y down) -> phone numpad digit by compass sector, matching
+// the Keypad's COMPLETE mapping (N=2 S=8 E=6 W=4, NW=1 NE=3 SW=7 SE=9). 0 if centred.
+char kbStickDigit(int dx, int dy) {
+    const int uy = -dy, ax = dx < 0 ? -dx : dx, ay = uy < 0 ? -uy : uy;
+    const bool diag = (ax * 1000 > ay * 414) && (ay * 1000 > ax * 414);
+    if (diag) return (uy > 0) ? (dx > 0 ? '3' : '1') : (dx > 0 ? '9' : '7');
+    if (ax > ay) return dx > 0 ? '6' : '4';
+    return uy > 0 ? '2' : '8';
+}
+
+} // namespace
+
+void Ps2Frontend::controlsGuide() {
+    if (!ensureVideo()) {
+        return;
+    }
+    int kw = 0, kh = 0;
+    unsigned char* kb = MidletIcon::decodePng(g_keyboard_png, (int)g_keyboard_png_len, &kw, &kh);
+
+    // Keyboard placement + per-key anchor table, in the asset's 256x256 space. Centres were
+    // measured from keyboard.png (groove/centroid analysis), not eyeballed: columns at
+    // x=50/127/203, rows at y=95/132/170/208, soft keys and D-pad located directly.
+    const int kbW = 344, kbH = 344, kx = 26, ky = 52;
+    struct Spot { int ix, iy; };
+    // 0..11 = 1 2 3 / 4 5 6 / 7 8 9 / * 0 # ; 12 = left soft, 13 = right soft, 14 = D-pad.
+    const Spot spot[15] = {
+        { 50, 95}, {127, 95}, {203, 95},
+        { 50,132}, {127,132}, {203,132},
+        { 50,170}, {127,170}, {203,170},
+        { 50,208}, {127,208}, {203,208},
+        { 54, 24}, {197, 23}, {126, 43},
+    };
+    int cx[15], cy[15];
+    for (int i = 0; i < 15; ++i) {
+        cx[i] = kx + spot[i].ix * kbW / 256;
+        cy[i] = ky + spot[i].iy * kbH / 256;
+    }
+    const int chw = 31 * kbW / 256;   // key cell half-extents on screen (~42 x 21)
+    const int chh = 16 * kbH / 256;
+
+    hal::IPad* pad = hal::Keypad::instance().pad();
+    hal::PadButtons prev;
+    bool first = true;
+
+    for (;;) {
+        hal::PadButtons b;
+        const bool ok = (pad != 0 && pad->ensureReady() && pad->read(&b));
+        if (ok) {
+            if (b.start && !prev.start && !first) {
+                // Swallow the release so the caller's poll doesn't re-open the guide.
+                while (pad->ensureReady() && pad->read(&prev) && prev.start) {
+                    // brief spin until START lifts
+                    memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
+                    GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+                    waitFrame();
+                }
+                break;
+            }
+            prev  = b;
+            first = false;
+        }
+
+        // --- render -------------------------------------------------------------
+        memcpy(g_ras, g_bg, (size_t)g_w * g_h * sizeof(u16));
+        rectVGrad(0, 0, g_w, 34, 26, 42, 78, 14, 24, 50);
+        for (int x = 0; x < g_w; ++x) plotA(x, 34, 60, 90, 140, 255);
+        drawTextVC(MARGIN, 17, "CONTROLS", 210, 228, 248, 18.0f);
+
+        if (kb != 0) {
+            blitKeyboard(kb, kw, kh, kx, ky, kbW, kbH);
+        }
+
+        // Live highlights: light the key(s) each pressed button drives. The D-pad lights
+        // only the pressed ARM (not the whole cross), so the direction is unambiguous.
+        if (ok) {
+            const int DZ = 40;
+            const bool up    = b.up    || b.ly < 128 - DZ;
+            const bool down  = b.down  || b.ly > 128 + DZ;
+            const bool left  = b.left  || b.lx < 128 - DZ;
+            const bool right = b.right || b.lx > 128 + DZ;
+            bool on[12] = { false };
+            on[0] = b.l1;  on[2] = b.r1;  on[6] = b.l2;  on[8] = b.r2;         // 1 3 7 9
+            on[4] = b.cross || b.r3;                                           // 5
+            on[9] = b.square; on[10] = b.triangle; on[11] = b.circle;          // * 0 #
+            on[1] = up; on[7] = down; on[3] = left; on[5] = right;            // 2 8 4 6
+            const int rdx = b.rx - 128, rdy = b.ry - 128;
+            if (rdx * rdx + rdy * rdy > DZ * DZ) {
+                const char d = kbStickDigit(rdx, rdy);
+                if (d >= '1' && d <= '9') on[d - '1'] = true;
+            }
+            for (int i = 0; i < 12; ++i) {
+                if (on[i]) kbHilite(cx[i], cy[i], chw, chh);
+            }
+            // Soft keys: a wide, short glow over the trace.
+            if (b.select) kbHilite(cx[12], cy[12], chw - 2, 8);
+            if (b.start)  kbHilite(cx[13], cy[13], chw - 2, 8);
+            // D-pad: glow only the pressed arm, shifted off-centre in that direction.
+            const int dOff = (24 * kbW / 256) * 6 / 10;
+            if (up)    kbHilite(cx[14], cy[14] - dOff, 6, 6);
+            if (down)  kbHilite(cx[14], cy[14] + dOff, 6, 6);
+            if (left)  kbHilite(cx[14] - dOff, cy[14], 6, 6);
+            if (right) kbHilite(cx[14] + dOff, cy[14], 6, 6);
+        }
+
+        // Static DS2 markers: every label centred horizontally on its key, in the top
+        // strip above the digit -- a uniform anchor for all keys (the printed digit sits
+        // on a different side per column, so a top-centre badge avoids collisions).
+        for (int i = 0; i < 12; ++i) {
+            const int ax = cx[i], ay = cy[i] - chh + 2;
+            switch (i) {
+                case 4:  glyphCross   (ax, ay, 6, 120, 160, 235); break;   // 5 = Cross
+                case 9:  glyphSquare  (ax, ay, 6, 230, 112, 190); break;   // * = Square
+                case 10: glyphTriangle(ax, ay, 6,  92, 216, 150); break;   // 0 = Triangle
+                case 11: glyphCircle  (ax, ay, 6, 235,  92,  92); break;   // # = Circle
+                case 1:  fillTriangle(ax, ay - 5, ax - 4, ay + 3, ax + 4, ay + 3, 150, 210, 245); break; // 2 up
+                case 7:  fillTriangle(ax - 4, ay - 3, ax + 4, ay - 3, ax, ay + 5, 150, 210, 245); break; // 8 down
+                case 3:  fillTriangle(ax - 5, ay, ax + 3, ay - 4, ax + 3, ay + 4, 150, 210, 245); break; // 4 left
+                case 5:  fillTriangle(ax + 5, ay, ax - 3, ay - 4, ax - 3, ay + 4, 150, 210, 245); break; // 6 right
+                case 0:  drawTextVC(ax - textWidth("L1", 11.0f) / 2, ay, "L1", 200, 220, 245, 11.0f); break;
+                case 2:  drawTextVC(ax - textWidth("R1", 11.0f) / 2, ay, "R1", 200, 220, 245, 11.0f); break;
+                case 6:  drawTextVC(ax - textWidth("L2", 11.0f) / 2, ay, "L2", 200, 220, 245, 11.0f); break;
+                case 8:  drawTextVC(ax - textWidth("R2", 11.0f) / 2, ay, "R2", 200, 220, 245, 11.0f); break;
+            }
+        }
+        // Soft keys: centred text label over each trace (uniform with the numpad marks).
+        drawTextVC(cx[12] - textWidth("SELECT", 11.0f) / 2, cy[12], "SELECT", 190, 214, 240, 11.0f);
+        drawTextVC(cx[13] - textWidth("START",  11.0f) / 2, cy[13], "START",  190, 214, 240, 11.0f);
+
+        // Right-hand legend.
+        int lx = kx + kbW + 22, ly = ky + 6;
+        drawText(lx, ly, "MAPPING", 150, 185, 220, 14.0f); ly += 26;
+        const int gx = lx + 8, tx = lx + 22, vx = lx + 150;
+        glyphCross(gx, ly + 6, 6, 120, 160, 235);
+        drawText(tx, ly, "Cross", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "5 / Fire", 160, 195, 235, 13.0f); ly += 22;
+        glyphSquare(gx, ly + 6, 6, 230, 112, 190);
+        drawText(tx, ly, "Square", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "*", 160, 195, 235, 13.0f); ly += 22;
+        glyphTriangle(gx, ly + 6, 6, 92, 216, 150);
+        drawText(tx, ly, "Triangle", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "0", 160, 195, 235, 13.0f); ly += 22;
+        glyphCircle(gx, ly + 6, 6, 235, 92, 92);
+        drawText(tx, ly, "Circle", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "#", 160, 195, 235, 13.0f); ly += 24;
+        drawText(lx, ly, "L1 R1 L2 R2", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "1 3 7 9", 160, 195, 235, 13.0f); ly += 22;
+        drawText(lx, ly, "Select / Start", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "Soft 1/2", 160, 195, 235, 13.0f); ly += 22;
+        drawText(lx, ly, "D-pad / L-stick", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "Arrows", 160, 195, 235, 13.0f); ly += 22;
+        drawText(lx, ly, "R-stick", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "Numpad aim", 160, 195, 235, 13.0f); ly += 22;
+        drawText(lx, ly, "R3", 220, 230, 245, 13.0f);
+        drawText(vx, ly, "5", 160, 195, 235, 13.0f);
+
+        // Footer hint.
+        rectVGrad(0, FOOTER_Y, g_w, FOOTER_H, 26, 42, 78, 14, 24, 50);
+        for (int x = 0; x < g_w; ++x) plotA(x, FOOTER_Y, 60, 90, 140, 255);
+        drawTextVC(MARGIN, FOOTER_Y + FOOTER_H / 2,
+                   "Press any button to test the mapping", 190, 210, 235, 14.0f);
+        {
+            const char* back = "START: BACK";
+            drawTextVC(g_w - MARGIN - textWidth(back, 14.0f), FOOTER_Y + FOOTER_H / 2,
+                       back, 190, 210, 235, 14.0f);
+        }
+
+        GsDisplay::instance().presentFullscreen(g_ras, g_w, g_h);
+        waitFrame();
+    }
+
+    if (kb != 0) {
+        MidletIcon::release(kb);
+    }
+}
+
 void Ps2Frontend::logEnable(bool on) {
     if (on) {
         // Begin the debug split view straight away (no fullscreen trace step): clear the
@@ -1972,6 +2180,12 @@ int Ps2Frontend::pick() {
                     selected = 0; topRow = 0; settingsSel = 0;
                 }
             }
+            // START (from anywhere): open the controls guide / live tester, then repaint
+            // the menu over its last frame on return.
+            if (b.start && !prev.start) {
+                controlsGuide();
+                firstFrame = true;
+            }
             if (activeTab == 2) {
                 // Settings navigation: up/down move; cross activates the row.
                 if (b.up   && !prev.up   && settingsSel > 0)                   { settingsSel--; }
@@ -2003,6 +2217,7 @@ int Ps2Frontend::pick() {
                         }
                         case 7: Settings::instance().setControlLayout(
                                     Settings::instance().controlLayout() ^ 1); break;
+                        case 8: controlsGuide(); break;   // open the guide / live tester
                     }
                     settingsChanged = true;
                 }
