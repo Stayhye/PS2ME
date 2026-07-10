@@ -346,4 +346,54 @@ grep -q 'ps2-rmfs-iter-rewind' "$RMFS_API_H" || \
 void rmfsRewindFileStartWith(void); /* ps2-rmfs-iter-rewind */' \
       "$RMFS_API_H"
 
+# 26) ps2me-profile: opt-in bytecode-throughput counter for the interpreter perf
+#     front (FASE 1). Adds a per-bytecode tick in the C interpreter's dispatch loop,
+#     compiled in ONLY under -DPS2ME_PROFILE (jvm.make hook in 26b), and dumps the total
+#     to stderr on exit. Off by default -> production builds (PS2 and host) are byte-
+#     identical to before. Used by docker/phoneme-cross/build-host-bench.sh to measure
+#     interpreter throughput (bytecodes/s) on the linux_c host twin. The C block is
+#     inserted verbatim via sed 'r' (a tmpfile) to avoid escaping the fprintf format.
+#     Idempotent (guarded by the ps2me_profile_dump marker).
+INTERP="$PHONEME/cldc/src/vm/cpu/c/Interpreter_c.cpp"
+if ! grep -q 'ps2me_profile_dump' "$INTERP"; then
+  TMP_PROF=$(mktemp)
+  cat > "$TMP_PROF" <<'PS2ME_PROF_EOF'
+
+  /* ps2me-profile: opt-in bytecode-throughput counter (PS2ME perf front, FASE 1).
+     Compiled in only under -DPS2ME_PROFILE (see jvm.make PS2ME_PROFILE hook), so a
+     production build carries ZERO overhead. Counts one tick per dispatched bytecode
+     in the interpreter loop; the total is dumped to stderr on process exit. Bytecode
+     COUNT is deterministic for a fixed .class, so N is measured once with a profile
+     build and time T on a clean build -> bytecodes/s = N/T. */
+#ifdef PS2ME_PROFILE
+#include <stdio.h>
+  jlong ps2me_bc_count = 0;
+#define PS2ME_BC_TICK() (ps2me_bc_count++)
+  __attribute__((destructor)) static void ps2me_profile_dump(void) {
+    fprintf(stderr, "[PS2ME_PROFILE] bytecodes=%lld\n", (long long)ps2me_bc_count);
+  }
+#else
+#define PS2ME_BC_TICK() ((void)0)
+#endif
+PS2ME_PROF_EOF
+  sed -i "/static func_t interpreter_dispatch_table\[256+WIDE_OFFSET\];/r $TMP_PROF" "$INTERP"
+  rm -f "$TMP_PROF"
+  # Prefix the two dispatch-loop calls with the tick (indent preserved).
+  sed -i 's/^\( *\)interpreter_dispatch_table\[\*g_jpc\]();/\1PS2ME_BC_TICK(); interpreter_dispatch_table[*g_jpc]();/' \
+      "$INTERP"
+fi
+
+# 26b) jvm.make hook: compile -DPS2ME_PROFILE when the make var PS2ME_PROFILE=true
+#      (mirrors the stock PROFILING/-pg hook). Inert unless the var is set, so normal
+#      builds are unaffected. jvm.make is CRLF; the inserted lines are LF (make accepts
+#      them) and the anchor has no $ so CRLF does not matter. Idempotent.
+JVMMAKE="$PHONEME/cldc/build/share/jvm.make"
+grep -q 'PS2ME_PROFILE' "$JVMMAKE" || \
+  sed -i '/# We want 32-bit assembly/i\
+# ps2me-profile: opt-in bytecode-throughput counter (PS2ME perf front, FASE 1).\
+ifeq ($(PS2ME_PROFILE), true)\
+CPP_FLAGS              += -DPS2ME_PROFILE\
+endif\
+' "$JVMMAKE"
+
 echo "phoneME patches applied to: $PHONEME"
