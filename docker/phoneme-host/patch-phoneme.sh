@@ -20,13 +20,25 @@ sed -i 's/^CPP_FLAGS[[:space:]]*+=[[:space:]]*-Werror/# CPP_FLAGS += -Werror  (d
 sed -i 's/CPP_DEF_FLAGS[[:space:]]*+=[[:space:]]*-fstrict-aliasing/CPP_DEF_FLAGS += -fno-strict-aliasing/' \
     "$PHONEME/cldc/build/share/jvm.make"
 
-# 3) THE romizer fix: romgen SIGSEGVs deterministically at addr 0x50 during class
-#    romization when built at -O2 with modern gcc (the 2009 VM has undefined
-#    behaviour that gcc 12's optimizer exploits). -O0 makes romgen run correctly
-#    (confirmed: "Loading classes...Done!"). Build the VM at -O0.
-#    NOTE: -O0 also slows the final cldc_vm; narrow this to the minimal -fno-* set
-#    (or build only romgen at -O0) once the exact miscompiled pass is identified.
-sed -i 's/-O2 /-O0 /g' "$PHONEME/cldc/build/share/jvm.make"
+# 3) THE romizer fix (ROOT CAUSE, pinned with UBSan): the 2009 VM relies on signed-integer
+#    overflow wrapping around. During a GC, ObjectHeap::compute_new_object_locations negates
+#    INT_MIN and forms 1<<31 (ObjectHeap.cpp:2737) -- signed-overflow UB. Modern gcc's -O2
+#    optimizer assumes signed overflow never happens and miscompiles the surrounding code, so
+#    romgen SIGSEGVs (at 0x50) mid-romization. The OLD fix was -O0 everywhere, which also
+#    crippled the target interpreter (~5x slower -> games ran at ~6 FPS vs ~30 elsewhere).
+#    Real fix: keep -O2 and add -fwrapv, which DEFINES signed overflow as two's-complement
+#    wraparound -- exactly the semantics the code assumes. UBSan-verified: romgen romizes
+#    cleanly at -O2 -fwrapv (was: deterministic SIGSEGV). This restores full -O2 speed on the
+#    target VM. (-fno-strict-aliasing from #2 covers the other UB class; both are needed.)
+#    NOTE: the phoneME tree is git-ignored and persistent, so a legacy -O0 (from the old blunt
+#    patch) may already be baked in -- FORCE the gcc opt flags back to -O2 (idempotent: a no-op
+#    on a pristine -O2 tree), then add -fwrapv.
+sed -i 's/-O0 $(GCC_WUNINITIALIZED)/-O2 $(GCC_WUNINITIALIZED)/g' "$PHONEME/cldc/build/share/jvm.make"
+# -fwrapv: fully idempotent -- strip every existing occurrence first (older patch runs
+# whose grep-guard misfired left it duplicated, e.g. "-fwrapv -fwrapv -fwrapv"), then add
+# exactly one after -fno-strict-aliasing. Re-running collapses back to a single flag.
+sed -i 's/ -fwrapv//g; s/-fno-strict-aliasing/-fno-strict-aliasing -fwrapv/' \
+  "$PHONEME/cldc/build/share/jvm.make"
 
 # 4) Large-file support for the 32-bit host tools (romgen/loopgen).
 #    romgen is built -m32. On a Docker Desktop (Windows) bind mount the shared
