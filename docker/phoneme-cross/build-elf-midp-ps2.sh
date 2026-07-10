@@ -65,13 +65,21 @@ echo "+ [2/5] properties (static table + share/properties + share/utils)"
 # there) runs from _end up to the stack at the top of RAM -> ~28 MB usable. The 20 MB
 # pool + 8 MB rmfs = 28 MB left ZERO headroom, so a video/install malloc grew the
 # heap into the stack and corrupted chunk headers -> crash in _free_r's unlink.
-# 12 MB pool + rmfs + ELF leaves a wide margin; J2ME games target 1-4 MB of Java heap.
-MIDP_HEAP_BYTES=${MIDP_HEAP_BYTES:-12582912}    # 12 MB pool
+# JAVA_HEAP_SIZE is the VM heap cap (fed to JVM_CONFIG_HEAP_CAPACITY), carved FROM the
+# pool above alongside the MIDP C structures. The stock 4 MB OOMs heavy games -- e.g. God
+# of War: Betrayal dies during loading with java.lang.OutOfMemoryError -- so raise it to
+# 8 MB and grow the pool to 14 MB so heap (8) + MIDP overhead (~5) still fit with margin.
+# RAM budget (newlib heap ~28 MB, _end..stack): 14 MB pool + 4 MB rmfs (patch #17) + ~2 MB
+# audio bank = 20 MB -> ~8 MB headroom, well under the ~28 MB that once corrupted the heap.
+MIDP_HEAP_BYTES=${MIDP_HEAP_BYTES:-14680064}            # 14 MB pool
+MIDP_JAVA_HEAP_BYTES=${MIDP_JAVA_HEAP_BYTES:-8388608}   # 8 MB VM heap cap (was 4 MB)
 STATIC_C="$OUT/javacall_static_properties.c"
-sed "s/^MAIN_MEMORY_CHUNK_SIZE.*/MAIN_MEMORY_CHUNK_SIZE = $MIDP_HEAP_BYTES/" \
+sed -e "s/^MAIN_MEMORY_CHUNK_SIZE.*/MAIN_MEMORY_CHUNK_SIZE = $MIDP_HEAP_BYTES/" \
+    -e "s/^JAVA_HEAP_SIZE.*/JAVA_HEAP_SIZE = $MIDP_JAVA_HEAP_BYTES/" \
     "$JC_OUT/jwc_properties.ini" \
     | awk -f docker/phoneme-cross/gen-static-properties.awk > "$STATIC_C"
 echo "    MAIN_MEMORY_CHUNK_SIZE = $MIDP_HEAP_BYTES bytes"
+echo "    JAVA_HEAP_SIZE         = $MIDP_JAVA_HEAP_BYTES bytes"
 
 C_FLAGS="-D_EE -DMIPS -G0 -O2 -std=gnu99 -fpermissive \
     -I$JC_OUT/inc -I$JC_SHARE/properties -I$JC_SHARE/properties/inc \
