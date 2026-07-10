@@ -1149,8 +1149,11 @@ const int SETTINGS_COUNT = 9;
 // highlighted row. The list scrolls: only the rows that fit at a comfortable size are
 // drawn, and the visible window follows the selection so the list can keep growing.
 void drawSettings(int sel) {
-    const int left  = GRID_X0;
-    const int right = DET_X + DET_W;
+    // The alphabet quick-nav rail is hidden on this tab (see render), so center the option
+    // rows in the full content width: mirror the right content margin on the left instead of
+    // starting at the old grid edge, which left the reclaimed rail strip empty on the left.
+    const int right = DET_X + DET_W;      // rightmost content edge (SCREEN_W - 8)
+    const int left  = SCREEN_W - right;   // mirror it -> rows centered on screen
     const int rowH = 42, gap = 12;
     const int availH = CONTENT_BOTTOM - CONTENT_Y;
 
@@ -1236,7 +1239,9 @@ void render(int viewCount, int selected, int topRow, int activeTab, const int* v
     drawHeader();
     drawTabs(activeTab);
     const int curGame = viewCount > 0 ? view[selected] : -1;
-    drawSidebar(curGame, sidebarFocus, sidebarSel);
+    if (activeTab != 2) {                       // no alphabet quick-nav rail on the SETTINGS tab
+        drawSidebar(curGame, sidebarFocus, sidebarSel);
+    }
     drawFooter(activeTab, sidebarFocus, detailsFocus);
 
     if (activeTab == 2) {                       // SETTINGS
