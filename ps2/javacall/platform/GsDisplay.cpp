@@ -253,11 +253,15 @@ void GsDisplay::blit(const u16* raster, int w, int h, texbuffer_t* tb, texrect_t
     dma_wait_fast();
     draw_wait_finish();
 
-    // Flip: point the read circuit at the freshly drawn buffer. DISPFB latches at the
-    // next vblank, so waiting for it makes the swap atomic (no visible tear), and the
-    // OTHER buffer becomes the target for the next frame.
+    // Flip WITHOUT blocking on vblank. draw_wait_finish() above already guarantees the
+    // frame is fully rendered into frame_[drawIdx_]; graph_set_framebuffer_filtered writes
+    // DISPFB, which the CRTC latches on its own at the next hardware vblank. We deliberately
+    // do NOT wait for that latch: it used to cost up to a full 60 Hz frame (~11 ms measured)
+    // of pure stall. Skipping it is tear-free HERE because this double-buffered surface is
+    // only reused two frames later, and the game paces itself well above the 16.7 ms NTSC
+    // vblank (a fixed ~21 ms Thread.sleep/frame), so a vblank always lands in between. If a
+    // future game ran faster than ~60 FPS this could tear; re-add a vblank-count guard then.
     graph_set_framebuffer_filtered(frame_[drawIdx_].address, SCR_W, GS_PSM_32, 0, 0);
-    graph_wait_vsync();
     drawIdx_ ^= 1;
 }
 
