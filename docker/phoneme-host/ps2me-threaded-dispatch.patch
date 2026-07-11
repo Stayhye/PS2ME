@@ -1,0 +1,182 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2398,7 +2398,39 @@
+ #else
+ #define BYTECODE_IMPL(x) static void bc_impl_##x() {
+ #endif
++
++/* ps2me-threaded (FASE 3): tail-threaded dispatch. Each bytecode handler ends by
++   tail-calling the next handler; with gcc -O2 sibling-call optimization this becomes a
++   direct jump, eliminating the return-to-loop AND giving each bytecode its OWN indirect
++   dispatch site (far better branch prediction than the single shared dispatch site in the
++   for(;;) trampoline). The trampoline loop in Interpret() stays as the landing pad for
++   handlers that early-`return` (exceptions). Off unless -DPS2ME_THREADED, so production
++   builds are unchanged. WARNING: correctness depends on the tail call being sibcall-
++   optimized in EVERY handler (else the stack grows per bytecode) -- validated on the host
++   by a long run (no stack overflow) + identical InterpBench checksums before shipping. */
++#ifdef PS2ME_THREADED
++/* musttail (gcc 15+) FORCES the sibling-call: every handler ends in a guaranteed `jmp`
++   to the next, or the build fails naming the handler that cannot tail-call -- so the stack
++   never grows silently (a plain tail call left ~half the handlers as `call`, overflowing
++   the stack after ~100M bytecodes). */
++#define BYTECODE_IMPL_END \
++  PS2ME_BC_TICK(); \
++  __attribute__((musttail)) return interpreter_dispatch_table[*g_jpc](); \
++  }
++/* Some handlers delegate to another handler as their last act (fast_init_new -> new,
++   aload_0_fast_igetfield_1 -> fast_igetfield_1, ...). Under threading the callee ends in a
++   musttail dispatch and never returns, so a plain `bc_impl_x(); END` would recurse (the
++   caller's frame is never freed -> stack overflow). Chain into it as a tail call instead. */
++#define BYTECODE_IMPL_CHAIN(target) __attribute__((musttail)) return target(); }
++/* Same idea for handlers that dispatch a computed table slot as their last act
++   (wide -> the wide variant of the next opcode). */
++#define BYTECODE_IMPL_CHAIN_IDX(idx) \
++  __attribute__((musttail)) return interpreter_dispatch_table[idx](); }
++#else
+ #define BYTECODE_IMPL_END }
++#define BYTECODE_IMPL_CHAIN(target) target(); }
++#define BYTECODE_IMPL_CHAIN_IDX(idx) interpreter_dispatch_table[idx](); }
++#endif
+ 
+   START_BYTECODES
+ 
+@@ -3682,8 +3714,7 @@
+ 
+   BYTECODE_IMPL(wide)
+     ADVANCE(1);
+-    interpreter_dispatch_table[(int)*g_jpc + WIDE_OFFSET]();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN_IDX((int)*g_jpc + WIDE_OFFSET)
+ 
+   BYTECODE_IMPL(multianewarray)
+     if (!interpreter_call_vm((address)&multianewarray, T_ARRAY)) {
+@@ -3773,24 +3804,19 @@
+   BYTECODE_IMPL_END
+ 
+   BYTECODE_IMPL(fast_init_1_putstatic)
+-    bc_impl_fast_1_putstatic();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_1_putstatic)
+ 
+   BYTECODE_IMPL(fast_init_2_putstatic)
+-    bc_impl_fast_2_putstatic();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_2_putstatic)
+ 
+   BYTECODE_IMPL(fast_init_a_putstatic)
+-    bc_impl_fast_a_putstatic();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_a_putstatic)
+ 
+   BYTECODE_IMPL(fast_init_1_getstatic)
+-    bc_impl_fast_1_getstatic();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_1_getstatic)
+ 
+   BYTECODE_IMPL(fast_init_2_getstatic)
+-    bc_impl_fast_2_getstatic();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_2_getstatic)
+ 
+   BYTECODE_IMPL(fast_bputfield)
+     jbyte value = POP();
+@@ -3985,36 +4011,43 @@
+     // Clear async_info (even if the methods was never redone)
+     SET_THREAD_INT(async_info, 0);
+ 
++    // ps2me-threaded: call return_internal() directly instead of the bc_impl_*return()
++    // handlers. The handlers end in a musttail dispatch that never returns here, so under
++    // threading this return_point would never return to resume_thread -> the whole
++    // fast_invokenative call chain leaks a frame per native call (stack overflow on native
++    // calls in a loop). return_internal() does the same frame restore + ADVANCE but returns;
++    // the following bytecode is then dispatched by fast_invokenative's own END. Identical
++    // effect without threading too (that dispatch was redundant).
+     switch (GET_BYTE(0)) {
+       case T_INT:
+         PUSH(GET_THREAD_INT(int1_value));
+-        bc_impl_ireturn();
++        return_internal(T_INT);
+         break;
+ 
+       case T_FLOAT:
+         PUSH(GET_THREAD_INT(int1_value));
+-        bc_impl_freturn();
++        return_internal(T_FLOAT);
+         break;
+ 
+       case T_VOID:
+-        bc_impl_return();
++        return_internal(T_VOID);
+         break;
+ 
+       case T_LONG:
+         PUSH(GET_THREAD_INT(int2_value));
+         PUSH(GET_THREAD_INT(int1_value));
+-        bc_impl_lreturn();
++        return_internal(T_LONG);
+         break;
+ 
+       case T_DOUBLE:
+         PUSH(GET_THREAD_INT(int2_value));
+         PUSH(GET_THREAD_INT(int1_value));
+-        bc_impl_dreturn();
++        return_internal(T_DOUBLE);
+         break;
+ 
+       case T_OBJECT:
+         PUSH(GET_THREAD_INT(obj_value));
+-        bc_impl_areturn();
++        return_internal(T_OBJECT);
+         break;
+ 
+       default:
+@@ -4044,24 +4077,19 @@
+   BYTECODE_IMPL_END
+ 
+   BYTECODE_IMPL(fast_new)
+-    bc_impl_new();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_new)
+ 
+   BYTECODE_IMPL(fast_init_new)
+-    bc_impl_new();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_new)
+ 
+   BYTECODE_IMPL(fast_anewarray)
+-    bc_impl_anewarray();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_anewarray)
+ 
+   BYTECODE_IMPL(fast_checkcast)
+-    bc_impl_checkcast();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_checkcast)
+ 
+   BYTECODE_IMPL(fast_instanceof)
+-    bc_impl_instanceof();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_instanceof)
+ 
+   BYTECODE_IMPL(fast_invokevirtual_final)
+     fast_invoke_internal(true, true, 3);
+@@ -4109,8 +4137,7 @@
+ 
+   BYTECODE_IMPL(aload_0_fast_igetfield_1)
+     aload(0);
+-    bc_impl_fast_igetfield_1();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_igetfield_1)
+ 
+   BYTECODE_IMPL(aload_0_fast_igetfield_4)
+     aload(0);
+@@ -4130,8 +4157,7 @@
+ 
+   BYTECODE_IMPL(aload_0_fast_agetfield_1)
+     aload(0);
+-    bc_impl_fast_agetfield_1();
+-  BYTECODE_IMPL_END
++    BYTECODE_IMPL_CHAIN(bc_impl_fast_agetfield_1)
+ 
+   BYTECODE_IMPL(aload_0_fast_agetfield_4)
+     aload(0);

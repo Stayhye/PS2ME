@@ -3,6 +3,9 @@
 *.py    text eol=lf
 *.awk   text eol=lf
 mergelib text eol=lf
+# .patch files are fed to `patch` inside the Linux container; their LF context lines
+# must match the LF-normalized source, so never let autocrlf turn them into CRLF.
+*.patch text eol=lf
 
 # Binary assets: no line-ending munging, no textual diffs.
 *.png   binary

@@ -395,5 +395,40 @@ ifeq ($(PS2ME_PROFILE), true)\
 CPP_FLAGS              += -DPS2ME_PROFILE\
 endif\
 ' "$JVMMAKE"
+# 27) ps2me-threaded: tail-threaded ("direct-threaded") dispatch for the C interpreter
+#     (PS2ME perf front, FASE 3). Each bytecode handler ends by tail-calling the next via
+#     __attribute__((musttail)), which gcc 15 turns into a direct jump (host: jmp / r5900:
+#     jr t9) -- killing the return-to-loop and giving every bytecode its OWN indirect
+#     dispatch site (better branch prediction). Compiled in ONLY under -DPS2ME_THREADED
+#     (jvm.make hook in 27b); OFF by default -> production builds are byte-identical. The
+#     change is large/structural (macros + ~12 delegating handlers + wide +
+#     invokenative_return_point), so it ships as a unified .patch applied with `patch`, not
+#     sed. It layers ON TOP of #26: the patch's base already carries the profile hunk, so
+#     the two compose (the shared BYTECODE_IMPL_END/dispatch region stays consistent). The
+#     patch context is LF while the tree may be CRLF, so normalize line endings to LF first
+#     (harmless for gcc; #26 ran earlier and preserved whatever was there). Measured: +28.8%
+#     on the linux_c host; on real PS2 hardware the gain was modest (loading a bit faster,
+#     FPS unchanged -- the r5900's small 16KB I-cache offsets the win, and PCSX2's dynarec
+#     does not model the r5900 BTB so it shows no gain there). Kept OFF-by-default as an
+#     opt-in toggle. Idempotent (guarded by the ps2me-threaded marker in the applied comment).
+INTERP="$PHONEME/cldc/src/vm/cpu/c/Interpreter_c.cpp"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+if ! grep -q 'ps2me-threaded' "$INTERP"; then
+  sed -i 's/\r$//' "$INTERP"
+  # Feed the patch through sed to strip any CRLF the checkout may have introduced, so
+  # its context lines match the LF-normalized source regardless of git's autocrlf.
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-threaded-dispatch.patch" | patch -p1 -d "$PHONEME"
+fi
+
+# 27b) jvm.make hook: compile -DPS2ME_THREADED when the make var PS2ME_THREADED=true
+#      (mirrors the 26b PS2ME_PROFILE hook). Inert unless the var is set, so normal builds
+#      are unaffected. Idempotent.
+grep -q 'PS2ME_THREADED' "$JVMMAKE" || \
+  sed -i '/# We want 32-bit assembly/i\
+# ps2me-threaded: opt-in tail-threaded interpreter dispatch (PS2ME perf front, FASE 3).\
+ifeq ($(PS2ME_THREADED), true)\
+CPP_FLAGS              += -DPS2ME_THREADED\
+endif\
+' "$JVMMAKE"
 
 echo "phoneME patches applied to: $PHONEME"
