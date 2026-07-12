@@ -3,222 +3,270 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS2ME — Run J2ME games on the PlayStation 2</title>
+<title>~*~ PS2ME's HomePage ~*~ :: J2ME on the PlayStation 2 !!!</title>
 <meta name="description" content="PS2ME brings J2ME (CLDC 1.1 / MIDP 2.0) MIDlets to the PlayStation 2: a native launcher, PS2 controller input, SPU2 audio, and memory-card saves, powered by a port of phoneME Feature.">
 <meta property="og:title" content="PS2ME — Run J2ME games on the PlayStation 2">
 <meta property="og:description" content="A native launcher and phoneME-based J2ME runtime for the PlayStation 2.">
-<meta property="og:type" content="website">
 <link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<header class="hero">
-  <div class="hero-inner">
-    <img class="hero-logo" src="assets/icon.png" data-animated="assets/icon.apng.png"
-         alt="PS2ME logo" width="112" height="112" decoding="async">
-    <div class="hero-title-wrap">
-      <h1 class="hero-title">PS2ME</h1>
-      <p class="hero-by">by <a href="https://github.com/Wellinator">Wellinator</a></p>
+<!-- ============ TOP SCROLLING BANNER ============ -->
+<div class="topbar">
+  <marquee scrollamount="6" behavior="scroll" direction="left">
+    ★ ★ ★ WELCOME TO PS2ME ★ ★ ★ &nbsp; Play J2ME cellphone games on your PLAYSTATION 2 !!! &nbsp; ::: A native launcher + a port of the phoneME Feature VM ::: &nbsp; Free &amp; open source under the GPL-2.0 !!! &nbsp; Grab the latest release (.zip) from the Downloads section below !!! ★ ★ ★
+  </marquee>
+</div>
+
+<div class="page">
+
+  <!-- ============ MASTHEAD ============ -->
+  <header class="masthead">
+    <div>
+      <img class="logo" src="assets/icon.png" data-animated="assets/icon.apng.png" alt="PS2ME logo" width="96" height="96">
     </div>
-    <p class="hero-tagline">Run <strong>J2ME</strong> (CLDC&nbsp;1.1 / MIDP&nbsp;2.0) games on the <strong>PlayStation&nbsp;2</strong>.</p>
-    <p class="hero-sub">A native launcher and a port of the open-source <em>phoneME&nbsp;Feature</em> VM &mdash;
-       with PS2 controller input, SPU2 audio, and memory-card saves.</p>
+    <h1 class="wordart">PS2ME</h1>
+    <p class="byline">a homepage by <a href="https://github.com/Wellinator">~Wellinator~</a>
+       &nbsp;<span class="newflag blink">NEW!</span></p>
+    <p class="subtitle">
+      Run <b>J2ME</b> (CLDC&nbsp;1.1 / MIDP&nbsp;2.0) cellphone games on your
+      <b>PlayStation&nbsp;2</b>&nbsp;!!!
+    </p>
+    <p class="subtitle" style="font-size:14px;">
+      A native launcher + a port of the open-source <em>phoneME&nbsp;Feature</em> VM &mdash;
+      with PS2 pad input, SPU2 audio &amp; memory-card saves.
+    </p>
+
     <div class="hero-cta">
-      <a class="btn btn-primary" href="https://github.com/Wellinator/PS2ME/releases/latest">Download ELF</a>
+      <a class="btn btn-primary" id="hero-download" href="https://github.com/Wellinator/PS2ME/releases/latest">» DOWNLOAD the .ZIP! «</a>
       <a class="btn btn-ghost" href="https://github.com/Wellinator/PS2ME">View on GitHub</a>
     </div>
-  </div>
-</header>
 
-<main>
+    <!-- 88x31 badges (all truthful) -->
+    <div class="badges">
+      <a class="badge88 b-java" href="https://github.com/OpenJDK/phoneme" title="J2ME / CLDC 1.1 / MIDP 2.0">POWERED BY<br><small>JAVA&trade; J2ME</small></a>
+      <span class="badge88 b-ps2" title="PlayStation 2 homebrew">RUNS ON<br><small>PS2</small></span>
+      <a class="badge88 b-notepad" href="https://github.com/OpenJDK/phoneme" title="Built on phoneME Feature">BUILT ON<br><small>phoneME</small></a>
+      <a class="badge88 b-800" href="https://github.com/ps2dev/ps2sdk" title="Uses the PS2 SDK">POWERED BY<br><small>ps2sdk</small></a>
+      <a class="badge88 b-netscape" href="https://github.com/Wellinator/PS2ME" title="Open source on GitHub">OPEN<br><small>SOURCE</small></a>
+      <a class="badge88 b-html" href="https://github.com/Wellinator/PS2ME/blob/main/LICENSE" title="GNU GPL 2.0">FREE / GPL<br><small>2.0</small></a>
+    </div>
+  </header>
 
-<section class="section">
-  <h2>Features</h2>
-  <div class="cards">
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
-          <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
-        </svg>
-      </span>
-      <h3>Native launcher</h3>
-      <p>A full-screen 640×448 dashboard with a 4×5 grid of game icons decoded straight from
-         each JAR, tabs, an alphabet sidebar, sorting, favorites, and recents.</p>
-    </div>
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2.5" y="5" width="12" height="8.5" rx="1.5"/><rect x="15.5" y="8" width="6" height="11" rx="1.5"/>
-        </svg>
-      </span>
-      <h3>Landscape, portrait &amp; multi-screen</h3>
-      <p>Per-game orientation and resolution overrides, with 11 screen-size presets, so portrait,
-         landscape, and multi-screen MIDlets built for any phone all display correctly with their
-         aspect ratio preserved.</p>
-    </div>
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/>
-        </svg>
-      </span>
-      <h3>Audio</h3>
-      <p>Menu music on a hardware SPU2 voice, the Nokia Sound API, and MMAPI MIDI through an
-         offline-built wavetable synth.</p>
-    </div>
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M5 4h10l4 4v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4z"/><path d="M8 4v5h6"/><circle cx="12" cy="14.5" r="2.5"/>
-        </svg>
-      </span>
-      <h3>Memory-card saves</h3>
-      <p>MIDlet RecordStore data is saved per game and appears in the console's OSD browser
-         with its own icon and title.</p>
-    </div>
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3l1.7 4.6L18.3 9.3l-4.6 1.7L12 15.6l-1.7-4.6L5.7 9.3l4.6-1.7z"/><path d="M18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>
-        </svg>
-      </span>
-      <h3>Quality of life</h3>
-      <p>A friendly loading screen, a debug split view, and an opt-in in-game FPS counter.</p>
-    </div>
-    <div class="card">
-      <span class="card-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M8 8l-4 4 4 4"/><path d="M16 8l4 4-4 4"/><path d="M13.5 5l-3 14"/>
-        </svg>
-      </span>
-      <h3>Open source</h3>
-      <p>Built on phoneME Feature and the PS2 SDK, released under the GPL&#8209;2.0 license.</p>
-    </div>
-  </div>
-</section>
+  <!-- ============ NAV BAR ============ -->
+  <nav class="navbar">
+    <a class="navbtn" href="#about">HOME</a>
+    <a class="navbtn" href="#start">HOW-TO</a>
+    <a class="navbtn" href="#features">FEATURES</a>
+    <a class="navbtn" href="#screenshots">SCREENSHOTS</a>
+    <a class="navbtn" href="#releases">DOWNLOADS</a>
+    <a class="navbtn" href="https://github.com/Wellinator/PS2ME">GITHUB</a>
+  </nav>
 
-<section class="section" id="screenshots">
-  <h2>Screenshots</h2>
-  <div class="swiper screenshots-swiper">
-    <div class="swiper-wrapper">
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/menu.png" alt="PS2ME launcher: a 4x5 grid of game icons with a details panel" decoding="async">
-        <figcaption>The launcher &mdash; a 4&times;5 grid with icons decoded from each JAR</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/loading.png" alt="Friendly loading screen with a progress bar" loading="lazy" decoding="async">
-        <figcaption>A friendly loading screen while a game installs</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/game_3.png" alt="An isometric action game running full-screen" loading="lazy" decoding="async">
-        <figcaption>Landscape games use the full screen</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/game_5.png" alt="A top-down shooter running full-screen" loading="lazy" decoding="async">
-        <figcaption>Full-screen top-down action (landscape)</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/game_1.png" alt="A portrait game title screen, aspect-preserved" loading="lazy" decoding="async">
-        <figcaption>Portrait games, aspect-preserved</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/game_2.png" alt="A run-and-gun game running in portrait" loading="lazy" decoding="async">
-        <figcaption>Run-and-gun MIDlet in portrait</figcaption>
-      </figure>
-      <!-- <figure class="swiper-slide">
-        <img src="assets/screenshots/game_4.png" alt="A portrait title screen rendering crisply" loading="lazy" decoding="async">
-        <figcaption>Portrait title screens render crisp</figcaption>
-      </figure> -->
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/settings.png" alt="The Settings tab with toggles" loading="lazy" decoding="async">
-        <figcaption>Settings &mdash; recents, favorites, sort, Debug mode, FPS counter</figcaption>
-      </figure>
-      <figure class="swiper-slide">
-        <img src="assets/screenshots/debug.png" alt="Debug split view: the game on the left, the app log on the right" loading="lazy" decoding="async">
-        <figcaption>Debug mode &mdash; the game on the left, the full app log on the right</figcaption>
-      </figure>
-    </div>
-    <div class="swiper-button-prev" aria-label="Previous screenshot"></div>
-    <div class="swiper-button-next" aria-label="Next screenshot"></div>
-    <div class="swiper-pagination"></div>
-  </div>
-  <p class="hint screenshot-note">Screenshots captured in the <a href="https://pcsx2.net/">PCSX2</a> emulator.</p>
-</section>
+  <hr class="rainbow-hr">
 
-<section class="section" id="releases">
-  <h2>Releases</h2>
-  <div id="releases-root" class="releases" data-repo="Wellinator/PS2ME">
-    <p class="rel-status">Loading releases from GitHub&hellip;</p>
-  </div>
-</section>
+  <!-- ============ TWO-COLUMN LAYOUT ============ -->
+  <div class="layout"><div class="row">
 
-<section class="section">
-  <h2>Debug mode</h2>
-  <p>Flip <strong>Debug mode</strong> on in <em>Settings</em> to turn the launcher into a diagnostics
-     tool &mdash; handy on real hardware, where the EE console is not visible:</p>
-  <ul class="bullets">
-    <li><strong>Split view while a game runs</strong> &mdash; the game is scaled on the left and the
-        full application log (install trace, <code>System.out</code>, errors) streams on the right.</li>
-    <li><strong>Storage diagnostics</strong> &mdash; when no games are found, the empty screen lists
-        the device probes and resolved paths, so you can see exactly where PS2ME looked.</li>
-    <li><strong>FPS counter</strong> &mdash; an opt-in overlay to check a game&rsquo;s frame rate.</li>
-  </ul>
-  <p class="hint">All of these are off by default, so the everyday experience stays clean.</p>
-</section>
+    <!-- ===== SIDEBAR ===== -->
+    <aside class="sidebar">
 
-<section class="section">
-  <h2>Getting started</h2>
-  <ol class="steps">
-    <li>Download <code>PS2ME-vX.Y.Z.elf</code> (and the optional <code>bgm.adpcm</code>) from the
-      <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> page.</li>
-    <li>On a FAT32 USB drive, create this layout:
-      <pre><code>mass:/PS2ME/PS2ME-vX.Y.Z.elf
-mass:/PS2ME/bgm.adpcm        (optional menu music)
-mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
-    </li>
-    <li>Launch the ELF from a homebrew loader (uLaunchELF / wLaunchELF), or open it in
-      <a href="https://pcsx2.net/">PCSX2</a>.</li>
-    <li>Pick a game and press <strong>✕</strong>.</li>
-  </ol>
-  <p class="hint"><strong>Launcher controls:</strong> D-pad move · ✕ launch · ○ back · △ favorite ·
-     □ sort · L1/R1 tabs · L2/R2 page · Select options.</p>
-</section>
+      <div class="widget">
+        <h4>Menu</h4>
+        <ul>
+          <li>» <a href="#about">About PS2ME</a></li>
+          <li>» <a href="#start">Getting Started</a></li>
+          <li>» <a href="#features">Features</a></li>
+          <li>» <a href="#screenshots">Screenshots</a></li>
+          <li>» <a href="#releases">Downloads</a></li>
+          <li>» <a href="#debug">Debug Mode</a></li>
+          <li>» <a href="#build">Build It Yourself</a></li>
+        </ul>
+      </div>
 
-<section class="section">
-  <h2>Build from source</h2>
-  <p>The build runs entirely in Docker (a JDK-8 host image that romizes the class library, plus a
-     PS2 EE cross image that links the ELF). The phoneME source tree and PS2 SDK are external and
-     are not vendored, so builds are produced locally.</p>
-  <pre><code>docker run --rm -v "$(pwd)":/work -v phoneme_build:/build \
+      <div class="widget">
+        <h4>Links</h4>
+        <p><a href="https://github.com/Wellinator/PS2ME/releases">⬇ Downloads</a></p>
+        <p><a href="https://github.com/Wellinator/PS2ME">💻 Source (GitHub)</a></p>
+        <p><a href="https://github.com/Wellinator/PS2ME/issues">🐛 Report a bug</a></p>
+        <p><a href="mailto:wellcoj@gmail.com">✉ E-mail the author</a></p>
+      </div>
+
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <div class="content">
+
+      <section id="about">
+        <h2>Welcome!!!</h2>
+        <p>Hi and welcome to my homepage!!! <strong>PS2ME</strong> is a little project that lets
+           you run those old-school <strong>J2ME</strong> cellphone games (you know, the ones from
+           your Nokia and Sony Ericsson) right on your <strong>PlayStation&nbsp;2</strong> console.
+           It's built on top of the open-source <em>phoneME&nbsp;Feature</em> virtual machine and the
+           <em>PS2&nbsp;SDK</em>. Cool huh?? Look around and grab the download below! :-)</p>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="start">
+        <h2>Getting started</h2>
+        <ol class="steps">
+          <li>Download <code>PS2ME-vX.Y.Z.zip</code> from the
+            <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> page &mdash; it has
+            everything you need (the standalone <code>.elf</code> is only for updating an existing
+            install and has no menu music).</li>
+          <li>Extract the ZIP onto a FAT32 USB drive so you end up with this layout:
+            <pre><code>mass:/PS2ME/PS2ME-vX.Y.Z.elf
+mass:/PS2ME/bgm.adpcm        (menu music)
+mass:/PS2ME/games/*.jar      (drop your MIDlets here)</code></pre>
+          </li>
+          <li>Launch the ELF from a homebrew loader (uLaunchELF / wLaunchELF), or open it in
+            <a href="https://pcsx2.net/">PCSX2</a>.</li>
+          <li>Pick a game and press <strong>✕</strong>. Have fun!!!</li>
+        </ol>
+        <p class="hint"><strong>Launcher controls:</strong> D-pad move · ✕ launch · ○ back · △ favorite ·
+           □ sort · L1/R1 tabs · L2/R2 page · Select options.</p>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="features">
+        <h2>Features</h2>
+        <ul class="bullets">
+          <li><strong>Native launcher</strong> &mdash; a full-screen 640×448 dashboard with a 4×5 grid
+              of game icons decoded straight from each JAR, plus tabs, an alphabet sidebar, sorting,
+              favorites, and recents.</li>
+          <li><strong>Landscape, portrait &amp; multi-screen</strong> &mdash; per-game orientation and
+              resolution overrides, with 11 screen-size presets, so MIDlets built for any phone display
+              correctly with their aspect ratio preserved.</li>
+          <li><strong>Audio</strong> &mdash; menu music on a hardware SPU2 voice, the Nokia Sound API,
+              and MMAPI MIDI through an offline-built wavetable synth.</li>
+          <li><strong>Memory-card saves</strong> &mdash; MIDlet RecordStore data is saved per game and
+              appears in the console's OSD browser with its own icon and title.</li>
+          <li><strong>Quality of life</strong> &mdash; a friendly loading screen, a debug split view,
+              and an opt-in in-game FPS counter.</li>
+          <li><strong>Open source</strong> &mdash; built on phoneME Feature and the PS2 SDK, released
+              under the GPL&#8209;2.0 license.</li>
+        </ul>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="screenshots">
+        <h2>Screenshots</h2>
+        <div class="swiper screenshots-swiper">
+          <div class="swiper-wrapper">
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/menu.png" alt="PS2ME launcher: a 4x5 grid of game icons with a details panel" decoding="async">
+              <figcaption>The launcher &mdash; a 4&times;5 grid with icons decoded from each JAR</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/loading.png" alt="Friendly loading screen with a progress bar" loading="lazy" decoding="async">
+              <figcaption>A friendly loading screen while a game installs</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/game_3.png" alt="An isometric action game running full-screen" loading="lazy" decoding="async">
+              <figcaption>Landscape games use the full screen</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/game_5.png" alt="A top-down shooter running full-screen" loading="lazy" decoding="async">
+              <figcaption>Full-screen top-down action (landscape)</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/game_1.png" alt="A portrait game title screen, aspect-preserved" loading="lazy" decoding="async">
+              <figcaption>Portrait games, aspect-preserved</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/game_2.png" alt="A run-and-gun game running in portrait" loading="lazy" decoding="async">
+              <figcaption>Run-and-gun MIDlet in portrait</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/settings.png" alt="The Settings tab with toggles" loading="lazy" decoding="async">
+              <figcaption>Settings &mdash; recents, favorites, sort, Debug mode, FPS counter</figcaption>
+            </figure>
+            <figure class="swiper-slide">
+              <img src="assets/screenshots/debug.png" alt="Debug split view: the game on the left, the app log on the right" loading="lazy" decoding="async">
+              <figcaption>Debug mode &mdash; the game on the left, the full app log on the right</figcaption>
+            </figure>
+          </div>
+          <div class="swiper-button-prev" aria-label="Previous screenshot"></div>
+          <div class="swiper-button-next" aria-label="Next screenshot"></div>
+          <div class="swiper-pagination"></div>
+        </div>
+        <p class="hint screenshot-note">Screenshots captured in the <a href="https://pcsx2.net/">PCSX2</a> emulator.</p>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="releases">
+        <h2>Downloads</h2>
+        <p class="hint"><strong>Get the <code>.zip</code></strong> &mdash; it's the complete drop-in
+           package (the ELF, the <code>bgm.adpcm</code> menu music, and a <code>games/</code> folder).
+           The standalone <code>.elf</code> is just the executable, meant for updating an existing
+           install &mdash; on its own it runs but plays <em>no menu music</em>.</p>
+        <div id="releases-root" class="releases" data-repo="Wellinator/PS2ME">
+          <p class="rel-status">Loading releases from GitHub&hellip; please wait!</p>
+        </div>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="debug">
+        <h2>Debug mode</h2>
+        <p>Flip <strong>Debug mode</strong> on in <em>Settings</em> to turn the launcher into a
+           diagnostics tool &mdash; handy on real hardware, where the EE console is not visible:</p>
+        <ul class="bullets">
+          <li><strong>Split view while a game runs</strong> &mdash; the game is scaled on the left
+              and the full application log streams on the right.</li>
+          <li><strong>Storage diagnostics</strong> &mdash; when no games are found, the empty screen
+              lists the device probes and resolved paths.</li>
+          <li><strong>FPS counter</strong> &mdash; an opt-in overlay to check a game&rsquo;s frame rate.</li>
+        </ul>
+        <p class="hint">All of these are off by default, so the everyday experience stays clean.</p>
+      </section>
+
+      <hr class="rainbow-hr">
+
+      <section id="build">
+        <h2>Build from source</h2>
+        <p>The build runs entirely in Docker (a JDK-8 host image that romizes the class library, plus
+           a PS2 EE cross image that links the ELF). The phoneME source tree and PS2 SDK are external
+           and are not vendored, so builds are produced locally.</p>
+        <pre><code>docker run --rm -v "$(pwd)":/work -v phoneme_build:/build \
   phoneme-cross bash /work/docker/phoneme-cross/build-release-ps2.sh</code></pre>
-  <p>See the <a href="https://github.com/Wellinator/PS2ME#building-from-source">README</a> for details.</p>
-</section>
+        <p>See the <a href="https://github.com/Wellinator/PS2ME#building-from-source">README</a> for details.</p>
+      </section>
 
-</main>
+    </div><!-- /content -->
 
-<footer class="footer">
-  <p><strong>PS2ME</strong> is free software under the
-     <a href="https://github.com/Wellinator/PS2ME/blob/main/LICENSE">GNU GPL&#8209;2.0</a>.
-     Built on <a href="https://github.com/OpenJDK/phoneme">phoneME&nbsp;Feature</a> and
-     <a href="https://github.com/ps2dev/ps2sdk">ps2sdk</a>.</p>
-  <p class="footer-links">
-    <a href="https://github.com/Wellinator/PS2ME">GitHub</a> ·
-    <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> ·
-    <a href="https://github.com/Wellinator/PS2ME/blob/main/CHANGELOG.md">Changelog</a>
-  </p>
-  <p class="footer-credit">Made by
-    <a href="https://github.com/Wellinator">Wellinator</a> ·
-    <a href="mailto:wellcoj@gmail.com">wellcoj@gmail.com</a></p>
-</footer>
+  </div></div><!-- /layout -->
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <hr class="rainbow-hr">
+    <p class="ring">
+      [ <a href="https://github.com/Wellinator/PS2ME">GitHub</a> ]
+      [ <a href="https://github.com/Wellinator/PS2ME/releases">Releases</a> ]
+      [ <a href="https://github.com/Wellinator/PS2ME/blob/main/CHANGELOG.md">Changelog</a> ]
+      [ <a href="https://github.com/Wellinator/PS2ME/issues">Issues</a> ]
+    </p>
+    <p><strong>PS2ME</strong> is free software under the
+       <a href="https://github.com/Wellinator/PS2ME/blob/main/LICENSE">GNU GPL&#8209;2.0</a>.
+       Built on <a href="https://github.com/OpenJDK/phoneme">phoneME&nbsp;Feature</a> and
+       <a href="https://github.com/ps2dev/ps2sdk">ps2sdk</a>.</p>
+    <p>✉ Author: <span class="email-gif">wellcoj [at] gmail [dot] com</span></p>
+    <p class="copy">© 2026 <a href="https://github.com/Wellinator">Wellinator</a> &mdash; licensed under the GPL&#8209;2.0.</p>
+    <p class="sig">No cookies, no trackers. Thanks for visiting!!!</p>
+  </footer>
+
+</div><!-- /page -->
 
 <script>
-// Progressive enhancement: paint the small static logo first, then swap in the
-// larger animated APNG once it has fully downloaded — no flash, no blocking.
+// Swap the small static logo for the animated APNG once it has loaded.
 (function () {
-  var logo = document.querySelector('.hero-logo[data-animated]');
+  var logo = document.querySelector('.logo[data-animated]');
   if (!logo) return;
   var src = logo.getAttribute('data-animated');
   var anim = new Image();
@@ -228,7 +276,6 @@ mass:/PS2ME/games/*.jar      (your MIDlets)</code></pre>
 </script>
 <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-<script src="symbols.js" defer></script>
 <script src="carousel.js" defer></script>
 <script src="releases.js" defer></script>
 </body>

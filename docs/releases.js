@@ -48,6 +48,12 @@
     return '<pre>' + esc(md) + '</pre>';   // marked blocked: show raw notes
   }
 
+  function endsWith(name, suffix) {
+    var s = String(name || '').toLowerCase();
+    return s.slice(s.length - suffix.length) === suffix;
+  }
+
+  // History items: a plain list of every downloadable asset.
   function assetList(assets) {
     var real = (assets || []).filter(function (a) { return a && a.browser_download_url; });
     if (!real.length) return null;
@@ -60,6 +66,51 @@
       wrap.appendChild(link);
     });
     return wrap;
+  }
+
+  // Featured (latest) release: the .zip is the big button; everything else
+  // (the standalone .elf, etc.) becomes a small secondary link on the side.
+  function featuredAssets(assets) {
+    var real = (assets || []).filter(function (a) { return a && a.browser_download_url; });
+    if (!real.length) return null;
+
+    var zip = real.filter(function (a) { return endsWith(a.name, '.zip'); })[0];
+    var elf = real.filter(function (a) { return endsWith(a.name, '.elf'); })[0];
+    var primary = zip || elf || real[0];               // prefer the complete .zip
+    var alts = real.filter(function (a) { return a !== primary; });
+
+    var wrap = el('div', 'rel-assets');
+
+    var big = el('a', 'rel-asset rel-asset-primary');
+    big.href = primary.browser_download_url;
+    big.innerHTML = '<span class="rel-asset-name">Download ' + esc(primary.name) + '</span>' +
+      '<span class="rel-asset-size">' + esc(fmtSize(primary.size)) + '</span>';
+    wrap.appendChild(big);
+
+    if (alts.length) {
+      var side = el('span', 'rel-asset-alts');
+      alts.forEach(function (a) {
+        var link = el('a', 'rel-asset-alt');
+        link.href = a.browser_download_url;
+        var label = endsWith(a.name, '.elf') ? 'ELF only' : a.name;
+        link.innerHTML = '<span class="rel-asset-alt-name">' + esc(label) + '</span> ' +
+          '<span class="rel-asset-size">' + esc(fmtSize(a.size)) + '</span>';
+        side.appendChild(link);
+      });
+      wrap.appendChild(side);
+    }
+    return wrap;
+  }
+
+  // Point the hero "DOWNLOAD the .ZIP!" button straight at the latest .zip
+  // (the filename carries the version, so there is no static URL for it).
+  function wireHeroDownload(rel) {
+    var btn = document.getElementById('hero-download');
+    if (!btn) return;
+    var zip = (rel.assets || []).filter(function (a) {
+      return a && a.browser_download_url && endsWith(a.name, '.zip');
+    })[0];
+    if (zip) btn.href = zip.browser_download_url;
   }
 
   function versionLabel(rel) {
@@ -81,7 +132,7 @@
       '<span class="rel-date">' + esc(fmtDate(rel.published_at)) + '</span>';
     card.appendChild(head);
 
-    var assets = assetList(rel.assets);
+    var assets = featuredAssets(rel.assets);
     if (assets) card.appendChild(assets);
 
     card.appendChild(el('div', 'rel-notes', renderNotes(rel.body)));
@@ -113,6 +164,7 @@
 
   function render(releases) {
     root.innerHTML = '';
+    wireHeroDownload(releases[0]);
     root.appendChild(renderFeatured(releases[0]));
 
     var rest = releases.slice(1);
