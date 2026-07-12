@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version number lives in a single source of truth, `ps2/version.h`, and is bumped
 with `./version.sh {major|minor|patch}`.
 
+## [1.3.0] - 2026-07-11
+
+### Added
+- Configurable control layouts, Simple and Complete, with analog-stick support and
+  per-game overrides, selectable from Settings and the per-game details panel.
+- An on-screen controls guide with a live button tester.
+- A first-run control-layout picker shown once after the splash.
+
+### Changed
+- Games run much faster: the CLDC bytecode interpreter is now built at `-O2 -fwrapv`
+  instead of `-O0`, and the game framebuffer flips without blocking on vblank
+  (measured roughly 3.5x higher in-game FPS).
+- The Java heap cap was raised to 8 MB so heavier games finish loading.
+- The Settings tab dropped its alphabet rail and centers its list.
+- The boot splash is held a little longer so slow displays do not miss it.
+
+### Fixed
+- Menu background music stayed silent on real hardware.
+- Zombie Infection and other titles froze right after loading when a game drew an image
+  onto its own off-screen buffer's Graphics; this self-blit is now allowed, matching
+  real handsets.
+
 ## [1.2.1] - 2026-07-09
 
 ### Added
