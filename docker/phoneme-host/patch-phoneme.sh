@@ -431,4 +431,23 @@ CPP_FLAGS              += -DPS2ME_THREADED\
 endif\
 ' "$JVMMAKE"
 
+# 28) ps2me-drawimage-selfblit (game compat). Stock phoneME's Graphics.render() -- the
+#     drawImage() KNI -- rejects drawing an image onto the Graphics obtained from that
+#     SAME image (src==dst) by returning false, which the Java layer turns into an
+#     IllegalArgumentException. But the MIDP spec only mandates IAE for a bad anchor on
+#     drawImage(); the src==dst restriction belongs to drawRegion() (renderRegion, left
+#     untouched here). Real handsets and KEmulator treat a self-blit as a no-op, so games
+#     that do backbuffer.getGraphics().drawImage(backbuffer,0,0,0) run there but froze on
+#     us -- the IAE escaped the game's paint loop and hung the screen right after loading
+#     (found in Zombie Infection / GloftMASS via bytecode disassembly). The patch keeps
+#     the anchor check and treats src==dst as a successful no-op instead of an error.
+#     Applied with --ignore-whitespace (the fix touched a trailing space on a context
+#     line) after LF-normalizing both file and patch (the tree may be CRLF). Idempotent
+#     (guarded by the 'src==dst' marker the patch introduces).
+GXKNI="$PHONEME/midp/src/lowlevelui/graphics_api/gxapi_native/native/gxapi_graphics_kni.c"
+if ! grep -q 'src==dst' "$GXKNI"; then
+  sed -i 's/\r$//' "$GXKNI"
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-drawimage-selfblit.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

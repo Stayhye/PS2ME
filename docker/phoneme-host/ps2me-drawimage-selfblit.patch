@@ -1,0 +1,22 @@
+--- a/midp/src/lowlevelui/graphics_api/gxapi_native/native/gxapi_graphics_kni.c
++++ b/midp/src/lowlevelui/graphics_api/gxapi_native/native/gxapi_graphics_kni.c
+@@ -1071,8 +1071,18 @@
+             IMGAPI_GET_IMAGE_PTR(gImg) =
+ 	      (struct Java_javax_microedition_lcdui_Image *)
+ 	      (GXAPI_GET_GRAPHICS_PTR(g)->img);
+-            if (KNI_IsSameObject(gImg, img) || !check_anchor(anchor,0)) {
++            if (!check_anchor(anchor,0)) {
+                 success = KNI_FALSE; //KNI_ThrowNew(midpIllegalArgumentException, NULL);
++            } else if (KNI_IsSameObject(gImg, img)) {
++                /* PS2ME: drawing an image onto the Graphics obtained from that
++                 * very same image (src==dst) is a no-op on real handsets. The
++                 * MIDP spec for drawImage() only mandates IllegalArgumentException
++                 * for a bad anchor -- the src==dst restriction belongs to
++                 * drawRegion() (see renderRegion below), NOT drawImage(). Stock
++                 * phoneME rejected it here, which threw IAE out of the game's
++                 * paint loop and froze the screen. Treat it as a successful no-op
++                 * (also dodges an overlapping same-buffer blit). Real case:
++                 * Zombie Infection runs b.getGraphics().drawImage(b,0,0,0). */
+             } else if (!normalize_anchor(&x, &y, srcImageDataPtr->width,
+ 					       srcImageDataPtr->height, 
+ 					       anchor)) {
