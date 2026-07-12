@@ -117,6 +117,23 @@
     return rel.tag_name || rel.name || 'release';
   }
 
+  // Order releases newest-version-first. The GitHub list API sorts by
+  // created_at, which is wrong when older tags are published (backfilled)
+  // later than newer ones — so sort by semantic version instead.
+  function versionKey(rel) {
+    return String(rel.tag_name || rel.name || '')
+      .replace(/^v/i, '').split('.').map(function (n) { return parseInt(n, 10) || 0; });
+  }
+  function compareVersionsDesc(a, b) {
+    var A = versionKey(a), B = versionKey(b);
+    var len = Math.max(A.length, B.length);
+    for (var i = 0; i < len; i++) {
+      var diff = (B[i] || 0) - (A[i] || 0);
+      if (diff) return diff;
+    }
+    return 0;
+  }
+
   // ---- rendering ---------------------------------------------------------
   function renderFeatured(rel) {
     var card = el('article', 'rel-featured');
@@ -194,6 +211,7 @@
         fallback('No published releases yet.');
         return;
       }
+      releases.sort(compareVersionsDesc);   // newest version first, not newest-created
       render(releases);
     })
     .catch(function () {
