@@ -489,4 +489,42 @@ if ! grep -q 'PS2ME FASE 4' "$INTERP"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-global-reg.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 31) ps2me-jit-vpath-mips (PS2ME JIT, Fase 0). The r5900 dynamic-compiler backend
+#     lives in a brand-new src/vm/cpu/mips/ (delivered by the ps2/phoneme overlay).
+#     jvm.make hard-codes the per-CPU include dirs and vpaths (arm/c/i386/sh/thumb/
+#     thumb2) and does NOT list mips, so with carch=mips (PS2ME_JIT) the make can't
+#     find CodeGenerator_mips.cpp et al. Add cpu/mips to both the -I list (after
+#     cpu/thumb2) and the vpath list (after cpu/thumb). Harmless when PS2ME_JIT is
+#     off: nothing references the _mips files unless carch=mips. jvm.make is CRLF;
+#     the inserted lines are LF (make accepts). Idempotent (grep guard).
+JVMMAKE="$PHONEME/cldc/build/share/jvm.make"
+grep -q 'src/vm/cpu/mips' "$JVMMAKE" || { \
+  sed -i 's@\(-I"$(WorkSpace)/src/vm/cpu/thumb2"        \\\)@\1\n  -I"$(WorkSpace)/src/vm/cpu/mips"          \\@' \
+      "$JVMMAKE"; \
+  sed -i 's@\(vpath $(VPATH_PATTERNS) $(WorkSpace)/src/vm/cpu/thumb\)$@\1\nvpath $(VPATH_PATTERNS) $(WorkSpace)/src/vm/cpu/mips@' \
+      "$JVMMAKE"; \
+}
+
+# 32) ps2me-jit-makedeps-mips (PS2ME JIT, Fase 0). MakeDeps' Database.java keeps its
+#     OWN hard-coded per-CPU vpath list (jvm.make even warns to keep them in sync).
+#     Add cpu/mips there too so the dependency generator resolves the _mips sources
+#     referenced via <carch> in includeDB. The buildtool is recompiled from source
+#     each build, so editing the .java suffices. Idempotent (grep guard).
+DBJAVA="$PHONEME/cldc/src/tools/buildtool/makedep/Database.java"
+grep -q 'cpu/mips' "$DBJAVA" || \
+  sed -i 's@\(addVpath(workspace + "/src/vm/cpu/i386");\)@\1\n      addVpath(workspace + "/src/vm/cpu/mips");@' \
+      "$DBJAVA"
+
+# 33) ps2me-jit-globaldefs-compiler (PS2ME JIT, Fase 0). GlobalDefinitions_c.hpp
+#     (pulled via iarch=c) FORCE-undefs ENABLE_COMPILER to 0 unless CROSS_GENERATOR,
+#     on the theory that a C-interpreter build never has a compiler. Our hybrid keeps
+#     the C interpreter AND adds a runtime MIPS JIT, so on the EE target (where the
+#     cfg defines -DMIPS, host romgen does NOT) that undef must not fire. OR
+#     !defined(MIPS) into the guard so the target keeps ENABLE_COMPILER as configured
+#     while host passes still force it off. Idempotent (marker).
+GDEFS_C="$PHONEME/cldc/src/vm/cpu/c/GlobalDefinitions_c.hpp"
+grep -q '!defined(MIPS)' "$GDEFS_C" || \
+  sed -i 's/^#if !CROSS_GENERATOR/#if !CROSS_GENERATOR \&\& !defined(MIPS) \/* ps2me-jit: keep runtime JIT on the EE target *\//' \
+      "$GDEFS_C"
+
 echo "phoneME patches applied to: $PHONEME"
