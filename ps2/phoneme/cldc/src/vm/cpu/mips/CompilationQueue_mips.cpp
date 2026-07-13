@@ -11,7 +11,11 @@
 #if ENABLE_COMPILER
 #include "incls/_CompilationQueue_mips.cpp.incl"
 
-// Fase-0 stub: bodies are filled in guided by the linker's undefined-symbol
-// list (JIT_PLAN Fase 1+). Compiling with the JIT dormant (UseCompiler=false).
+// FASE 0 (dormant JIT): arch-specific OSR (on-stack replacement) entry emission.
+// On the compile path only; bail out. Mirrors CompilationQueue_i386.cpp.
+void OSRStub::emit_osr_entry_and_callinfo(CodeGenerator* gen JVM_TRAPS) {
+  (void)gen;
+  SHOULD_NOT_REACH_HERE();
+}
 
-#endif
+#endif // ENABLE_COMPILER

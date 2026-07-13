@@ -11,7 +11,14 @@
 #if ENABLE_COMPILER
 #include "incls/_RegisterAllocator_mips.cpp.incl"
 
-// Fase-0 stub: bodies are filled in guided by the linker's undefined-symbol
-// list (JIT_PLAN Fase 1+). Compiling with the JIT dormant (UseCompiler=false).
+// NOTE: the _register_references[] storage is defined by the shared
+// RegisterAllocator.cpp (HotRoutines), not per-arch -- defining it here too
+// would be a multiple-definition link error.
 
-#endif
+// initialize() is called only from Compiler::begin_compile(), i.e. behind the
+// UseCompiler gate. Real GPR-rotation tables for the r5900 arrive in Fase 3.
+void RegisterAllocator::initialize() {
+  SHOULD_NOT_REACH_HERE();
+}
+
+#endif // ENABLE_COMPILER

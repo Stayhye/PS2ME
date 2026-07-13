@@ -11,7 +11,12 @@
 #if ENABLE_COMPILER
 #include "incls/_VirtualStackFrame_mips.cpp.incl"
 
-// Fase-0 stub: bodies are filled in guided by the linker's undefined-symbol
-// list (JIT_PLAN Fase 1+). Compiling with the JIT dormant (UseCompiler=false).
+// FASE 0 (dormant JIT): the only arch-specific VirtualStackFrame member the
+// shared framework references. Compile path only; bail out. Mirrors
+// VirtualStackFrame_i386.cpp.
+bool VirtualStackFrame::flush_quick() {
+  SHOULD_NOT_REACH_HERE();
+  return false;
+}
 
-#endif
+#endif // ENABLE_COMPILER

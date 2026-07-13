@@ -527,4 +527,19 @@ grep -q '!defined(MIPS)' "$GDEFS_C" || \
   sed -i 's/^#if !CROSS_GENERATOR/#if !CROSS_GENERATOR \&\& !defined(MIPS) \/* ps2me-jit: keep runtime JIT on the EE target *\//' \
       "$GDEFS_C"
 
+# 34) ps2me-jit-dormant-fase0 (PS2ME JIT, Fase 0). The r5900 dynamic compiler is now
+#     compiled in (PS2ME_JIT), but its CodeGenerator/BinaryAssembler backend is still a
+#     bail-out skeleton (SHOULD_NOT_REACH_HERE) -- the link milestone, not a working JIT.
+#     UseCompiler defaults true, so the interpreter's hotness path (on_timer_tick /
+#     shared_invoke_compiler) would eventually hand a method to that skeleton and abort.
+#     Force the compiler dormant at VM init: the hybrid then runs pure interpreter,
+#     byte-identical to the non-JIT build, while the backend keeps linking. Gated by
+#     ENABLE_COMPILER -> the line is absent in production. Remove (or flip to a runtime
+#     opt-in) in Fase 2+, once the backend can actually emit r5900 code. Idempotent
+#     (marker). Anchored on the unique JVM::initialize() line _startup_phase_count = 0;.
+JVMCPP="$PHONEME/cldc/src/vm/share/runtime/JVM.cpp"
+grep -q 'ps2me-jit-dormant' "$JVMCPP" || \
+  sed -i 's@\(_startup_phase_count = 0;\)@\1\n#if ENABLE_COMPILER\n  UseCompiler = false; \/* ps2me-jit-dormant (Fase 0): JIT backend is a bail-out skeleton; keep the dynamic compiler off *\/\n#endif@' \
+      "$JVMCPP"
+
 echo "phoneME patches applied to: $PHONEME"

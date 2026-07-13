@@ -11,7 +11,33 @@
 #if ENABLE_COMPILER
 #include "incls/_BinaryAssembler_mips.cpp.incl"
 
-// Fase-0 stub: bodies are filled in guided by the linker's undefined-symbol
-// list (JIT_PLAN Fase 1+). Compiling with the JIT dormant (UseCompiler=false).
+// FASE 0 (dormant JIT): bail-out bodies for the arch entry points the shared
+// compiler framework references. Real delay-slot-aware r5900 emission arrives in
+// Fase 1 ("emit a function that returns 42"). Signatures mirror BinaryAssembler_mips.hpp.
 
-#endif
+void BinaryAssembler::mov(Register dst, Register src) {
+  (void)dst; (void)src;
+  SHOULD_NOT_REACH_HERE();
+}
+
+void BinaryAssembler::jmp(Label& L) {
+  (void)L;
+  SHOULD_NOT_REACH_HERE();
+}
+
+void BinaryAssembler::jmp(CompilationQueueElement* cqe) {
+  (void)cqe;
+  SHOULD_NOT_REACH_HERE();
+}
+
+void BinaryAssembler::bind(Label& L, int alignment) {
+  (void)L; (void)alignment;
+  SHOULD_NOT_REACH_HERE();
+}
+
+void BinaryAssembler::bind_to(Label& L, jint code_offset) {
+  (void)L; (void)code_offset;
+  SHOULD_NOT_REACH_HERE();
+}
+
+#endif // ENABLE_COMPILER
