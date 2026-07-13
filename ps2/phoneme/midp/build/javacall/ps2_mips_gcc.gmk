@@ -60,6 +60,14 @@ EXTRA_CFLAGS += -std=gnu99 -fpermissive
 # long/double field fix in Oop.hpp (patch-phoneme.sh #22).
 EXTRA_CFLAGS += -fno-store-merging -fno-tree-vectorize
 
+# Perf front PASSO 0b: compile the native-draw timing hooks (patch #29 ps2me-frame-profile)
+# into the gxj primitives when PS2ME_PROFILE_FRAME=true. make imports the env var of the same
+# name automatically; our layer defines the ps2me_prof_* callbacks under the same flag. Inert
+# unless set, so normal builds are byte-identical.
+ifeq ($(PS2ME_PROFILE_FRAME), true)
+EXTRA_CFLAGS += -DPS2ME_PROFILE_FRAME
+endif
+
 # Select the hard-coded (generic) security policy back-end instead of the dynamic
 # javacall one. The javacall path (javacall_policy_load.c) reads the permission
 # group/domain tables through javacall_permissions_* -- which are stubs in our port

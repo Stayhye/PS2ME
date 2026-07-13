@@ -20,6 +20,16 @@ PS2SDK=${PS2SDK:-/usr/local/ps2dev/ps2sdk}
 export GNU_TOOLS_DIR=${GNU_TOOLS_DIR:-/usr/local/ps2dev/ee-crosswrap}
 export JDK_DIR=${JDK_DIR:-/opt/java/openjdk}
 
+# Perf front PASSO 0b: normalize the profile toggle to the exact value the gxj gmk hook
+# (ps2_mips_gcc.gmk: ifeq ($(PS2ME_PROFILE_FRAME),true)) matches, and export it so `make`
+# imports it. Accepts any non-zero value (e.g. `docker run -e PS2ME_PROFILE_FRAME=1`). When
+# set, the native-draw timing hooks (patch #29) compile into the gxj primitives; unset ->
+# byte-identical production. Pair with the SAME env var on build-elf-midp-ps2.sh (our layer).
+if [ "${PS2ME_PROFILE_FRAME:-0}" != "0" ]; then
+    export PS2ME_PROFILE_FRAME=true
+    echo "    (profile) PS2ME_PROFILE_FRAME -> gxj native-draw timing hooks ON (B split)"
+fi
+
 CLDC_DIST=/build/cldc_ps2_out/ps2_mips/dist
 PCSL_OUT=/build/pcsl_ps2_out
 JC_OUT=/build/javacall_ps2

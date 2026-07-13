@@ -13,6 +13,13 @@
 #include "../hal/SystemClock.hpp"
 #include "../hal/TimerService.hpp"
 
+#ifdef PS2ME_PROFILE_FRAME
+// Frame profiler (PASSO A-decomp): attribute Thread.sleep pacing time to (poll/idle). Defined
+// in the platform layer (Ps2Framebuffer.cpp); resolved at the final link.
+extern "C" long long ps2me_prof_now(void);
+extern "C" void ps2me_prof_poll_add(long long startTick, int which);  // which: 0=event_receive 1=Thread.sleep
+#endif
+
 extern "C" {
 
 // --- native timers -------------------------------------------------------
@@ -42,7 +49,13 @@ void javacall_time_resume_ticks(javacall_handle handle) {
 }
 
 void javacall_time_sleep(javacall_uint64 ms) {
+#ifdef PS2ME_PROFILE_FRAME
+    const long long _pt = ps2me_prof_now();
     ps2::hal::SystemClock::instance().sleep(ms);
+    ps2me_prof_poll_add(_pt, 1);   // 1 = Thread.sleep (pacing)
+#else
+    ps2::hal::SystemClock::instance().sleep(ms);
+#endif
 }
 
 // --- clocks --------------------------------------------------------------

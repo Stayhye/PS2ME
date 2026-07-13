@@ -1,0 +1,125 @@
+ps2me-frame-profile (PASSO 0b): time the native gxj draw primitives BY CATEGORY so the in-game
+frame profiler can split (A) interpret from (B) native draw and break B into fill / blit /
+other(line,tri,copyArea) / pixel(drawRGB,getRGB). Each instrumented function declares a scoped
+__attribute__((cleanup)) timer (robust to early returns) calling our layer's ps2me_prof_now()/
+ps2me_prof_draw_add(start,cat), resolved at the final --start-group link. Compiled in ONLY under
+-DPS2ME_PROFILE_FRAME (ps2_mips_gcc.gmk hook) -> production byte-identical. Applied with
+--ignore-whitespace after LF-normalizing (tree may be CRLF).
+
+--- a/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_graphics.c
++++ b/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_graphics.c
+@@ -96,10 +96,22 @@
+ /**
+  * Draw triangle
+  */
++/* ps2me-frame-profile (PASSO 0b): native-draw timing for the A/B frame split, by category. */
++#ifdef PS2ME_PROFILE_FRAME
++extern long long ps2me_prof_now(void);
++extern void ps2me_prof_draw_add(long long startTick, int cat);
++typedef struct { long long t; int cat; } ps2me_prof_scope_t;
++static inline void ps2me_prof_draw_cleanup(ps2me_prof_scope_t *s) { ps2me_prof_draw_add(s->t, s->cat); }
++#define PS2ME_PROF_DRAW_SCOPE(CAT) \
++  ps2me_prof_scope_t __attribute__((cleanup(ps2me_prof_draw_cleanup))) _ps2me_pdt = { ps2me_prof_now(), (CAT) }
++#else
++#define PS2ME_PROF_DRAW_SCOPE(CAT) ((void)0)
++#endif
+ void
+ gx_fill_triangle(jint color, const jshort *clip, 
+ 		  const java_imagedata *dst, int dotted, 
+                   int x1, int y1, int x2, int y2, int x3, int y3) {
++  PS2ME_PROF_DRAW_SCOPE(2);
+   gxj_screen_buffer screen_buffer;
+   gxj_screen_buffer *sbuf = gxj_get_image_screen_buffer_impl(dst, &screen_buffer, NULL);
+   sbuf = (gxj_screen_buffer *)getScreenBuffer(sbuf);
+@@ -120,6 +132,7 @@
+ gx_copy_area(const jshort *clip, 
+ 	      const java_imagedata *dst, int x_src, int y_src, 
+               int width, int height, int x_dest, int y_dest) {
++  PS2ME_PROF_DRAW_SCOPE(2);
+   gxj_screen_buffer screen_buffer;
+   gxj_screen_buffer *sbuf = gxj_get_image_screen_buffer_impl(dst, &screen_buffer, NULL);
+   sbuf = (gxj_screen_buffer *)getScreenBuffer(sbuf);
+@@ -191,6 +204,7 @@
+ 	     const java_imagedata *dst, jint *rgbData,
+              jint offset, jint scanlen, jint x, jint y,
+              jint width, jint height, jboolean processAlpha) {
++  PS2ME_PROF_DRAW_SCOPE(3);
+     int diff;
+ 
+     gxj_screen_buffer screen_buffer;
+@@ -388,6 +402,7 @@
+ 	      const java_imagedata *dst, int dotted, 
+               int x1, int y1, int x2, int y2)
+ {
++  PS2ME_PROF_DRAW_SCOPE(2);
+   int lineStyle = (dotted ? DOTTED : SOLID);
+   gxj_pixel_type pixelColor = GXJ_RGB24TORGB16(color);
+   gxj_screen_buffer screen_buffer;
+@@ -466,6 +481,7 @@
+ gx_fill_rect(jint color, const jshort *clip, 
+ 	      const java_imagedata *dst, int dotted, 
+               int x, int y, int width, int height) {
++  PS2ME_PROF_DRAW_SCOPE(0);
+ 
+   gxj_pixel_type pixelColor = GXJ_RGB24TORGB16(color);
+   gxj_screen_buffer screen_buffer;
+--- a/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_image.c
++++ b/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_image.c
+@@ -510,10 +510,22 @@
+  * @param x the x coordinate of the anchor point
+  * @param y the y coordinate of the anchor point
+  */
++/* ps2me-frame-profile (PASSO 0b): native-draw timing for the A/B frame split, by category. */
++#ifdef PS2ME_PROFILE_FRAME
++extern long long ps2me_prof_now(void);
++extern void ps2me_prof_draw_add(long long startTick, int cat);
++typedef struct { long long t; int cat; } ps2me_prof_scope_t;
++static inline void ps2me_prof_draw_cleanup(ps2me_prof_scope_t *s) { ps2me_prof_draw_add(s->t, s->cat); }
++#define PS2ME_PROF_DRAW_SCOPE(CAT) \
++  ps2me_prof_scope_t __attribute__((cleanup(ps2me_prof_draw_cleanup))) _ps2me_pdt = { ps2me_prof_now(), (CAT) }
++#else
++#define PS2ME_PROF_DRAW_SCOPE(CAT) ((void)0)
++#endif
+ void gx_render_image(const java_imagedata * srcImageDataPtr,
+ 		      const java_imagedata * dstMutableImageDataPtr,
+ 		      const jshort * clip,
+ 		      jint x, jint y) {
++  PS2ME_PROF_DRAW_SCOPE(1);
+   gxj_screen_buffer srcSBuf;
+   gxj_screen_buffer dstSBuf;
+ 
+@@ -548,6 +560,7 @@
+ 				  jint width, jint height,
+ 				   jint x_dest, jint y_dest,
+ 				   jint transform) {
++    PS2ME_PROF_DRAW_SCOPE(1);
+     gxj_screen_buffer srcSBuf;
+     gxj_screen_buffer dstSBuf;
+ 
+--- a/midp/src/lowlevelui/image/img_putpixel/native/imgj_imagedatafactory_kni.c
++++ b/midp/src/lowlevelui/image/img_putpixel/native/imgj_imagedatafactory_kni.c
+@@ -235,12 +235,24 @@
+  * @param width The width of the selected region
+  * @param height The height of the selected region
+  */
++/* ps2me-frame-profile (PASSO 0b): native-draw timing for the A/B frame split, by category. */
++#ifdef PS2ME_PROFILE_FRAME
++extern long long ps2me_prof_now(void);
++extern void ps2me_prof_draw_add(long long startTick, int cat);
++typedef struct { long long t; int cat; } ps2me_prof_scope_t;
++static inline void ps2me_prof_draw_cleanup(ps2me_prof_scope_t *s) { ps2me_prof_draw_add(s->t, s->cat); }
++#define PS2ME_PROF_DRAW_SCOPE(CAT) \
++  ps2me_prof_scope_t __attribute__((cleanup(ps2me_prof_draw_cleanup))) _ps2me_pdt = { ps2me_prof_now(), (CAT) }
++#else
++#define PS2ME_PROF_DRAW_SCOPE(CAT) ((void)0)
++#endif
+ void imgj_get_argb(const java_imagedata * srcImageDataPtr,
+                    jint * rgbBuffer,
+                    jint offset,
+                    jint scanlength,
+                    jint x, jint y, jint width, jint height,
+                    img_native_error_codes * errorPtr) {
++  PS2ME_PROF_DRAW_SCOPE(3);
+ 
+   int srcWidth, srcHeight;
+   PIXEL *srcPixelData;
