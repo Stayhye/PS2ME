@@ -450,4 +450,30 @@ if ! grep -q 'src==dst' "$GXKNI"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-drawimage-selfblit.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 29) ps2me-frame-profile (PS2ME perf front, PASSO 0b). Times the native gxj draw primitives
+#     (gx_fill_rect / gx_draw_line / gx_fill_triangle / gx_copy_area / gx_render_image /
+#     gx_render_imageregion) so the in-game frame profiler can split (A) interpret from (B)
+#     native draw. Each function gets a scoped __attribute__((cleanup)) timer (robust to early
+#     returns) that calls our layer's ps2me_prof_now()/ps2me_prof_draw_add(), resolved at the
+#     final --start-group link. Compiled in ONLY under -DPS2ME_PROFILE_FRAME (ps2_mips_gcc.gmk
+#     hook, gated by the PS2ME_PROFILE_FRAME make/env var) -> production is byte-identical.
+#     Ships as a .patch (multi-hunk, 2 files) applied with --ignore-whitespace after LF-
+#     normalizing both file and patch (tree may be CRLF). Idempotent (marker guard).
+GXJ_GFX="$PHONEME/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_graphics.c"
+GXJ_IMG="$PHONEME/midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_image.c"
+IMGJ_FAC="$PHONEME/midp/src/lowlevelui/image/img_putpixel/native/imgj_imagedatafactory_kni.c"
+# These 3 files are touched by NO other patch, so reset them to pristine FIRST (phoneME tree is
+# a git checkout). This lets an UPDATED profiler patch re-apply cleanly across iterations -- the
+# marker guard alone would skip a changed patch on the persistent tree, leaving stale hooks.
+# git-based; harmless (|| true) if git/.git is absent (then the marker guard governs). When the
+# flag is off the inserted hooks expand to ((void)0) -> production object code is byte-identical.
+git -C "$PHONEME" checkout -- \
+  midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_graphics.c \
+  midp/src/lowlevelui/graphics/gx_putpixel/native/gxj_image.c \
+  midp/src/lowlevelui/image/img_putpixel/native/imgj_imagedatafactory_kni.c 2>/dev/null || true
+if ! grep -q 'ps2me-frame-profile' "$GXJ_GFX"; then
+  sed -i 's/\r$//' "$GXJ_GFX" "$GXJ_IMG" "$IMGJ_FAC"
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-frame-profile.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

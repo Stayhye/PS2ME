@@ -8,6 +8,11 @@
 
 #include <malloc.h>   // memalign / free (128-byte aligned for DMA)
 
+#ifdef PS2ME_PROFILE_FRAME
+#include "../hal/Logger.hpp"         // A/B/C frame-profiler dump sink (PASSO 0a)
+#include <cstdio>                    // snprintf for the profiler line
+#endif
+
 namespace ps2 {
 namespace platform {
 
@@ -76,7 +81,146 @@ void fpsTick() {
     }
 }
 
+#ifdef PS2ME_PROFILE_FRAME
+// ---- PASSO 0a frame profiler (opt-in, compile-time; production is byte-identical) -----
+// Splits each game frame into (A+B) interpret+draw vs (C) present, and further splits (C)
+// into the RGB565->RGBA5551 convert loop and the GS upload (which carries the 2 DMA waits
+// in GsDisplay::blit). NOTE: (B) native drawing is inlined into interpretation -- the gxj
+// rasterizer writes straight into raster_ (jcapp aliases gxj_system_screen_buffer.pixelData
+// to javacall_lcd_get_screen), so there is NO backbuffer/blit boundary to bracket here and
+// (A) interpret and (B) draw cannot be separated without instrumenting gxj (PASSO 0b). This
+// pass reports (A+B) lumped. Clock: SystemClock monotonic counter (PS2 = EE bus timer,
+// kBUSCLK ~= 6.8 ns/tick). Dumped ~1x/s via the Logger sink (PCSX2 console / EE TTY).
+//
+// Timeline per frame:  [present N-1: conv+upload] -> [interpret+draw = A+B] -> [present N]
+// so at present N entry:  (A+B) = (now - lastEntry) - C(previous present).
+namespace prof {
+    typedef javacall_int64 i64;
+    i64 lastEntry = 0;      // monotonic counter at the previous present() entry
+    i64 prevConv  = 0;      // convert-loop ticks measured in the previous present()
+    i64 prevUp    = 0;      // GS-upload ticks measured in the previous present()
+    // native-draw ticks the gxj hooks accumulate in the CURRENT frame, by category:
+    // [0]=fill(fillRect) [1]=blit(drawImage/Region) [2]=other(line/tri/copyArea) [3]=pixel(drawRGB/getRGB)
+    i64 drawTicks[4] = { 0, 0, 0, 0 };
+    // poll/idle ticks in the CURRENT frame, split by source -- NOT computing bytecode:
+    // [0]=event_receive (event wait/poll) [1]=Thread.sleep (time-based pacing). Splitting the
+    // two answers whether idle time is an evitable event wait or unrecoverable pacing sleep.
+    i64 pollTicks[2] = { 0, 0 };
+    i64 accFrame = 0, accComp = 0, accConv = 0, accUp = 0;   // ~1 s window accumulators
+    i64 accPoll[2] = { 0, 0 };   // [0]=event_receive [1]=Thread.sleep
+    // event_receive diagnostic: sum of REQUESTED wait (ms) + number of calls, to compare
+    // what the VM asked to wait against ev (actual busy-spin) -- exposes overshoot vs genuine idle.
+    i64 reqMsFrame = 0; int evCallsFrame = 0;
+    i64 accReqMs = 0; i64 accEvCalls = 0;
+    i64 accB[4] = { 0, 0, 0, 0 };
+    int frames = 0;
+
+    inline i64 now() { return ps2::hal::SystemClock::instance().monotonicCounter(); }
+
+    void dump() {
+        const i64 freq = ps2::hal::SystemClock::instance().monotonicFrequency();
+        if (frames <= 0 || freq <= 0) { return; }
+        // Per-frame averages in microseconds (integer math; no float/FPU on the EE path).
+        const i64 US = 1000000;
+        const i64 fr = accFrame * US / freq / frames;
+        const i64 cp = accComp  * US / freq / frames;   // compute: dispatch + GC + KNI (A minus poll)
+        const i64 pe = accPoll[0] * US / freq / frames;   // poll/idle: event_receive (event wait)
+        const i64 ps = accPoll[1] * US / freq / frames;   // poll/idle: Thread.sleep (pacing)
+        const i64 pl = pe + ps;                           // total poll/idle
+        const i64 bf = accB[0]  * US / freq / frames;   // fill
+        const i64 bl = accB[1]  * US / freq / frames;   // blit
+        const i64 bo = accB[2]  * US / freq / frames;   // other (line/tri/copyArea)
+        const i64 bp = accB[3]  * US / freq / frames;   // pixel (drawRGB/getRGB)
+        const i64 bt = bf + bl + bo + bp;
+        const i64 cv = accConv  * US / freq / frames;
+        const i64 up = accUp    * US / freq / frames;
+        const i64 rq = accReqMs * 1000 / frames;   // avg REQUESTED event wait (us/frame)
+        const i64 en = accEvCalls;                 // event_receive calls in this ~1 s window
+        const i64 den = fr > 0 ? fr : 1;
+        // comp = interpret compute (dispatch+GC+KNI). poll = idle, split ev=event_receive
+        // sl=Thread.sleep pacing. B split: fl=fillRect bl=drawImage ot=line/tri/copy px=drawRGB/getRGB.
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "[PROF] FPS=%d fr=%lldus | comp=%lldus(%lld%%) poll=%lldus(%lld%%)[ev=%lld sl=%lld req=%lld n=%lld] B=%lldus(%lld%%)[fl=%lld bl=%lld ot=%lld px=%lld] conv=%lldus up=%lldus\n",
+            frames,
+            (long long)fr,
+            (long long)cp, (long long)(cp * 100 / den),
+            (long long)pl, (long long)(pl * 100 / den),
+            (long long)pe, (long long)ps, (long long)rq, (long long)en,
+            (long long)bt, (long long)(bt * 100 / den),
+            (long long)bf, (long long)bl, (long long)bo, (long long)bp,
+            (long long)cv, (long long)up);
+        ps2::hal::Logger::instance().print(buf);
+        accFrame = accComp = accConv = accUp = 0;
+        accPoll[0] = accPoll[1] = 0;
+        accReqMs = accEvCalls = 0;
+        accB[0] = accB[1] = accB[2] = accB[3] = 0;
+        frames = 0;
+    }
+
+    // Called at the very top of every present(), before any early return, so each presented
+    // frame is counted exactly once regardless of which present path it takes.
+    void onEntry() {
+        // One-shot liveness marker: if THIS prints but the periodic dumps do not, the flag
+        // is compiled in and the bug is in the accumulator; if it never prints, the profiler
+        // was compiled out (PS2ME_PROFILE_FRAME not set at build time).
+        if (lastEntry == 0) {
+            ps2::hal::Logger::instance().print("[PROF] frame profiler active (dumps ~1x/s)\n");
+        }
+        const i64 t = now();
+        // Snapshot + reset this frame's per-category native-draw ticks and poll/idle ticks.
+        const i64 b0 = drawTicks[0], b1 = drawTicks[1], b2 = drawTicks[2], b3 = drawTicks[3];
+        drawTicks[0] = drawTicks[1] = drawTicks[2] = drawTicks[3] = 0;
+        const i64 pe = pollTicks[0], ps = pollTicks[1]; pollTicks[0] = pollTicks[1] = 0;
+        const i64 poll = pe + ps;
+        const i64 rq = reqMsFrame; reqMsFrame = 0;
+        const int ec = evCallsFrame; evCallsFrame = 0;
+        if (lastEntry != 0) {
+            const i64 frame = t - lastEntry;
+            const i64 tb = b0 + b1 + b2 + b3;
+            i64 comp = frame - prevConv - prevUp - tb - poll;   // compute = A minus poll/idle
+            if (comp < 0) { comp = 0; }                         // clamp measurement jitter
+            accFrame += frame; accComp += comp;
+            accPoll[0] += pe; accPoll[1] += ps;
+            accReqMs += rq; accEvCalls += ec;
+            accB[0] += b0; accB[1] += b1; accB[2] += b2; accB[3] += b3;
+            accConv += prevConv; accUp += prevUp; ++frames;
+            const i64 freq = ps2::hal::SystemClock::instance().monotonicFrequency();
+            if (accFrame >= freq) { dump(); }   // ~1 s of frames accumulated
+        }
+        lastEntry = t;
+        prevConv = 0; prevUp = 0;   // default 0: an early-return frame performs no convert/upload
+    }
+} // namespace prof
+#endif // PS2ME_PROFILE_FRAME
+
 } // namespace
+
+#ifdef PS2ME_PROFILE_FRAME
+// gxj (MIDP C, in libjvm.a) calls these to attribute native-draw time to (B). Defined in our
+// layer so the single final --start-group link resolves them; the accumulator lives in the
+// file-local prof namespace above. C linkage so the C gxj call sites match (no name mangling).
+extern "C" long long ps2me_prof_now(void) {
+    return (long long)ps2::hal::SystemClock::instance().monotonicCounter();
+}
+extern "C" void ps2me_prof_draw_add(long long startTick, int cat) {
+    if (cat < 0 || cat > 3) { return; }
+    prof::drawTicks[cat] += (long long)ps2::hal::SystemClock::instance().monotonicCounter() - startTick;
+}
+// Called by javacall_event_receive (which=0) / javacall_time_sleep (which=1) in our contract
+// layer to attribute idle time to (poll), split by source so event-wait and Thread.sleep
+// pacing are separable -- the deciding measure for whether the idle is evitable.
+extern "C" void ps2me_prof_poll_add(long long startTick, int which) {
+    if (which < 0 || which > 1) { return; }
+    prof::pollTicks[which] += (long long)ps2::hal::SystemClock::instance().monotonicCounter() - startTick;
+}
+// Called by javacall_event_receive with the timeout the VM REQUESTED (ms). Compared against
+// ev (actual busy-spin) it separates overshoot (fixable) from genuine idle (pacing/deadend).
+extern "C" void ps2me_prof_evreq_add(long timeoutMs) {
+    prof::reqMsFrame += (timeoutMs > 0 ? (long long)timeoutMs : 0);
+    prof::evCallsFrame += 1;
+}
+#endif // PS2ME_PROFILE_FRAME
 
 void Ps2Framebuffer::present() {
     if (raster_ == 0 || gsBuf_ == 0) {
@@ -84,6 +228,9 @@ void Ps2Framebuffer::present() {
     }
     // Count every presented game frame for the FPS metric (measured even in debug view).
     fpsTick();
+#ifdef PS2ME_PROFILE_FRAME
+    prof::onEntry();   // close out the previous frame's (A+B); start this frame's clock
+#endif
     // Debug mode: the front-end composites a split view (game on the left, the full app
     // log on the right) and presents it itself -- we are done for this frame.
     if (Ps2Frontend::instance().debugPresent(
@@ -106,6 +253,9 @@ void Ps2Framebuffer::present() {
     // ends (RGB565 has R in the high bits, CT16 has R in the low bits), G drops its
     // least-significant bit (6 -> 5), and alpha is forced set.
     const size_t count = static_cast<size_t>(width_) * height_;
+#ifdef PS2ME_PROFILE_FRAME
+    const javacall_int64 _cvStart = prof::now();   // (C-convert) span begin
+#endif
     for (size_t i = 0; i < count; ++i) {
         const unsigned p = raster_[i];
         const unsigned r = (p >> 11) & 0x1F;
@@ -113,12 +263,21 @@ void Ps2Framebuffer::present() {
         const unsigned b =  p        & 0x1F;
         gsBuf_[i] = static_cast<javacall_pixel>(r | ((g >> 1) << 5) | (b << 10) | 0x8000);
     }
+#ifdef PS2ME_PROFILE_FRAME
+    prof::prevConv = prof::now() - _cvStart;
+#endif
 
     // Opt-in performance metric (Settings -> FPS counter, default off): hand the frame rate
     // to GsDisplay, which draws it on the letterbox border OUTSIDE the game canvas.
     gs.setFpsOverlay(Settings::instance().fpsCounter(), g_fpsValue);
 
+#ifdef PS2ME_PROFILE_FRAME
+    const javacall_int64 _upStart = prof::now();   // (C-upload) span begin: GS upload + 2 DMA waits live in blit()
     gs.present(reinterpret_cast<const u16*>(gsBuf_), width_, height_);
+    prof::prevUp = prof::now() - _upStart;
+#else
+    gs.present(reinterpret_cast<const u16*>(gsBuf_), width_, height_);
+#endif
 }
 
 void Ps2Framebuffer::presentRegion(int /*ystart*/, int /*yend*/) {

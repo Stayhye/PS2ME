@@ -112,6 +112,14 @@ if [ "${PS2ME_NO_IOP_RESET:-0}" != "0" ]; then
     JC_EXTRA="-DPS2ME_NO_IOP_RESET"
     echo "    (debug) PS2ME_NO_IOP_RESET set -> SIF tty kept alive, IOP reset skipped"
 fi
+# Perf knob (PASSO 0a): PS2ME_PROFILE_FRAME=1 builds the in-game frame profiler into our
+# layer only (Ps2Framebuffer::present splits frame into A+B / C-convert / C-upload and dumps
+# ~1x/s to the log). Relink-only -- does NOT rebuild libjvm.a, so (B) native drawing stays
+# lumped into (A+B). Off -> production build is byte-identical.
+if [ "${PS2ME_PROFILE_FRAME:-0}" != "0" ]; then
+    JC_EXTRA="$JC_EXTRA -DPS2ME_PROFILE_FRAME"
+    echo "    (profile) PS2ME_PROFILE_FRAME set -> in-game A+B/C frame profiler on (dumps ~1x/s to the log)"
+fi
 JC_FLAGS="-D_EE -DMIPS -G0 -O2 -Wall -Wextra -fno-exceptions -fno-rtti $JC_EXTRA \
     -I$JC_OUT/inc -I$PS2SDK/ee/include -I$PS2SDK/common/include -I$PS2SDK/ports/include \
     -I/work/vendors -I/work/assets"
