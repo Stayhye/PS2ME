@@ -98,11 +98,23 @@ javacall_result EventQueue::receive(long timeoutMs, unsigned char* buffer, int m
             if (outLen) *outLen = 0;
             return JAVACALL_FAIL;
         }
-        if (timeoutMs > 0 && clock.elapsedMillis() >= deadline) {
-            if (outLen) *outLen = 0;
-            return JAVACALL_FAIL;
+        // Nap POLL_INTERVAL_MS, but for a bounded wait clamp the LAST nap to the time
+        // still left before the deadline. Ps2Clock::sleep busy-waits a full quantum, so
+        // without the clamp a bounded wait rounds UP to the next 5 ms multiple, waking the
+        // VM's green thread up to ~5 ms LATE every call. That overshoot steals frame budget
+        // (never gains -- we only stop waking late, never wake before the game asked).
+        javacall_uint64 nap = POLL_INTERVAL_MS;
+        if (timeoutMs > 0) {
+            const javacall_int64 remaining = deadline - clock.elapsedMillis();
+            if (remaining <= 0) {
+                if (outLen) *outLen = 0;
+                return JAVACALL_FAIL;
+            }
+            if ((javacall_int64)nap > remaining) {
+                nap = (javacall_uint64)remaining;
+            }
         }
-        clock.sleep(POLL_INTERVAL_MS);   // -1 falls through here forever
+        clock.sleep(nap);   // timeoutMs < 0 (forever) keeps the full quantum
     }
 }
 
