@@ -256,7 +256,26 @@ void Ps2Framebuffer::present() {
 #ifdef PS2ME_PROFILE_FRAME
     const javacall_int64 _cvStart = prof::now();   // (C-convert) span begin
 #endif
-    for (size_t i = 0; i < count; ++i) {
+    // SWAR fast path: convert 4 px per iteration using the r5900's native 64-bit ld/sd.
+    // Both buffers are memalign(128), so at any index that is a multiple of 4 the 8-byte
+    // access is 8-aligned -- no EE unaligned-store trap, no peel needed. Per-lane masks
+    // isolate each 16-bit pixel's bits BEFORE the shift, so shifted bits stay inside their
+    // own lane (no cross-lane bleed; the bits that a 64-bit shift would carry across a lane
+    // boundary are masked to zero). Mapping matches the scalar tail below exactly:
+    //   R[15:11] >> 11 -> [4:0]   G[10:6] >> 1 -> [9:5] (drops green LSB)
+    //   B[4:0]  << 10 -> [14:10]  A -> bit 15
+    const size_t vwords = (count & ~static_cast<size_t>(3)) >> 2;   // # of 4-px 64-bit words
+    const unsigned long long* src64 = reinterpret_cast<const unsigned long long*>(raster_);
+    unsigned long long*       dst64 = reinterpret_cast<unsigned long long*>(gsBuf_);
+    for (size_t v = 0; v < vwords; ++v) {
+        const unsigned long long w = src64[v];
+        dst64[v] = 0x8000800080008000ULL
+                 | ((w & 0xF800F800F800F800ULL) >> 11)
+                 | ((w & 0x07C007C007C007C0ULL) >> 1)
+                 | ((w & 0x001F001F001F001FULL) << 10);
+    }
+    // Scalar tail for the remaining (count % 4) pixels.
+    for (size_t i = vwords << 2; i < count; ++i) {
         const unsigned p = raster_[i];
         const unsigned r = (p >> 11) & 0x1F;
         const unsigned g = (p >> 5)  & 0x3F;
