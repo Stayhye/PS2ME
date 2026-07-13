@@ -1,0 +1,28 @@
+diff --git a/cldc/src/vm/cpu/c/Interpreter_c.cpp b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -94,10 +94,24 @@ extern "C" {
+   } basic_value;
+
+   /* global VM pointers */
++#if defined(__mips__)
++  /* PS2ME FASE 4: pin the hot interpreter state in fixed callee-saved MIPS GPRs
++     (s0-s3) instead of static memory. The stock build reloads/stores these globals
++     from memory on EVERY bytecode -- the dispatch loop is interpreter_dispatch_table
++     [*g_jpc](), and each handler re-derives jsp/jlocals/jfp from memory -- which is
++     the structural ceiling (see PERF_PLAN 3). Register residency removes those
++     load/stores. s0-s7 are callee-saved, so KNI/runtime calls preserve them across
++     the call boundary; no code takes &g_jXXX (verified), so this is legal. */
++  register address g_jfp     asm("$16");  /* s0: Java frame pointer   */
++  register address g_jsp     asm("$17");  /* s1: Java stack pointer   */
++  register address g_jpc     asm("$18");  /* s2: Java program counter */
++  register address g_jlocals asm("$19");  /* s3: current Java locals  */
++#else
+   static address  g_jfp;     /* Java frame pointer   */
+   static address  g_jsp;     /* Java stack pointer   */
+   static address  g_jpc;     /* Java program counter */
+   static address  g_jlocals; /* current Java method locals pointer */
++#endif
+
+   /* used to return from interpreter via longjmp */
+   static jmp_buf interpreter_env;

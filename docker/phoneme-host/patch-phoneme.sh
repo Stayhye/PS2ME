@@ -476,4 +476,17 @@ if ! grep -q 'ps2me-frame-profile' "$GXJ_GFX"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-frame-profile.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 30) ps2me-global-reg (PS2ME perf front, FASE 4). Pins the hot interpreter state (g_jfp/g_jsp/
+#     g_jpc/g_jlocals) in fixed callee-saved MIPS GPRs (s0-s3, via `register ... asm("$1x")`)
+#     instead of static memory, removing the per-bytecode load/stores that were the structural
+#     ceiling (see PERF_PLAN 3 / 5.9). Gated by #if defined(__mips__) INSIDE the patch, so only the
+#     ps2_mips target is affected (host/i386 builds keep the static globals). Touches only the 4
+#     global pointer declarations -- disjoint from #26 (profile counter) and #27 (threaded dispatch).
+#     Measured on PCSX2: comp -34/-39%, Zombie 18->23 and caranguejo 29->36 (crossed 20 FPS).
+#     HW validation pending. Idempotent (marker guard on the FASE 4 comment).
+if ! grep -q 'PS2ME FASE 4' "$INTERP"; then
+  sed -i 's/\r$//' "$INTERP"
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-global-reg.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
