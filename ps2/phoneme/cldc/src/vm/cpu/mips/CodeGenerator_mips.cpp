@@ -48,6 +48,21 @@ static void mips_li(BinaryAssembler* a, Assembler::Register dst, juint imm) {
   }
 }
 
+// --- Fase 3 (Marco 3.2): deferred compare state ------------------------------
+// The r5900 has no condition-code register, but the shared compiler emits a
+// compare (cmp_values) immediately followed by a branch (conditional_jump_do)
+// with nothing in between (share/CodeGenerator.cpp branch_if/branch_if_do). We
+// park the compared operands here in cmp_values and synthesize the actual
+// slt/beq/bne inside conditional_jump_do. A single slot suffices: the compiler
+// is single-threaded and the two calls are always adjacent. The inline
+// if_then_else/if_iinc paths (which would interleave differently) stay in
+// bail-out and are barred by the compile trigger's whitelist.
+static bool                s_cmp_pending    = false;
+static Assembler::Register s_cmp_op1_reg    = Assembler::no_reg;
+static bool                s_cmp_op2_is_imm = false;
+static Assembler::Register s_cmp_op2_reg    = Assembler::no_reg;
+static jint                s_cmp_op2_imm    = 0;
+
 // Emit an EE C-ABI call to an absolute code address: materialize it in t9 (the
 // MIPS PIC call register), jalr, and fill the branch delay slot with a nop.
 // (ra is clobbered by jalr; the caller must have saved the real return address.)
@@ -144,10 +159,50 @@ void CodeGenerator::load_from_address(Value& result, BasicType type,
   }
 }
 
+// Fase 3 (Marco 3.2): store a single-word value to memory (base+disp16). Dual
+// of load_from_address; used when the VSF flushes a "changed" local to memory
+// (RawLocation::write_changes -> store_to_location -> LocationAddress over
+// g_jlocals), which happens at branch merges (conform_to) and register spills.
+// Immediates are materialized into $at (or $zero when 0); a register value is
+// stored directly. Two-word (long/double) and heap write barriers arrive with
+// later Marcos. Locals/expression-stack are plain MemoryAddress (no barrier).
 void CodeGenerator::store_to_address(Value& value, BasicType type,
                                      MemoryAddress& address) {
-  (void)value; (void)type; (void)address;
-  SHOULD_NOT_REACH_HERE();
+  if (!value.is_present()) return;   // nothing to store
+  GUARANTEE(stack_type_for(type) == value.stack_type(),
+            "types must match (taking stack types into account)");
+
+  const BinaryAssembler::Address addr = address.lo_address();
+  const Assembler::Register base = addr.base();
+  const int off = addr.disp();
+
+  Assembler::Register src;
+  if (value.is_immediate()) {
+    if (value.as_int() == 0) {
+      src = Assembler::zero;                 // store $zero directly
+    } else {
+      mips_li(this, Assembler::at, (juint)value.as_int());
+      src = Assembler::at;
+    }
+  } else {
+    GUARANTEE(value.in_register(), "only case left");
+    src = value.lo_register();
+  }
+
+  switch (type) {
+    case T_BOOLEAN:                              // fall through
+    case T_BYTE:   emit(Assembler::encode_sb(src, base, off)); break;
+    case T_CHAR:                                 // fall through
+    case T_SHORT:  emit(Assembler::encode_sh(src, base, off)); break;
+    case T_INT:                                  // fall through
+    case T_FLOAT:                                // fall through
+    case T_ARRAY:                                // fall through
+    case T_OBJECT: emit(Assembler::encode_sw(src, base, off)); break;
+    default:
+      // T_LONG / T_DOUBLE are two-word; those arrive with a later Marco.
+      SHOULD_NOT_REACH_HERE();
+      break;
+  }
 }
 
 // move(Value,Value): the shared Value::materialize()/writable_copy() call this to
@@ -185,15 +240,95 @@ void CodeGenerator::move(Assembler::Register dst, Assembler::Register src,
 
 // ---- comparisons / conditional control flow ----------------------------------
 
+// Fase 3 (Marco 3.2): no machine compare here -- the r5900 has no flags. Park
+// the operands; conditional_jump_do consumes them. The shared caller guarantees
+// op1 is in a register and op2 is a register or an immediate (op1-immediate is
+// folded away earlier in branch_if). Emits nothing.
 void CodeGenerator::cmp_values(Value& op1, Value& op2) {
-  (void)op1; (void)op2;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(op1.in_register(), "op1 must be in a register");
+  GUARANTEE(op2.is_immediate() || op2.in_register(),
+            "op2 must be in a register or an immediate");
+  s_cmp_op1_reg = op1.lo_register();
+  if (op2.is_immediate()) {
+    s_cmp_op2_is_imm = true;
+    s_cmp_op2_imm    = op2.as_int();
+    s_cmp_op2_reg    = Assembler::no_reg;
+  } else {
+    s_cmp_op2_is_imm = false;
+    s_cmp_op2_reg    = op2.lo_register();
+  }
+  s_cmp_pending = true;
 }
 
+// Fase 3 (Marco 3.2): synthesize the condition parked by cmp_values and branch
+// to `destination` when it holds. MIPS has no flags, so we materialize the
+// truth of the comparison with slt/sltu into $at (the assembler-temporary,
+// which is outside the allocatable pool and thus safe to clobber -- the VSF is
+// conformed only later, at the merge) and branch on it. The shared framework
+// already negates the condition when it wants the fall-through polarity, so we
+// only implement the eight direct cond_ops. Comparing against the immediate 0
+// uses the r5900's dedicated compare-with-zero branches, skipping the slt.
+// if_icmp compares are signed (slt); eq/ne need no slt at all.
 void CodeGenerator::conditional_jump_do(BytecodeClosure::cond_op condition,
                                         Label& destination) {
-  (void)condition; (void)destination;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(s_cmp_pending, "conditional_jump_do must follow a cmp_values");
+  s_cmp_pending = false;
+
+  const Assembler::Register rs = s_cmp_op1_reg;
+  const Assembler::Register at = Assembler::at;
+
+  if (s_cmp_op2_is_imm && s_cmp_op2_imm == 0) {
+    switch (condition) {
+      case BytecodeClosure::null:                    // ptr == null -> reg == 0
+      case BytecodeClosure::eq:
+        emit_branch(Assembler::encode_beq (rs, Assembler::zero, 0), destination); return;
+      case BytecodeClosure::nonnull:                 // ptr != null -> reg != 0
+      case BytecodeClosure::ne:
+        emit_branch(Assembler::encode_bne (rs, Assembler::zero, 0), destination); return;
+      case BytecodeClosure::lt:
+        emit_branch(Assembler::encode_bltz(rs, 0), destination); return;
+      case BytecodeClosure::ge:
+        emit_branch(Assembler::encode_bgez(rs, 0), destination); return;
+      case BytecodeClosure::gt:
+        emit_branch(Assembler::encode_bgtz(rs, 0), destination); return;
+      case BytecodeClosure::le:
+        emit_branch(Assembler::encode_blez(rs, 0), destination); return;
+      default:
+        SHOULD_NOT_REACH_HERE(); return;
+    }
+  }
+
+  // General case: get op2 into a register (immediates go to $at).
+  Assembler::Register rt;
+  if (s_cmp_op2_is_imm) {
+    mips_li(this, at, (juint)s_cmp_op2_imm);
+    rt = at;
+  } else {
+    rt = s_cmp_op2_reg;
+  }
+
+  switch (condition) {
+    case BytecodeClosure::null:
+    case BytecodeClosure::eq:
+      emit_branch(Assembler::encode_beq(rs, rt, 0), destination); return;
+    case BytecodeClosure::nonnull:
+    case BytecodeClosure::ne:
+      emit_branch(Assembler::encode_bne(rs, rt, 0), destination); return;
+    case BytecodeClosure::lt:                        // rs <  rt
+      emit(Assembler::encode_slt(at, rs, rt));
+      emit_branch(Assembler::encode_bne(at, Assembler::zero, 0), destination); return;
+    case BytecodeClosure::ge:                        // rs >= rt == !(rs < rt)
+      emit(Assembler::encode_slt(at, rs, rt));
+      emit_branch(Assembler::encode_beq(at, Assembler::zero, 0), destination); return;
+    case BytecodeClosure::gt:                        // rs >  rt == rt < rs
+      emit(Assembler::encode_slt(at, rt, rs));
+      emit_branch(Assembler::encode_bne(at, Assembler::zero, 0), destination); return;
+    case BytecodeClosure::le:                        // rs <= rt == !(rt < rs)
+      emit(Assembler::encode_slt(at, rt, rs));
+      emit_branch(Assembler::encode_beq(at, Assembler::zero, 0), destination); return;
+    default:
+      SHOULD_NOT_REACH_HERE(); return;
+  }
 }
 
 void CodeGenerator::if_then_else(Value& result, BytecodeClosure::cond_op condition,

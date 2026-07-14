@@ -11,7 +11,7 @@
      { void jit_fase2_arm(address); jit_fase2_arm(method); }
  #endif
  
-@@ -2400,6 +2402,70 @@
+@@ -2400,6 +2402,89 @@
      tty->cr();
    }
  #endif // PS2ME_JIT_FASE2
@@ -28,7 +28,7 @@
 +  static bool jit_fase3_whitelisted(address method) {
 +    Method::Raw m = (ReturnOop)method;
 +    const int len = m().code_size();
-+    if (len < 1 || len > 20) return false;              // keep bring-up tiny
++    if (len < 1 || len > 60) return false;              // keep bring-up small
 +    int bci = 0;
 +    while (bci < len) {
 +      const jubyte bc = m().ubyte_at(bci);
@@ -40,16 +40,35 @@
 +        case Bytecodes::_iconst_5:
 +        case Bytecodes::_iload_0:   case Bytecodes::_iload_1:
 +        case Bytecodes::_iload_2:   case Bytecodes::_iload_3:
++        case Bytecodes::_istore_0:  case Bytecodes::_istore_1:
++        case Bytecodes::_istore_2:  case Bytecodes::_istore_3:
 +        case Bytecodes::_iadd: case Bytecodes::_isub: case Bytecodes::_imul:
 +        case Bytecodes::_iand: case Bytecodes::_ior:  case Bytecodes::_ixor:
 +        case Bytecodes::_ireturn:
 +          l = 1; break;
-+        case Bytecodes::_iload:  case Bytecodes::_bipush:
++        case Bytecodes::_iload:  case Bytecodes::_istore:
++        case Bytecodes::_bipush:
 +          l = 2; break;
 +        case Bytecodes::_sipush:
 +          l = 3; break;
++        // Marco 3.2a: forward conditional/unconditional branches. Backward
++        // branches (loops) need check_timer_tick/call_vm -> Marco 3.2b, so any
++        // negative branch offset disqualifies the method (stays interpreted).
++        case Bytecodes::_ifeq: case Bytecodes::_ifne:
++        case Bytecodes::_iflt: case Bytecodes::_ifge:
++        case Bytecodes::_ifgt: case Bytecodes::_ifle:
++        case Bytecodes::_if_icmpeq: case Bytecodes::_if_icmpne:
++        case Bytecodes::_if_icmplt: case Bytecodes::_if_icmpge:
++        case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
++        case Bytecodes::_goto: {
++          const int hi  = m().ubyte_at(bci + 1);
++          const int lo  = m().ubyte_at(bci + 2);
++          const int off = (int)(jshort)((hi << 8) | lo);
++          if (off < 0) return false;                    // backward -> not yet
++          l = 3; break;
++        }
 +        default:
-+          return false;                                 // not covered by Marco 3.1
++          return false;                                 // not covered by Marco 3.2a
 +      }
 +      bci += l;
 +    }

@@ -31,9 +31,46 @@ void BinaryAssembler::long_at_put(const int position, const jint value) const {
   int_at_put(position, value);
 }
 
+// Fase 3 (Marco 3.2): PC-relative branch emission with forward-reference
+// chaining. A MIPS branch is `op rs, rt, imm16` where imm16 is the target
+// distance in INSTRUCTION WORDS relative to the delay slot (pos+4):
+//   taken PC = (pos + 4) + (sign_extend(imm16) << 2)
+// For a bound (backward) target the offset is known. For an unbound (forward)
+// target we cannot know it yet, so we store a link in the imm16 field pointing
+// at the PREVIOUS unresolved reference to the same label (word-scaled), and
+// remember this instruction as the new chain head in L. bind_to() later walks
+// the chain and rewrites every imm16 with the real offset. Unused labels get a
+// self-referencing sentinel (imm16 == -1) that terminates the walk. This is the
+// i386 emit_displacement/bind_to scheme, adapted to the 16-bit word-scaled
+// field. Every branch carries one delay slot, filled here with nop (automatic
+// delay-slot filling is a later optimization).
+void BinaryAssembler::emit_branch(Assembler::Instr base_instr, Label& L) {
+  const int pos = _code_offset;
+  int imm16;
+  if (L.is_bound()) {
+    const int off = (L.position() - (pos + 4)) >> 2;
+    GUARANTEE(off >= -32768 && off <= 32767, "branch offset out of imm16 range");
+    imm16 = off;
+  } else if (L.is_unused()) {
+    imm16 = -1;                       // self-terminating chain sentinel
+  } else {
+    const int link = (L.position() - (pos + 4)) >> 2;  // -> previous chain node
+    GUARANTEE(link >= -32768 && link <= 32767, "branch chain link out of range");
+    imm16 = link;
+  }
+  emit((int)base_instr | (imm16 & 0xffff));
+  emit(Assembler::encode_nop());      // delay slot
+  if (!L.is_bound()) {
+    L.link_to(pos);
+  }
+}
+
+// Unconditional jump to a label: the r5900 has no "branch always", so use the
+// canonical `beq zero, zero, off` (always taken, PC-relative, relocation-free --
+// unlike `j`, which needs an absolute target and would require relocation when
+// the CompiledMethod moves in the heap).
 void BinaryAssembler::jmp(Label& L) {
-  (void)L;
-  SHOULD_NOT_REACH_HERE();
+  emit_branch(Assembler::encode_beq(Assembler::zero, Assembler::zero, 0), L);
 }
 
 void BinaryAssembler::jmp(CompilationQueueElement* cqe) {
@@ -41,21 +78,46 @@ void BinaryAssembler::jmp(CompilationQueueElement* cqe) {
   SHOULD_NOT_REACH_HERE();
 }
 
-// Bind label L to the current code offset. In the Fase 2 trivial-method path the
-// only label bound is the unused method-entry label (no forward references), so
-// there is no link chain to patch. The r5900 forward-branch chain patching
-// (walk the chain, write each branch's imm16 = (target-(pos+4))>>2) is
-// co-designed with real branch emission and arrives in Fase 3; the GUARANTEE
-// trips if an unbound label ever reaches here before then.
+// Bind L to code_offset, patching every forward reference in its link chain.
+// Walk from the chain head (L.position()) following each node's stored link,
+// rewriting each branch's imm16 to the real word offset to the target. The walk
+// terminates at the self-referencing sentinel node (p == q). Mirrors the i386
+// bind_to, but reads/writes only the low 16 bits of each branch word.
 void BinaryAssembler::bind_to(Label& L, jint code_offset) {
-  GUARANTEE(!L.is_unbound(),
-            "r5900 forward-branch chain patching arrives in Fase 3");
+  if (L.is_unbound() && !has_overflown_compiled_method()) {
+    int p = L.position();
+    int q;
+    do {
+      q = p;
+      const jint instr = int_at(q);
+      const int link_words = (jint)(jshort)(instr & 0xffff);  // sign-extend
+      p = q + 4 + (link_words << 2);
+      GUARANTEE(p <= q, "Offsets must be decreasing");
+      const int off = (code_offset - (q + 4)) >> 2;
+      GUARANTEE(off >= -32768 && off <= 32767, "branch offset out of imm16 range");
+      int_at_put(q, (instr & ~0xffff) | (off & 0xffff));
+    } while (p != q);
+  }
   L.bind_to(code_offset);
 }
 
 void BinaryAssembler::bind_to(NearLabel& L, int code_offset) {
-  GUARANTEE(!L.is_unbound(),
-            "r5900 forward-branch chain patching arrives in Fase 3");
+  // The r5900 has no short-form branch (every branch uses the same imm16 field),
+  // so NearLabel is bound exactly like Label.
+  if (L.is_unbound() && !has_overflown_compiled_method()) {
+    int p = L.position();
+    int q;
+    do {
+      q = p;
+      const jint instr = int_at(q);
+      const int link_words = (jint)(jshort)(instr & 0xffff);
+      p = q + 4 + (link_words << 2);
+      GUARANTEE(p <= q, "Offsets must be decreasing");
+      const int off = (code_offset - (q + 4)) >> 2;
+      GUARANTEE(off >= -32768 && off <= 32767, "branch offset out of imm16 range");
+      int_at_put(q, (instr & ~0xffff) | (off & 0xffff));
+    } while (p != q);
+  }
   L.bind_to(code_offset);
 }
 

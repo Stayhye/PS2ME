@@ -94,6 +94,16 @@ class BinaryAssembler: public BinaryAssemblerCommon {
     emit_sentinel();
   }
 
+  // Emit a PC-relative branch whose 16-bit offset field targets Label L, then
+  // fill its single delay slot with nop. `base_instr` is the encoded branch
+  // with imm16==0 (e.g. encode_beq/encode_bne/encode_bltz...). Handles a bound
+  // (backward) target directly and threads unbound forward references through a
+  // link chain embedded in the imm16 field itself (in instruction-word units),
+  // exactly mirroring the i386 emit_displacement/bind_to scheme -- only here the
+  // link lives in the low 16 bits of the branch word and is scaled by 4.
+  // Public because CodeGenerator (a subclass) calls it from conditional_jump_do.
+  void emit_branch(Assembler::Instr base_instr, Label& L);
+
  private:
   jint long_at    (const int position) const;
   void long_at_put(const int position, const jint value) const;

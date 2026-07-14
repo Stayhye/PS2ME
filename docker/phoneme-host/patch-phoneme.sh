@@ -606,6 +606,20 @@ grep -q 'OmitLeafMethodFrames = false' "$JVMCPP" || \
   sed -i 's@\(  UseCompiler = false; /\* ps2me-jit-dormant.*/\)@\1\n#if defined(PS2ME_JIT_FASE2)\n  OmitLeafMethodFrames = false; \/* ps2me-jit-fase2: compiled methods build a full frame *\/\n#endif@' \
       "$JVMCPP"
 
+# 38b) ps2me-jit-fase3-fwdbranch (PS2ME JIT, Fase 3). OptimizeForwardBranches is
+#      a develop flag (const in the PRODUCT build, so it cannot be set at runtime
+#      like OmitLeafMethodFrames). It defaults to USE_OPT_FORWARD_BRANCH and, when
+#      on, folds a short forward `if` into if_then_else/if_iinc -- both still
+#      bail-out in the mips backend. Force its default to 0 at compile time when
+#      the Fase-3 build is requested (PS2ME_JIT_FASE3 is defined in every TU via
+#      the cfg's CPP_DEF_FLAGS), so branch_if always lowers through
+#      cmp_values + conditional_jump_do (Marco 3.2). OptimizeLoops stays default
+#      (Marco 3.2a is forward-branch only, so loop peeling never fires). Idempotent.
+BUILDFLAGS="$PHONEME/cldc/src/vm/share/utilities/BuildFlags.hpp"
+grep -q 'ps2me-jit-fase3: lower via cmp_values' "$BUILDFLAGS" || \
+  perl -0777 -i -pe 's/#define USE_OPT_FORWARD_BRANCH 1\n/#if defined(PS2ME_JIT_FASE3)\n#define USE_OPT_FORWARD_BRANCH 0 \/* ps2me-jit-fase3: lower via cmp_values+conditional_jump_do *\/\n#else\n#define USE_OPT_FORWARD_BRANCH 1\n#endif\n/' \
+      "$BUILDFLAGS"
+
 # 39) ps2me-jit-fase2-fired-log (PS2ME JIT, Fase 2). One-shot diagnostic in
 #     shared_invoke_compiler(): proves an armed method was re-invoked and the
 #     compile path fired (companion to the arm/entered logs). Gated PS2ME_JIT_FASE2,
