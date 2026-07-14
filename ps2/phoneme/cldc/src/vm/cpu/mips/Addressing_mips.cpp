@@ -30,16 +30,25 @@ void HeapAddress::write_barrier_epilog() {
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 3 (Marco 3.4a): return the base+disp16 operand for a heap access. If a
+// prior compute_address_for materialized the effective address into a register
+// (the IndexedAddress register-index case, Marco 3.4b), reuse it; otherwise
+// compute it now. Mirrors HeapAddress::address_for in Addressing_i386.cpp.
 BinaryAssembler::Address HeapAddress::address_for(jint address_offset) {
-  (void)address_offset;
-  SHOULD_NOT_REACH_HERE();
-  return BinaryAssembler::Address(0);
+  if (has_address_register()) {
+    GUARANTEE(address_offset == lo_offset(),
+              "the address register holds the address for the low offset");
+    return BinaryAssembler::Address(address_register());
+  }
+  return compute_address_for(address_offset);
 }
 
+// Fase 3 (Marco 3.4a): a field is [object + (field_offset + word_offset)]. The
+// object is already register-resident (the shared caller flushes it). Used for
+// Array::length_offset() (arraylength / bounds check) and getfield/putfield.
+// Same shape as Addressing_i386.cpp (MIPS also has base+disp).
 BinaryAssembler::Address FieldAddress::compute_address_for(jint address_offset) {
-  (void)address_offset;
-  SHOULD_NOT_REACH_HERE();
-  return BinaryAssembler::Address(0);
+  return BinaryAssembler::Address(object()->lo_register(), address_offset + offset());
 }
 
 BinaryAssembler::Address IndexedAddress::compute_address_for(jint address_offset) {

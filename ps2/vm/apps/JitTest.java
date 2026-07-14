@@ -61,6 +61,15 @@ public class JitTest {
     static int i2cTest(int a)        { return (char)a; }   // i2c (zero-extend)
     static int i2sTest(int a)        { return (short)a; }  // i2s (sign-extend)
 
+    // Marco 3.4a: the exception subsystem, isolated from arrays. arraylength is
+    // the first compiled bytecode that can throw: it emits a null_check (inline
+    // reference test + branch to the helper-C throw path) then loads the length.
+    // The compiled null_check raising NullPointerException, and the throw
+    // unwinding out of the compiled leaf's native frame back to an INTERPRETED
+    // try/catch, is what proves the whole compiled->interp unwind before iaload/
+    // iastore arrive in 3.4b. Leaf bytecodes = aload_0/arraylength/ireturn.
+    static int alen(int[] a) { return a.length; }          // null_check + length
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -74,7 +83,10 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.3 harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.4a harness start");
+
+        // A valid array to warm/verify the in-bounds arraylength path.
+        int[] arr5 = new int[5];
 
         // Warm every leaf: the first invocation arms it, the second compiles it
         // (still runs interpreted), the third+ run the r5900-compiled code. Loop
@@ -87,6 +99,8 @@ public class JitTest {
         int st = 0, ft = 0, pw = 0, ml = 0;
         // Marco 3.3 int-ISA leaves.
         int ng2 = 0, sl = 0, sr = 0, us = 0, si = 0, ib = 0, ic = 0, is = 0;
+        // Marco 3.4a exception subsystem leaf.
+        int al = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -116,6 +130,7 @@ public class JitTest {
             ib = i2bTest(200);
             ic = i2cTest(-1);
             is = i2sTest(40000);
+            al = alen(arr5);
         }
 
         check("add(7,5)",      ra, 12);
@@ -146,6 +161,24 @@ public class JitTest {
         check("i2bTest(200)",  ib, -56);
         check("i2cTest(-1)",   ic, 65535);
         check("i2sTest(40000)", is, -25536);
+        check("alen(arr5)",    al, 5);
+
+        // Marco 3.4a: the compiled null_check must throw NullPointerException and
+        // the throw must unwind OUT of the compiled leaf's native frame back to
+        // this interpreted try/catch. alen is already compiled (warmed above), so
+        // alen(null) runs the r5900 null_check -> jit_throw_null_pointer -> interp
+        // unwind -> handler here. A miss (no throw, or a crash) fails/hangs.
+        boolean npeCaught = false;
+        try {
+            alen(null);
+            System.out.println("[JIT-TEST] alen(null) did NOT throw");
+        } catch (NullPointerException e) {
+            npeCaught = true;
+        }
+        check("alen(null) throws NPE", npeCaught ? 1 : 0, 1);
+        // Prove the handler resumes cleanly: normal compiled calls still work
+        // after the unwind (globals coherent, no leaked native frame).
+        check("alen(arr5) post-throw", alen(arr5), 5);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

@@ -1,0 +1,43 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2383,6 +2383,25 @@
+     check_timer_tick();
+   }
+ 
++  // jit_throw_null_pointer() / jit_throw_array_index(): raise a runtime exception
++  // from compiled code (Marco 3.4a). These are thin wrappers over the interp's
++  // OWN throw path: interpreter_throw_* allocates the exception and, via
++  // interpreter_call_vm's T_ILLEGAL dispatch, runs find_exception_frame over the
++  // g_jfp chain (the compiled leaf frame jit_frame_enter built, then its interp
++  // caller) and repositions g_jfp/g_jsp/g_jpc/g_jlocals to the handler frame --
++  // exactly as an interpreted array-access bytecode does. The compiled method
++  // then runs only its native-stack epilogue (jr ra, emitted by
++  // mips_emit_runtime_throw), NOT jit_return: the Java frame is already unwound.
++  // Control returns by natural C returns to the flat interpreter dispatch loop,
++  // which resumes at the handler bcp. When there is no handler, the interp path
++  // longjmps to thread-exit, which also discards this nested native frame.
++  extern "C" void jit_throw_null_pointer() {
++    interpreter_throw_NullPointerException();
++  }
++  extern "C" void jit_throw_array_index() {
++    interpreter_throw_ArrayIndexOutOfBoundsException();
++  }
++
+ #if defined(PS2ME_JIT_FASE2)
+   // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
+   // non-native, non-synchronized) for compilation by pointing their execution
+@@ -2450,6 +2469,14 @@
+         case Bytecodes::_ineg:
+         case Bytecodes::_ishl: case Bytecodes::_ishr: case Bytecodes::_iushr:
+         case Bytecodes::_i2b:  case Bytecodes::_i2c:  case Bytecodes::_i2s:
++        // Marco 3.4a: object local load (the array reference) + arraylength.
++        // arraylength emits a null_check (inline test + branch to the helper-C
++        // throw path) followed by a length load via FieldAddress -- both fully
++        // covered. This is the first bytecode that can raise an exception; the
++        // throw/unwind path is proven by an interpreted try/catch driver in
++        // JitTest before iaload/iastore (arrays) arrive in Marco 3.4b.
++        case Bytecodes::_aload_0:
++        case Bytecodes::_arraylength:
+           l = 1; break;
+         case Bytecodes::_iload:  case Bytecodes::_istore:
+         case Bytecodes::_bipush:

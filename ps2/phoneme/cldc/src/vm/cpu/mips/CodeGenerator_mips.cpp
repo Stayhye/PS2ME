@@ -31,6 +31,13 @@ extern "C" void jit_frame_enter();
 extern "C" void jit_return_int(jint result);
 extern "C" void jit_return_void();
 extern "C" void jit_timer_tick();       // Marco 3.2b: backward-branch timer check
+// Marco 3.4a: runtime-exception throw helpers. Thin wrappers over the C
+// interpreter's own interpreter_throw_* (Interpreter_c.cpp, patch #44): allocate
+// the exception, run find_exception_frame over the g_jfp chain jit_frame_enter
+// built, and reposition g_jfp/g_jsp/g_jpc/g_jlocals to the handler frame. See the
+// throw-path emission in mips_emit_runtime_throw and JIT_PLAN.md 7.
+extern "C" void jit_throw_null_pointer();
+extern "C" void jit_throw_array_index();
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -70,6 +77,41 @@ static jint                s_cmp_op2_imm    = 0;
 static void mips_call_c(BinaryAssembler* a, address target) {
   mips_li(a, Assembler::t9, (juint)(unsigned long)target);
   a->emit(Assembler::encode_jalr(Assembler::ra, Assembler::t9));
+  a->emit(Assembler::encode_nop());
+}
+
+// --- Fase 3 (Marco 3.4a): runtime-exception throw path -----------------------
+// Emit the throw of a runtime exception (null-pointer / array-index) from
+// compiled code. The r5900 hybrid does NOT port ThrowExceptionStub / call_vm /
+// return_error; instead it mirrors the interpreted throw exactly (JIT_PLAN.md
+// 3, 7): call a C helper that raises the exception the interpreter's own way
+// (find_exception_frame walks the g_jfp chain jit_frame_enter built and
+// repositions g_jfp/g_jsp/g_jpc to the handler frame), then run the compiled
+// method's NATIVE-stack epilogue (restore $ra/$sp, jr ra) -- WITHOUT jit_return
+// (the Java frame was already unwound by find_exception_frame). Natural C returns
+// then carry control call_from_interpreter -> invoke_java_method -> the flat
+// interpreter dispatch loop, which resumes at the handler bcp. No longjmp needed
+// for the handler-found case; the longjmps resume_thread itself may fire (no
+// handler -> thread exit) also discard this nested native frame correctly.
+//
+// GC-safety: the compiled leaf frame is discarded, so its register-resident
+// locals/stack (t0-t8) need not be flushed before the call -- they are never read
+// again; the handler's ancestor frame state lives in interpreter memory.
+static void mips_emit_runtime_throw(BinaryAssembler* a, int rte) {
+  address helper;
+  switch (rte) {
+    case ThrowExceptionStub::rte_null_pointer:
+      helper = (address)jit_throw_null_pointer; break;
+    case ThrowExceptionStub::rte_array_index_out_of_bounds:
+      helper = (address)jit_throw_array_index; break;
+    default:
+      SHOULD_NOT_REACH_HERE(); return;
+  }
+  mips_call_c(a, helper);
+  // native-stack epilogue (mirrors return_void's, minus the jit_return helper).
+  a->emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
+  a->emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, 16));
+  a->emit(Assembler::encode_jr(Assembler::ra));
   a->emit(Assembler::encode_nop());
 }
 
@@ -410,9 +452,19 @@ void CodeGenerator::type_check(Value& object, Value& array, Value& index JVM_TRA
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 3 (Marco 3.4a): inline null check. The r5900 has no flags; test the
+// reference directly with a branch-if-nonzero over the throw. When it is null,
+// fall through to the runtime-throw path (NPE). i386 branches to a NullCheckStub
+// instead; the hybrid emits the throw inline (no stub machinery -- see
+// mips_emit_runtime_throw). The object must be register-resident (the shared
+// maybe_null_check flushes it).
 void CodeGenerator::null_check(const Value& object JVM_TRAPS) {
-  (void)object;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(object.in_register(), "null_check needs the object in a register");
+  Label ok;
+  // if object != null, skip the throw (emit_branch fills the delay slot with nop)
+  emit_branch(Assembler::encode_bne(object.lo_register(), Assembler::zero, 0), ok);
+  mips_emit_runtime_throw(this, ThrowExceptionStub::rte_null_pointer);
+  bind(ok);
 }
 
 // ---- monitors / returns ------------------------------------------------------
@@ -755,9 +807,15 @@ bool CodeGenerator::quick_catch_exception(const Value& value, JavaClass* catch_t
   return false;
 }
 
+// Fase 3 (Marco 3.4a): unconditional throw of a simple runtime exception, used
+// by the shared compiler for a statically-known-null access (array.must_be_null).
+// i386 does frame()->clear() + call_vm(exception_allocator) + return_error; the
+// hybrid clears the model and emits the same helper-C throw path as null_check /
+// array_check. The code after this point in the basic block is dead (the throw
+// never returns to compiled code).
 void CodeGenerator::throw_simple_exception(int rte JVM_TRAPS) {
-  (void)rte;
-  SHOULD_NOT_REACH_HERE();
+  frame()->clear();
+  mips_emit_runtime_throw(this, rte);
 }
 
 void CodeGenerator::call_vm_extra_arg(const Register extra_arg) {

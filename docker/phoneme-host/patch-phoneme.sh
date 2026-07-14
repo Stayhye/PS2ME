@@ -688,4 +688,19 @@ if ! grep -q 'Marco 3.3: rest of the integer ISA' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-intisa.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 44) ps2me-jit-fase3-exc (PS2ME JIT, Fase 3, Marco 3.4a). One addition to
+#     Interpreter_c.cpp applied ON TOP of #43: (a) the jit_throw_null_pointer /
+#     jit_throw_array_index glue -- thin wrappers over the interpreter's own
+#     interpreter_throw_* that the compiled null_check/array_check call to raise a
+#     runtime exception (find_exception_frame repositions g_jfp/g_jsp/g_jpc to the
+#     handler; the compiled method returns via its native epilogue, no jit_return);
+#     and (b) the compile whitelist now accepts aload_0 + arraylength -- the first
+#     bytecode that can throw. This is the exception subsystem isolated from arrays
+#     (iaload/iastore arrive in Marco 3.4b); the compiled->interp unwind is proven
+#     by a try/catch driver in JitTest. Interpreter_c.cpp is LF-only. Idempotent
+#     (guard on the 'Marco 3.4a' whitelist marker). See references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.4a: object local load' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-exc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
