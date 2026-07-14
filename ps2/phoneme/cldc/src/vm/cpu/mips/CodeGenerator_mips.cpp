@@ -30,6 +30,7 @@
 extern "C" void jit_frame_enter();
 extern "C" void jit_return_int(jint result);
 extern "C" void jit_return_void();
+extern "C" void jit_timer_tick();       // Marco 3.2b: backward-branch timer check
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -726,8 +727,19 @@ void CodeGenerator::call_vm(address entry, BasicType return_value_type JVM_TRAPS
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 3 (Marco 3.2b): emitted on every backward branch (loop back-edge) by the
+// shared CodeGenerator::branch when destination <= bci. The r5900 hybrid avoids
+// porting call_vm + TimerTickStub + the stub queue (the ARM/i386 design): it
+// instead flushes the VirtualStackFrame to memory (locals -> g_jlocals, any
+// expression values -> g_jsp) so no Java value lives in a caller-saved register
+// across the call, then makes an unconditional C-ABI call to jit_timer_tick,
+// which replicates the interpreter's own check_timer_tick (the pending-tick test
+// lives in C). Flushing here also keeps the Java frame consistent for a GC or
+// thread switch that a taken tick may trigger. Correctness first; folding the
+// tick test inline (fast path when no tick is pending) is a later optimization.
 void CodeGenerator::check_timer_tick(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
+  frame()->flush(JVM_SINGLE_ARG_NO_CHECK);
+  mips_call_c(this, (address)jit_timer_tick);
 }
 
 // ---- inline-cache / compilation stubs ---------------------------------------

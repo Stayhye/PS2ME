@@ -659,4 +659,21 @@ if ! grep -q 'jit_fase3_arm' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-trigger.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 42) ps2me-jit-fase3-loops (PS2ME JIT, Fase 3, Marco 3.2b). Two gated additions
+#     to Interpreter_c.cpp applied ON TOP of #41: (a) the jit_timer_tick() glue
+#     helper -- replicates the interpreter's own check_timer_tick() (if
+#     _rt_timer_ticks>0 -> interpreter_call_vm_1(&timer_tick)); the r5900
+#     CodeGenerator::check_timer_tick emission flushes the frame then calls it on
+#     every backward branch, so loops keep the C interpreter's timer semantics
+#     without porting call_vm/TimerTickStub/the stub queue; (b) the whitelist now
+#     accepts backward branch offsets (loops) and iinc (for-loop counters), both
+#     fully covered (iinc = increment_local_int = value_at + int_binary add +
+#     value_at_put; the back-edge reuses emit_branch/jmp's bound-target path).
+#     Gated PS2ME_JIT_FASE3 -> absent in production and the plain PS2ME_JIT build.
+#     Interpreter_c.cpp is LF-only. Idempotent (guard on jit_timer_tick). See
+#     references/JIT_PLAN.md §17.
+if ! grep -q 'jit_timer_tick' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-loops.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

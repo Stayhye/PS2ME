@@ -41,6 +41,15 @@ public class JitTest {
     static int clampLow(int a) { if (a < 0) a = 0; return a; }    // ifge zero + store@merge
     static int clampHi(int a)  { if (a > 100) a = 100; return a; }// if_icmp + store@merge
 
+    // Marco 3.2b: loops (backward branch + iinc). Each back-edge emits
+    // check_timer_tick (frame flush + jit_timer_tick call); the loop body runs
+    // r5900-compiled. All bytecodes (iconst/iload_*/istore_*/iadd/imul/iinc/
+    // if_icmp*/ifgt/goto/ireturn) are on the Fase-3 whitelist -> no bail-out.
+    static int sumTo(int n)   { int s = 0; for (int i = 1; i <= n; i++) s += i; return s; } // for + iadd
+    static int factLike(int n){ int p = 1; for (int i = 1; i <= n; i++) p *= i; return p; } // for + imul
+    static int powTwo(int k)  { int r = 1; for (int i = 0; i <  k; i++) r += r; return r; } // for + doubling
+    static int mulLoop(int a, int b) { int r = 0; while (b > 0) { r += a; b--; } return r; }// while + ifgt + iinc
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -54,7 +63,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.2a harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.2b harness start");
 
         // Warm every leaf: the first invocation arms it, the second compiles it
         // (still runs interpreted), the third+ run the r5900-compiled code. Loop
@@ -63,6 +72,8 @@ public class JitTest {
         int ra = 0, rs = 0, rm = 0, rn = 0, ro = 0, rx = 0, ri = 0, rj = 0, rk = 0;
         // Marco 3.2a branch leaves.
         int mx = 0, mn = 0, eq = 0, ne = 0, ng = 0, cl = 0, ch = 0;
+        // Marco 3.2b loop leaves.
+        int st = 0, ft = 0, pw = 0, ml = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -80,6 +91,10 @@ public class JitTest {
             ng = isNeg(-3);
             cl = clampLow(-8);
             ch = clampHi(150);
+            st = sumTo(10);
+            ft = factLike(5);
+            pw = powTwo(5);
+            ml = mulLoop(6, 7);
         }
 
         check("add(7,5)",      ra, 12);
@@ -98,6 +113,10 @@ public class JitTest {
         check("isNeg(-3)",     ng, 1);
         check("clampLow(-8)",  cl, 0);
         check("clampHi(150)",  ch, 100);
+        check("sumTo(10)",     st, 55);
+        check("factLike(5)",   ft, 120);
+        check("powTwo(5)",     pw, 32);
+        check("mulLoop(6,7)",  ml, 42);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
@@ -108,6 +127,12 @@ public class JitTest {
         check("isNeg(3)",      isNeg(3),      0);
         check("clampLow(9)",   clampLow(9),   9);
         check("clampHi(50)",   clampHi(50),   50);
+        // Loops with different iteration counts (incl. zero-iteration: goto->
+        // check exits immediately without running the body).
+        check("sumTo(100)",    sumTo(100),    5050);
+        check("factLike(6)",   factLike(6),   720);
+        check("powTwo(10)",    powTwo(10),    1024);
+        check("mulLoop(12,0)", mulLoop(12, 0), 0);
 
         if (fails == 0) {
             System.out.println("[JIT-TEST] ALL PASS");

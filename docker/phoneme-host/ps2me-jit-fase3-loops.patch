@@ -1,0 +1,54 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2371,6 +2371,18 @@
+     return_internal(T_VOID);
+   }
+ 
++  // jit_timer_tick(): backward-branch (loop) timer check for compiled methods
++  // (Marco 3.2b). Replicates the interpreter's own check_timer_tick(): when a
++  // pending real-time tick is set, run the VM's timer_tick (which may switch
++  // threads / trigger GC). The compiled method's check_timer_tick emission
++  // flushes the VirtualStackFrame to memory (g_jlocals/g_jsp) before calling
++  // this, so no Java value lives in a caller-saved register across the call and
++  // the Java frame is consistent for GC/thread-switch. When no tick is pending
++  // (the common case) this is a single memory load + return.
++  extern "C" void jit_timer_tick() {
++    check_timer_tick();
++  }
++
+ #if defined(PS2ME_JIT_FASE2)
+   // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
+   // non-native, non-synchronized) for compilation by pointing their execution
+@@ -2436,24 +2448,23 @@
+         case Bytecodes::_iload:  case Bytecodes::_istore:
+         case Bytecodes::_bipush:
+           l = 2; break;
++        case Bytecodes::_iinc:                          // Marco 3.2b: for-loops
++          l = 3; break;
+         case Bytecodes::_sipush:
+           l = 3; break;
+-        // Marco 3.2a: forward conditional/unconditional branches. Backward
+-        // branches (loops) need check_timer_tick/call_vm -> Marco 3.2b, so any
+-        // negative branch offset disqualifies the method (stays interpreted).
++        // Marco 3.2a/3.2b: forward AND backward conditional/unconditional
++        // branches. Backward branches (loops) are compiled since 3.2b: the
++        // shared check_timer_tick (emitted on every backward branch) now flushes
++        // the frame and calls the jit_timer_tick helper; the loop back-edge jump
++        // reuses the bound-target path of emit_branch/jmp.
+         case Bytecodes::_ifeq: case Bytecodes::_ifne:
+         case Bytecodes::_iflt: case Bytecodes::_ifge:
+         case Bytecodes::_ifgt: case Bytecodes::_ifle:
+         case Bytecodes::_if_icmpeq: case Bytecodes::_if_icmpne:
+         case Bytecodes::_if_icmplt: case Bytecodes::_if_icmpge:
+         case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
+-        case Bytecodes::_goto: {
+-          const int hi  = m().ubyte_at(bci + 1);
+-          const int lo  = m().ubyte_at(bci + 2);
+-          const int off = (int)(jshort)((hi << 8) | lo);
+-          if (off < 0) return false;                    // backward -> not yet
++        case Bytecodes::_goto:
+           l = 3; break;
+-        }
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }
