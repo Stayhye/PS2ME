@@ -1,0 +1,88 @@
+diff --git a/cldc/src/vm/share/compiler/BytecodeCompileClosure.cpp b/cldc/src/vm/share/compiler/BytecodeCompileClosure.cpp
+index bb463e9..2ca0d73 100644
+--- a/cldc/src/vm/share/compiler/BytecodeCompileClosure.cpp
++++ b/cldc/src/vm/share/compiler/BytecodeCompileClosure.cpp
+@@ -1928,10 +1928,15 @@ void BytecodeCompileClosure::fast_invoke_virtual(int index JVM_TRAPS) {
+   }
+ #endif
+ 
+-#if ENABLE_INLINE
++/* PS2ME JIT (Fase 0.5): the devirtualization fast-path needs is_method_overridden(),
++   which only exists under USE_EMBEDDED_VTABLE_BITMAP. That bitmap is forced off on the
++   MIPS target (see BuildFlags.hpp), so gate this block on it too; when off we simply
++   fall through to invoke_virtual (correct, just no devirtualization). No-op on stock
++   builds where USE_EMBEDDED_VTABLE_BITMAP == (ENABLE_COMPILER && ENABLE_INLINE). */
++#if ENABLE_INLINE && USE_EMBEDDED_VTABLE_BITMAP
+   if (!GenerateROMImage) {
+     InstanceClass::Raw holder = callee().holder();
+-    // Can devirtualize call only if 
++    // Can devirtualize call only if
+     //  - callee is not overridden and
+     //  - caller is not precompiled and
+     //  - caller cannot be shared between tasks
+diff --git a/cldc/src/vm/share/compiler/Compiler.hpp b/cldc/src/vm/share/compiler/Compiler.hpp
+index 1849f3c..74063e8 100644
+--- a/cldc/src/vm/share/compiler/Compiler.hpp
++++ b/cldc/src/vm/share/compiler/Compiler.hpp
+@@ -520,7 +520,16 @@ class Compiler: public BytecodeCompileClosure {
+   }
+ 
+   static void oops_do( void do_oop(OopDesc**) ) {
+-    _compiler_state->oops_do( do_oop );
++    /* PS2ME JIT (Fase 0.5): guard against a NULL suspended compiler state. The GC
++       root scan (ObjectHeap::roots_do_to) calls this unconditionally under
++       ENABLE_COMPILER, but _compiler_state is NULL whenever no compilation is in
++       progress (the dormant case: UseCompiler=false, so it is ALWAYS NULL here).
++       Without the guard, NULL->oops_do() feeds NULL+field_offset slots to the mark/
++       update callbacks -> TLB miss at low addresses (0x10/0x18/0x50) during every GC.
++       No suspended state => no compiler roots to scan, so skipping is correct. */
++    if( _compiler_state != NULL ) {
++      _compiler_state->oops_do( do_oop );
++    }
+   }
+ 
+ #if ENABLE_PERFORMANCE_COUNTERS && ENABLE_DETAILED_PERFORMANCE_COUNTERS
+diff --git a/cldc/src/vm/share/handles/InstanceClass.cpp b/cldc/src/vm/share/handles/InstanceClass.cpp
+index 207e1b6..8beebe8 100644
+--- a/cldc/src/vm/share/handles/InstanceClass.cpp
++++ b/cldc/src/vm/share/handles/InstanceClass.cpp
+@@ -1048,7 +1048,13 @@ void InstanceClass::initialize_static_fields(Oop *statics_holder) {
+   }
+ }
+ 
+-#if ENABLE_COMPILER && ENABLE_INLINE
++/* PS2ME JIT (Fase 0.5): key this off USE_EMBEDDED_VTABLE_BITMAP so that when the
++   bitmap is forced off on the MIPS target (ENABLE_COMPILER=1 but bitmap=0, see
++   BuildFlags.hpp) this out-of-line body is dropped -- the header supplies an empty
++   inline {} instead, and the set_is_method_overridden calls below (bitmap-only) are
++   not referenced. On stock builds USE_EMBEDDED_VTABLE_BITMAP == (ENABLE_COMPILER &&
++   ENABLE_INLINE), so this is a no-op there. */
++#if USE_EMBEDDED_VTABLE_BITMAP
+ void InstanceClass::update_vtable_bitmaps(void) const {
+   if (is_interface()) {
+     return;
+diff --git a/cldc/src/vm/share/utilities/BuildFlags.hpp b/cldc/src/vm/share/utilities/BuildFlags.hpp
+index 9262e48..28bb37f 100644
+--- a/cldc/src/vm/share/utilities/BuildFlags.hpp
++++ b/cldc/src/vm/share/utilities/BuildFlags.hpp
+@@ -1225,7 +1225,20 @@
+ //                                 one bit per virtual method to mark
+ //                                 overridden methods
+ //
++/* PS2ME JIT (Fase 0.5): force the embedded vtable bitmap OFF on the MIPS target.
++   The bitmap is a compiled-code vtable-dispatch optimization; it grows JavaClass/
++   InstanceClass objects by bitmap_size(vtable_length) (InstanceClassDesc::allocation_size).
++   Our host romgen runs with ENABLE_COMPILER=0 (patch #33) => bitmap=0 => romized class
++   objects are sized WITHOUT the trailer, but the target VM with ENABLE_COMPILER=1 would
++   have bitmap=1 and init9->update_vtable_bitmaps() would write past each romized class
++   object, corrupting the adjacent object (observed as g_jsp garbage -> TLB miss at boot).
++   Forcing it off on MIPS makes host and target agree. Harmless while the compiler is
++   dormant (UseCompiler=false); revisit if/when AOT/embedded dispatch is implemented. */
++#if defined(MIPS)
++#define USE_EMBEDDED_VTABLE_BITMAP 0
++#else
+ #define USE_EMBEDDED_VTABLE_BITMAP (ENABLE_COMPILER && ENABLE_INLINE)
++#endif
+ 
+ //
+ // USE_EVENT_LOGGER                Enable JVM event logging

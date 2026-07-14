@@ -542,4 +542,24 @@ grep -q 'ps2me-jit-dormant' "$JVMCPP" || \
   sed -i 's@\(_startup_phase_count = 0;\)@\1\n#if ENABLE_COMPILER\n  UseCompiler = false; \/* ps2me-jit-dormant (Fase 0): JIT backend is a bail-out skeleton; keep the dynamic compiler off *\/\n#endif@' \
       "$JVMCPP"
 
+# 35) ps2me-jit-vtbitmap-gcroots (PS2ME JIT, Fase 0.5). Two host<->target skews that
+#     surface only with ENABLE_COMPILER=1 (the JIT build) and crash the VM even while the
+#     compiler is dormant:
+#       (a) USE_EMBEDDED_VTABLE_BITMAP = (ENABLE_COMPILER && ENABLE_INLINE). Host romgen
+#           runs ENABLE_COMPILER=0 (patch #33) => bitmap=0 and sizes romized class objects
+#           WITHOUT the trailer; the target with bitmap=1 then has init9->update_vtable_bitmaps()
+#           write past each class object -> boot crash (g_jsp garbage, TLB miss). Force the
+#           bitmap OFF on the MIPS target so host and target agree; also gate the two callers
+#           that need is_method_overridden()/the out-of-line update_vtable_bitmaps on the flag
+#           so the (dormant) compiler code still compiles. No-op on non-MIPS builds.
+#       (b) ObjectHeap::roots_do_to() calls Compiler::oops_do() on EVERY GC (unconditionally,
+#           under ENABLE_COMPILER). Compiler::oops_do dereferenced _compiler_state, which is
+#           NULL whenever no compilation is in progress (always, when dormant) -> the GC feeds
+#           NULL+field slots to the mark/update callbacks -> TLB miss at 0x10/0x18/0x50 during
+#           the game load. Null-guard it (no suspended state => no compiler roots).
+#     Four files, all no-ops in production (ENABLE_COMPILER=0). Applied via .patch (marker).
+if ! grep -q 'PS2ME JIT (Fase 0.5)' "$PHONEME/cldc/src/vm/share/compiler/Compiler.hpp"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-vtbitmap-gcroots.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
