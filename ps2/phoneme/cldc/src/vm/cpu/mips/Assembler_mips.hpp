@@ -145,6 +145,97 @@ class Assembler: public AssemblerCommon {
   static const char* name_for_work_register(const Register reg);
   static const char* name_for_long_register(const Register reg);
 #endif
+
+  // --------------------------------------------------------------------------
+  // r5900 instruction encoders (Fase 1). Pure and stateless: each returns the
+  // 32-bit machine word (host-endian int; the LE build writes LE bytes, which is
+  // what the LE r5900 fetches). No buffer, no relocation -- that machinery lives
+  // in BinaryAssembler (Fase 2). This layer is testable in isolation (the Fase 1
+  // "returns 42" self-test drives it directly).
+  //
+  // MIPS32 field layout:
+  //   R-type: [31:26]op=0 [25:21]rs [20:16]rt [15:11]rd [10:6]sa [5:0]funct
+  //   I-type: [31:26]op    [25:21]rs [20:16]rt [15:0]imm16
+  //   J-type: [31:26]op    [25:0]target
+  typedef unsigned int Instr;
+
+  static Instr r_type(int op, int rs, int rt, int rd, int sa, int funct) {
+    return ((unsigned)(op    & 0x3f) << 26) | ((unsigned)(rs & 0x1f) << 21) |
+           ((unsigned)(rt    & 0x1f) << 16) | ((unsigned)(rd & 0x1f) << 11) |
+           ((unsigned)(sa    & 0x1f) <<  6) |  (unsigned)(funct & 0x3f);
+  }
+  static Instr i_type(int op, int rs, int rt, int imm16) {
+    return ((unsigned)(op & 0x3f) << 26) | ((unsigned)(rs & 0x1f) << 21) |
+           ((unsigned)(rt & 0x1f) << 16) |  (unsigned)(imm16 & 0xffff);
+  }
+  static Instr j_type(int op, unsigned target26) {
+    return ((unsigned)(op & 0x3f) << 26) | (target26 & 0x03ffffff);
+  }
+
+  // SPECIAL (op=0) three-register ALU.
+  static Instr encode_addu(Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x21); }
+  static Instr encode_subu(Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x23); }
+  static Instr encode_and (Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x24); }
+  static Instr encode_or  (Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x25); }
+  static Instr encode_xor (Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x26); }
+  static Instr encode_nor (Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x27); }
+  static Instr encode_slt (Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x2a); }
+  static Instr encode_sltu(Register rd, Register rs, Register rt) { return r_type(0, rs, rt, rd, 0, 0x2b); }
+
+  // Variable shifts (shift amount in rs).
+  static Instr encode_sllv(Register rd, Register rt, Register rs) { return r_type(0, rs, rt, rd, 0, 0x04); }
+  static Instr encode_srlv(Register rd, Register rt, Register rs) { return r_type(0, rs, rt, rd, 0, 0x06); }
+  static Instr encode_srav(Register rd, Register rt, Register rs) { return r_type(0, rs, rt, rd, 0, 0x07); }
+
+  // Immediate shifts (shift amount in sa; rs unused).
+  static Instr encode_sll (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x00); }
+  static Instr encode_srl (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x02); }
+  static Instr encode_sra (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x03); }
+  static Instr encode_nop () { return 0u; }  // sll zero,zero,0
+
+  // Multiply/divide + hi/lo moves.
+  static Instr encode_mult (Register rs, Register rt) { return r_type(0, rs, rt, 0, 0, 0x18); }
+  static Instr encode_multu(Register rs, Register rt) { return r_type(0, rs, rt, 0, 0, 0x19); }
+  static Instr encode_div  (Register rs, Register rt) { return r_type(0, rs, rt, 0, 0, 0x1a); }
+  static Instr encode_divu (Register rs, Register rt) { return r_type(0, rs, rt, 0, 0, 0x1b); }
+  static Instr encode_mfhi (Register rd) { return r_type(0, 0, 0, rd, 0, 0x10); }
+  static Instr encode_mflo (Register rd) { return r_type(0, 0, 0, rd, 0, 0x12); }
+
+  // Register-indirect jumps. Both carry one delay slot (the caller emits it).
+  static Instr encode_jr  (Register rs)              { return r_type(0, rs, 0, 0,  0, 0x08); }
+  static Instr encode_jalr(Register rd, Register rs) { return r_type(0, rs, 0, rd, 0, 0x09); }
+
+  // I-type ALU-immediate. (addiu/slti/sltiu sign-extend imm; andi/ori/xori zero-extend.)
+  static Instr encode_addiu(Register rt, Register rs, int imm) { return i_type(0x09, rs, rt, imm); }
+  static Instr encode_slti (Register rt, Register rs, int imm) { return i_type(0x0a, rs, rt, imm); }
+  static Instr encode_sltiu(Register rt, Register rs, int imm) { return i_type(0x0b, rs, rt, imm); }
+  static Instr encode_andi (Register rt, Register rs, int imm) { return i_type(0x0c, rs, rt, imm); }
+  static Instr encode_ori  (Register rt, Register rs, int imm) { return i_type(0x0d, rs, rt, imm); }
+  static Instr encode_xori (Register rt, Register rs, int imm) { return i_type(0x0e, rs, rt, imm); }
+  static Instr encode_lui  (Register rt, int imm)              { return i_type(0x0f,  0, rt, imm); }
+
+  // Loads / stores: base + signed 16-bit offset.
+  static Instr encode_lb (Register rt, Register base, int off) { return i_type(0x20, base, rt, off); }
+  static Instr encode_lh (Register rt, Register base, int off) { return i_type(0x21, base, rt, off); }
+  static Instr encode_lw (Register rt, Register base, int off) { return i_type(0x23, base, rt, off); }
+  static Instr encode_lbu(Register rt, Register base, int off) { return i_type(0x24, base, rt, off); }
+  static Instr encode_lhu(Register rt, Register base, int off) { return i_type(0x25, base, rt, off); }
+  static Instr encode_sb (Register rt, Register base, int off) { return i_type(0x28, base, rt, off); }
+  static Instr encode_sh (Register rt, Register base, int off) { return i_type(0x29, base, rt, off); }
+  static Instr encode_sw (Register rt, Register base, int off) { return i_type(0x2b, base, rt, off); }
+
+  // Branches: PC-relative, offset counted in instruction words, one delay slot.
+  static Instr encode_beq (Register rs, Register rt, int off) { return i_type(0x04, rs, rt, off); }
+  static Instr encode_bne (Register rs, Register rt, int off) { return i_type(0x05, rs, rt, off); }
+  static Instr encode_blez(Register rs, int off)              { return i_type(0x06, rs, 0, off); }
+  static Instr encode_bgtz(Register rs, int off)              { return i_type(0x07, rs, 0, off); }
+  // REGIMM (op=1): the sub-op lives in the rt field (bltz=0, bgez=1).
+  static Instr encode_bltz(Register rs, int off)              { return i_type(0x01, rs, 0x00, off); }
+  static Instr encode_bgez(Register rs, int off)              { return i_type(0x01, rs, 0x01, off); }
+
+  // J-type absolute (target = (word_address >> 2) & 0x03ffffff).
+  static Instr encode_j  (unsigned target26) { return j_type(0x02, target26); }
+  static Instr encode_jal(unsigned target26) { return j_type(0x03, target26); }
 };
 
 class Macros: public Assembler {

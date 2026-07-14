@@ -562,4 +562,18 @@ if ! grep -q 'PS2ME JIT (Fase 0.5)' "$PHONEME/cldc/src/vm/share/compiler/Compile
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-vtbitmap-gcroots.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 36) ps2me-jit-selftest (PS2ME JIT, Fase 1). Run the "returns 42" milestone at VM
+#     init: emit a real r5900 function (pure encoders in Assembler_mips.hpp),
+#     flush the I-cache, call it, verify. The body + PS2ME_JIT_SELFTEST toggle live
+#     in the overlay (BinaryAssembler_mips.cpp / ps2_mips.cfg); this only injects the
+#     ONE call site into JVM::initialize, right after the Fase-0 dormant switch. Nested
+#     inside the existing #if ENABLE_COMPILER block AND gated by defined(PS2ME_JIT_SELFTEST),
+#     so it is absent unless the self-test build is requested (and always absent in
+#     production, ENABLE_COMPILER=0). Idempotent (marker). Anchored on the unique
+#     #34 line so it lands inside that block.
+JVMCPP="$PHONEME/cldc/src/vm/share/runtime/JVM.cpp"
+grep -q 'ps2me-jit-selftest' "$JVMCPP" || \
+  sed -i 's@\(  UseCompiler = false; /\* ps2me-jit-dormant.*/\)@\1\n#if defined(PS2ME_JIT_SELFTEST) \/* ps2me-jit-selftest (Fase 1) *\/\n  { extern void ps2me_jit_selftest(void); ps2me_jit_selftest(); }\n#endif@' \
+      "$JVMCPP"
+
 echo "phoneME patches applied to: $PHONEME"

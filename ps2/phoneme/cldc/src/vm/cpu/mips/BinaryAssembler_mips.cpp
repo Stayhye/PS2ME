@@ -11,13 +11,14 @@
 #if ENABLE_COMPILER
 #include "incls/_BinaryAssembler_mips.cpp.incl"
 
-// FASE 0 (dormant JIT): bail-out bodies for the arch entry points the shared
-// compiler framework references. Real delay-slot-aware r5900 emission arrives in
-// Fase 1 ("emit a function that returns 42"). Signatures mirror BinaryAssembler_mips.hpp.
+// Fase 1: the first real r5900 emission. `mov` now feeds the encoder into the
+// VM code buffer; the label/relocation-bound jumps (below) stay bail-out stubs
+// until Fase 2 wires the delay-slot-aware branch machinery. All of this is
+// dormant (UseCompiler=false) -- nothing here runs until a method is compiled.
 
+// register move: `or dst, src, zero` (canonical MIPS reg-reg copy).
 void BinaryAssembler::mov(Register dst, Register src) {
-  (void)dst; (void)src;
-  SHOULD_NOT_REACH_HERE();
+  emit(Assembler::encode_or(dst, src, Assembler::zero));
 }
 
 void BinaryAssembler::jmp(Label& L) {
@@ -39,5 +40,52 @@ void BinaryAssembler::bind_to(Label& L, jint code_offset) {
   (void)L; (void)code_offset;
   SHOULD_NOT_REACH_HERE();
 }
+
+#if defined(PS2ME_JIT_SELFTEST)
+// ---------------------------------------------------------------------------
+// Fase 1 milestone harness ("returns 42"). Opt-in via -DPS2ME_JIT_SELFTEST
+// (ps2_mips.cfg, alongside PS2ME_JIT). Called once from JVM::initialize (patch
+// #36). It emits a real r5900 function AT RUNTIME using the pure encoders,
+// performs the self-modifying-code cache maintenance the EE requires, calls the
+// emitted code, and verifies the result -- validating the whole emission base
+// (encoders + I-cache flush) before the 6k-line CodeGenerator depends on it.
+//
+// This deliberately does NOT go through the VM code buffer / CompiledMethod /
+// relocation machinery (that is Fase 2). It writes a private scratch buffer, so
+// the base is provable in isolation.
+//
+// Delay slot: `jr ra` executes its following instruction (the slot) before the
+// jump takes effect. We fill it with an explicit nop -- the correct, minimal
+// discipline. Automatic slot filling (moving a useful instruction into the slot)
+// is a Fase 2 optimization on the branch emitter, not needed for correctness.
+
+// share/runtime/OsMisc.hpp -- C++ linkage; forward-declared to avoid pulling the
+// header through the includeDB (the symbol resolves at link on the EE target,
+// where it routes to javacall_os_flush_icache -> FlushCache WRITEBACK/INVALIDATE).
+void OsMisc_flush_icache(address start, int size);
+
+// Scratch code buffer. EE main RAM (cached KSEG0) is executable -- no W^X on the
+// r5900 -- so we can jump straight into a data array once the caches agree.
+static int ps2me_jit_selftest_code[8] __attribute__((aligned(16)));
+
+void ps2me_jit_selftest(void) {
+  int* c = ps2me_jit_selftest_code;
+  int  n = 0;
+  c[n++] = (int) Assembler::encode_ori(Assembler::v0, Assembler::zero, 42); // v0 = 42
+  c[n++] = (int) Assembler::encode_jr (Assembler::ra);                      // return
+  c[n++] = (int) Assembler::encode_nop();                                   //   delay slot
+
+  OsMisc_flush_icache((address) c, n * BytesPerInt);
+
+  int (*emitted)(void) = (int (*)(void)) c;
+  const int result = emitted();
+
+  if (result == 42) {
+    tty->print_cr("[PS2ME-JIT] Fase 1 selftest: emitted r5900 returned %d (OK)", result);
+  } else {
+    tty->print_cr("[PS2ME-JIT] Fase 1 selftest: FAIL -- expected 42, got %d", result);
+  }
+}
+#endif // PS2ME_JIT_SELFTEST
 
 #endif // ENABLE_COMPILER
