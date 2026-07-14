@@ -576,4 +576,17 @@ grep -q 'ps2me-jit-selftest' "$JVMCPP" || \
   sed -i 's@\(  UseCompiler = false; /\* ps2me-jit-dormant.*/\)@\1\n#if defined(PS2ME_JIT_SELFTEST) \/* ps2me-jit-selftest (Fase 1) *\/\n  { extern void ps2me_jit_selftest(void); ps2me_jit_selftest(); }\n#endif@' \
       "$JVMCPP"
 
+# 37) ps2me-jit-fase2-helpers (PS2ME JIT, Fase 2). interp<->compiled glue in Interpreter_c.cpp:
+#     jit_frame_enter() builds the callee Java frame exactly like interpreter_method_entry();
+#     jit_return_int()/jit_return_void() push the result and run the interpreter's own
+#     return_internal() teardown. The emitted compiled method CALLS these instead of open-coding
+#     the frame protocol in r5900 -- they reuse the interpreter macros and share g_jfp/g_jsp via
+#     global-reg (correct by construction). Gated ENABLE_COMPILER -> absent in production. The
+#     hunk sits near line ~2265 (before fast_ldc), disjoint from #30 (global-reg, top of file),
+#     so it applies with an offset after the earlier patches. Idempotent (marker).
+INTERPC="$PHONEME/cldc/src/vm/cpu/c/Interpreter_c.cpp"
+if ! grep -q 'jit_frame_enter' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase2-helpers.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

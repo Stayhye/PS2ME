@@ -1,0 +1,71 @@
+diff --git a/cldc/src/vm/cpu/c/Interpreter_c.cpp b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+index 5c230b9..143118d 100644
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2265,6 +2265,66 @@ enum {
+     }
+   }
+ 
++#if ENABLE_COMPILER
++  // ---------------------------------------------------------------------------
++  // PS2ME JIT (Fase 2) — interp<->compiled glue helpers.
++  //
++  // The r5900 JIT keeps the C interpreter (iarch=c). A compiled method is entered
++  // via call_from_interpreter (a plain C call) and must interoperate with the C
++  // interpreter's Java-frame protocol. Rather than emit the intricate frame build
++  // and teardown as r5900 instructions (every JavaFrame offset a chance for silent
++  // corruption), the emitted method calls these two helpers, which reuse the
++  // interpreter's OWN macros and return_internal() -- correct by construction and
++  // sharing g_jfp/g_jsp/g_jlocals/g_jpc through the global-reg register variables.
++  //
++  // jit_frame_enter(): build the callee Java frame, exactly as interpreter_method_
++  // entry() does (minus the interpreter dispatch and minus synchronized-method
++  // locking -- Fase 2 compiles only non-synchronized methods; sync bails out).
++  extern "C" void jit_frame_enter() {
++    address method = callee_method();
++    jushort num_params = get_num_params(method);
++    g_jlocals = g_jsp +
++      num_params * BytesPerStackElement + JavaFrame::arg_offset_from_sp(-1);
++
++    address new_stack_ptr = g_jsp - get_max_stack(method) * 4;
++    if (new_stack_ptr < _current_stack_limit) {
++      if (interpreter_grow_stack_internal(method, new_stack_ptr)) {
++        return;  // overflow: pending exception (Fase 3 makes the caller bail)
++      }
++      method = callee_method();
++    }
++
++    jushort max_locals = get_max_locals(method);
++    g_jsp -= (max_locals - num_params) * BytesPerStackElement;
++    g_jsp -= JavaFrame::frame_desc_size();
++
++    address old_jfp = g_jfp;
++    g_jfp = g_jsp - JavaFrame::empty_stack_offset();
++
++    SET_FRAME(stored_int_value1, 0x0);
++    SET_FRAME(stored_int_value2, 0x0);
++    SET_FRAME(stack_bottom_pointer, g_jsp);
++    SET_FRAME(locals_pointer, g_jlocals);
++    SET_FRAME(method, method);
++    SET_FRAME(cpool, get_cpool(method));
++    SET_FRAME(caller_fp, old_jfp);
++    SET_FRAME(return_address, g_jpc);
++
++    g_jpc = method + Method::base_offset();
++  }
++
++  // jit_return_int(): push the int result and run the interpreter's own return
++  // teardown (restore caller frame, push result on caller stack, advance caller
++  // bcp). jit_return_void(): teardown only.
++  extern "C" void jit_return_int(jint result) {
++    PUSH(result);
++    return_internal(T_INT);
++  }
++  extern "C" void jit_return_void() {
++    return_internal(T_VOID);
++  }
++#endif // ENABLE_COMPILER
++
+   static void fast_ldc(BasicType type, bool wide) {
+     jushort idx = wide ? GET_SHORT(0) : GET_BYTE(0);
+     // Get constant pool of current method

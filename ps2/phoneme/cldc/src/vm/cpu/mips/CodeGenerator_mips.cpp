@@ -21,6 +21,42 @@
 // framework references.
 // -----------------------------------------------------------------------------
 
+// ---- Fase 2 emission helpers -------------------------------------------------
+// The compiled method interoperates with the C interpreter through two C glue
+// helpers (Interpreter_c.cpp, patch #37): jit_frame_enter builds the callee Java
+// frame; jit_return_int/void push the result and run the interpreter's return
+// teardown. The emitted code just calls them via the EE C ABI. The intricate
+// frame protocol therefore lives in reviewable C, not open-coded r5900.
+extern "C" void jit_frame_enter();
+extern "C" void jit_return_int(jint result);
+extern "C" void jit_return_void();
+
+// Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
+// instruction for values that fit a signed/zero-extended 16-bit field, else
+// lui/ori.
+static void mips_li(BinaryAssembler* a, Assembler::Register dst, juint imm) {
+  const jint s = (jint)imm;
+  if (s >= -32768 && s <= 32767) {
+    a->emit(Assembler::encode_addiu(dst, Assembler::zero, s));
+  } else if ((imm & 0xffff0000u) == 0) {
+    a->emit(Assembler::encode_ori(dst, Assembler::zero, imm & 0xffff));
+  } else {
+    a->emit(Assembler::encode_lui(dst, (imm >> 16) & 0xffff));
+    if ((imm & 0xffff) != 0) {
+      a->emit(Assembler::encode_ori(dst, dst, imm & 0xffff));
+    }
+  }
+}
+
+// Emit an EE C-ABI call to an absolute code address: materialize it in t9 (the
+// MIPS PIC call register), jalr, and fill the branch delay slot with a nop.
+// (ra is clobbered by jalr; the caller must have saved the real return address.)
+static void mips_call_c(BinaryAssembler* a, address target) {
+  mips_li(a, Assembler::t9, (juint)(unsigned long)target);
+  a->emit(Assembler::encode_jalr(Assembler::ra, Assembler::t9));
+  a->emit(Assembler::encode_nop());
+}
+
 // ---- method prologue / stack -------------------------------------------------
 
 void CodeGenerator::overflow(const Assembler::Register& stack_pointer,
@@ -29,9 +65,22 @@ void CodeGenerator::overflow(const Assembler::Register& stack_pointer,
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 2: the compiled method always builds a full Java frame (via jit_frame_enter),
+// matching the C interpreter's frame protocol so the return teardown works. The
+// ARM omit_stack_frame shortcut does NOT apply to the C hybrid (the return path
+// reads the frame descriptor); OmitLeafMethodFrames must be off for JIT methods
+// (enforced by the Fase 2 trigger). We also open a small native-stack (EE $sp)
+// frame to preserve the return address across our C-helper calls; the matching
+// teardown is emitted by return_result/return_void.
 void CodeGenerator::method_entry(Method* method JVM_TRAPS) {
   (void)method;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(!omit_stack_frame(),
+            "Fase 2 JIT methods build a full frame (OmitLeafMethodFrames off)");
+  // native-stack prologue: reserve a 16-byte aligned frame and save ra.
+  emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, -16));
+  emit(Assembler::encode_sw(Assembler::ra, Assembler::sp, 0));
+  // build the Java frame in C (shares g_jfp/g_jsp/g_jlocals via global-reg).
+  mips_call_c(this, (address)jit_frame_enter);
 }
 
 void CodeGenerator::increment_stack_pointer_by(int adjustment) {
@@ -198,8 +247,24 @@ void CodeGenerator::unlock_activation(JVM_SINGLE_ARG_TRAPS) {
 }
 
 void CodeGenerator::return_result(Value& value JVM_TRAPS) {
-  (void)value;
-  SHOULD_NOT_REACH_HERE();
+  // Fase 2: single-word (int/object/float) returns via the C teardown helper.
+  // long/double (two-word) returns arrive with FloatSupport/Fase 3.
+  GUARANTEE(value.is_one_word(), "Fase 2: single-word returns only");
+  // materialize the result into a0 (the jit_return_int argument register).
+  if (value.is_immediate()) {
+    mips_li(this, Assembler::a0, (juint)value.as_int());
+  } else {
+    GUARANTEE(value.in_register(), "result must be immediate or in a register");
+    if (value.lo_register() != Assembler::a0) {
+      mov(Assembler::a0, value.lo_register());
+    }
+  }
+  mips_call_c(this, (address)jit_return_int);
+  // native-stack epilogue: restore ra and return to call_from_interpreter.
+  emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
+  emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, 16));
+  emit(Assembler::encode_jr(Assembler::ra));
+  emit(Assembler::encode_nop());
 }
 
 void CodeGenerator::return_error(Value& value JVM_TRAPS) {
@@ -208,7 +273,11 @@ void CodeGenerator::return_error(Value& value JVM_TRAPS) {
 }
 
 void CodeGenerator::return_void(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
+  mips_call_c(this, (address)jit_return_void);
+  emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
+  emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, 16));
+  emit(Assembler::encode_jr(Assembler::ra));
+  emit(Assembler::encode_nop());
 }
 
 // ---- integer / long arithmetic ----------------------------------------------
