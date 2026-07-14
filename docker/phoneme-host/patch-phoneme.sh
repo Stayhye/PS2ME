@@ -676,4 +676,16 @@ if ! grep -q 'jit_timer_tick' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-loops.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 43) ps2me-jit-fase3-intisa (PS2ME JIT, Fase 3, Marco 3.3). One gated addition to
+#     Interpreter_c.cpp applied ON TOP of #42: the compile whitelist now accepts the
+#     rest of the integer ISA -- ineg, shifts (ishl/ishr/iushr) and narrowing
+#     conversions (i2b/i2c/i2s). All fully covered by the backend (int_unary_do =
+#     subu zero,rd; int_binary_do shift cases = sllv/srav/srlv + sll/sra/srl; i2b/i2s
+#     = sll/sra sign-extend, i2c = andi zero-extend); no exceptions involved. Gated
+#     PS2ME_JIT_FASE3. Interpreter_c.cpp is LF-only. Idempotent (guard on the
+#     'Marco 3.3' whitelist marker). See references/JIT_PLAN.md §18.
+if ! grep -q 'Marco 3.3: rest of the integer ISA' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-intisa.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

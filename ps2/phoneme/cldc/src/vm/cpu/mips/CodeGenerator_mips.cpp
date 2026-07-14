@@ -504,6 +504,14 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
       case BytecodeClosure::bin_mul:
         emit(Assembler::encode_mult(rd, rt));
         emit(Assembler::encode_mflo(rd)); return;
+      // Marco 3.3: shifts. The r5900 variable-shift takes the amount from the
+      // low 5 bits of rs (Java's `x << (n & 31)` semantics come for free).
+      case BytecodeClosure::bin_shl:
+        emit(Assembler::encode_sllv(rd, rd, rt)); return;   // rd = rd << rt
+      case BytecodeClosure::bin_shr:
+        emit(Assembler::encode_srav(rd, rd, rt)); return;   // arithmetic (signed)
+      case BytecodeClosure::bin_ushr:
+        emit(Assembler::encode_srlv(rd, rd, rt)); return;   // logical (unsigned)
       default:
         SHOULD_NOT_REACH_HERE(); return;
     }
@@ -541,6 +549,15 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
       break;
     case BytecodeClosure::bin_mul:
       break;  // no mul-immediate form; always materialize
+    // Marco 3.3: constant shift amount -> fixed-shift form (amount masked to the
+    // 5-bit field, matching Java's `x << (n & 31)`). Always fits: never falls to
+    // the materialize path below.
+    case BytecodeClosure::bin_shl:
+      emit(Assembler::encode_sll(rd, rd, imm & 31)); return;
+    case BytecodeClosure::bin_shr:
+      emit(Assembler::encode_sra(rd, rd, imm & 31)); return;
+    case BytecodeClosure::bin_ushr:
+      emit(Assembler::encode_srl(rd, rd, imm & 31)); return;
     default:
       SHOULD_NOT_REACH_HERE(); return;
   }
@@ -567,10 +584,19 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
   RegisterAllocator::dereference(rt);
 }
 
+// Marco 3.3: integer negate (ineg). una_abs is only produced by Math.abs
+// inlining (an invoke) -- outside the whitelist -- so it stays a bail-out.
 void CodeGenerator::int_unary_do(Value& result, Value& op1,
                                  BytecodeClosure::unary_op op JVM_TRAPS) {
-  (void)result; (void)op1; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  JVM_IGNORE_TRAPS;
+  op1.writable_copy(result);
+  const Assembler::Register rd = result.lo_register();
+  switch (op) {
+    case BytecodeClosure::una_neg:
+      emit(Assembler::encode_subu(rd, Assembler::zero, rd)); return;  // rd = 0 - rd
+    default:
+      SHOULD_NOT_REACH_HERE(); return;
+  }
 }
 
 void CodeGenerator::long_binary_do(Value& result, Value& op1, Value& op2,
@@ -635,14 +661,31 @@ void CodeGenerator::fpu_clear(bool flush) {
 
 // ---- conversions -------------------------------------------------------------
 
+// Marco 3.3: narrowing int conversions. The shared layer handles the immediate
+// case, so value is always register-resident. i2b/i2s sign-extend the low
+// byte/halfword (shift up then arithmetic shift down); i2c zero-extends to a
+// 16-bit char (andi). result may reuse value's register (in-place is fine).
 void CodeGenerator::i2b(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  JVM_IGNORE_TRAPS;
+  GUARANTEE(value.in_register(), "immediate case handled by the shared layer");
+  result.assign_register();
+  const Assembler::Register rd = result.lo_register();
+  emit(Assembler::encode_sll(rd, value.lo_register(), 24));
+  emit(Assembler::encode_sra(rd, rd, 24));
 }
 void CodeGenerator::i2c(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  JVM_IGNORE_TRAPS;
+  GUARANTEE(value.in_register(), "immediate case handled by the shared layer");
+  result.assign_register();
+  emit(Assembler::encode_andi(result.lo_register(), value.lo_register(), 0xffff));
 }
 void CodeGenerator::i2s(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  JVM_IGNORE_TRAPS;
+  GUARANTEE(value.in_register(), "immediate case handled by the shared layer");
+  result.assign_register();
+  const Assembler::Register rd = result.lo_register();
+  emit(Assembler::encode_sll(rd, value.lo_register(), 16));
+  emit(Assembler::encode_sra(rd, rd, 16));
 }
 void CodeGenerator::i2l(Value& result, Value& value JVM_TRAPS) {
   (void)result; (void)value; SHOULD_NOT_REACH_HERE();

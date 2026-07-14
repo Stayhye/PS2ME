@@ -1,0 +1,15 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2444,6 +2444,12 @@
+         case Bytecodes::_iadd: case Bytecodes::_isub: case Bytecodes::_imul:
+         case Bytecodes::_iand: case Bytecodes::_ior:  case Bytecodes::_ixor:
+         case Bytecodes::_ireturn:
++        // Marco 3.3: rest of the integer ISA -- negate, shifts, narrowing
++        // conversions. All fully covered by int_unary_do/int_binary_do/i2b/i2c/
++        // i2s; no exceptions involved.
++        case Bytecodes::_ineg:
++        case Bytecodes::_ishl: case Bytecodes::_ishr: case Bytecodes::_iushr:
++        case Bytecodes::_i2b:  case Bytecodes::_i2c:  case Bytecodes::_i2s:
+           l = 1; break;
+         case Bytecodes::_iload:  case Bytecodes::_istore:
+         case Bytecodes::_bipush:

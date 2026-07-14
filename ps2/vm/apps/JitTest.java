@@ -50,6 +50,17 @@ public class JitTest {
     static int powTwo(int k)  { int r = 1; for (int i = 0; i <  k; i++) r += r; return r; } // for + doubling
     static int mulLoop(int a, int b) { int r = 0; while (b > 0) { r += a; b--; } return r; }// while + ifgt + iinc
 
+    // Marco 3.3: rest of the integer ISA -- negate, shifts (register + immediate
+    // amount), narrowing conversions. No branches, no exceptions.
+    static int neg(int a)            { return -a; }        // ineg
+    static int shl(int a, int b)     { return a << b; }    // ishl (register amount)
+    static int shr(int a, int b)     { return a >> b; }    // ishr (arithmetic)
+    static int ushr(int a, int b)    { return a >>> b; }   // iushr (logical)
+    static int shlImm(int a)         { return a << 3; }    // ishl (immediate amount)
+    static int i2bTest(int a)        { return (byte)a; }   // i2b (sign-extend)
+    static int i2cTest(int a)        { return (char)a; }   // i2c (zero-extend)
+    static int i2sTest(int a)        { return (short)a; }  // i2s (sign-extend)
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -63,7 +74,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.2b harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.3 harness start");
 
         // Warm every leaf: the first invocation arms it, the second compiles it
         // (still runs interpreted), the third+ run the r5900-compiled code. Loop
@@ -74,6 +85,8 @@ public class JitTest {
         int mx = 0, mn = 0, eq = 0, ne = 0, ng = 0, cl = 0, ch = 0;
         // Marco 3.2b loop leaves.
         int st = 0, ft = 0, pw = 0, ml = 0;
+        // Marco 3.3 int-ISA leaves.
+        int ng2 = 0, sl = 0, sr = 0, us = 0, si = 0, ib = 0, ic = 0, is = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -95,6 +108,14 @@ public class JitTest {
             ft = factLike(5);
             pw = powTwo(5);
             ml = mulLoop(6, 7);
+            ng2 = neg(7);
+            sl = shl(1, 4);
+            sr = shr(-16, 2);
+            us = ushr(-1, 28);
+            si = shlImm(5);
+            ib = i2bTest(200);
+            ic = i2cTest(-1);
+            is = i2sTest(40000);
         }
 
         check("add(7,5)",      ra, 12);
@@ -117,6 +138,14 @@ public class JitTest {
         check("factLike(5)",   ft, 120);
         check("powTwo(5)",     pw, 32);
         check("mulLoop(6,7)",  ml, 42);
+        check("neg(7)",        ng2, -7);
+        check("shl(1,4)",      sl, 16);
+        check("shr(-16,2)",    sr, -4);
+        check("ushr(-1,28)",   us, 15);
+        check("shlImm(5)",     si, 40);
+        check("i2bTest(200)",  ib, -56);
+        check("i2cTest(-1)",   ic, 65535);
+        check("i2sTest(40000)", is, -25536);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
@@ -133,6 +162,12 @@ public class JitTest {
         check("factLike(6)",   factLike(6),   720);
         check("powTwo(10)",    powTwo(10),    1024);
         check("mulLoop(12,0)", mulLoop(12, 0), 0);
+        // Marco 3.3 int-ISA with other values.
+        check("neg(-9)",       neg(-9),        9);
+        check("shr(15,1)",     shr(15, 1),     7);
+        check("ushr(-8,1)",    ushr(-8, 1),    0x7FFFFFFC);
+        check("i2bTest(-1)",   i2bTest(-1),    -1);
+        check("i2sTest(-1)",   i2sTest(-1),    -1);
 
         if (fails == 0) {
             System.out.println("[JIT-TEST] ALL PASS");
