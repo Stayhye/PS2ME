@@ -11,14 +11,24 @@
 #if ENABLE_COMPILER
 #include "incls/_BinaryAssembler_mips.cpp.incl"
 
-// Fase 1: the first real r5900 emission. `mov` now feeds the encoder into the
-// VM code buffer; the label/relocation-bound jumps (below) stay bail-out stubs
-// until Fase 2 wires the delay-slot-aware branch machinery. All of this is
-// dormant (UseCompiler=false) -- nothing here runs until a method is compiled.
+// Fase 1/2: real r5900 emission. `mov` and the label-binding below feed the
+// encoder into the VM code buffer. The forward-branch chain machinery (jmp to an
+// unbound Label) stays a bail-out stub until Fase 3 -- it is co-designed with
+// r5900 branch emission (delay slots + imm16 offset patching). All dormant
+// (UseCompiler=false) until a method is actually compiled.
 
 // register move: `or dst, src, zero` (canonical MIPS reg-reg copy).
 void BinaryAssembler::mov(Register dst, Register src) {
   emit(Assembler::encode_or(dst, src, Assembler::zero));
+}
+
+// Buffer accessors used by label back-patching (delegate to BinaryAssemblerCommon,
+// which reads/writes the CompiledMethod's code field at a code offset).
+jint BinaryAssembler::long_at(const int position) const {
+  return int_at(position);
+}
+void BinaryAssembler::long_at_put(const int position, const jint value) const {
+  int_at_put(position, value);
 }
 
 void BinaryAssembler::jmp(Label& L) {
@@ -31,14 +41,31 @@ void BinaryAssembler::jmp(CompilationQueueElement* cqe) {
   SHOULD_NOT_REACH_HERE();
 }
 
-void BinaryAssembler::bind(Label& L, int alignment) {
-  (void)L; (void)alignment;
-  SHOULD_NOT_REACH_HERE();
+// Bind label L to the current code offset. In the Fase 2 trivial-method path the
+// only label bound is the unused method-entry label (no forward references), so
+// there is no link chain to patch. The r5900 forward-branch chain patching
+// (walk the chain, write each branch's imm16 = (target-(pos+4))>>2) is
+// co-designed with real branch emission and arrives in Fase 3; the GUARANTEE
+// trips if an unbound label ever reaches here before then.
+void BinaryAssembler::bind_to(Label& L, jint code_offset) {
+  GUARANTEE(!L.is_unbound(),
+            "r5900 forward-branch chain patching arrives in Fase 3");
+  L.bind_to(code_offset);
 }
 
-void BinaryAssembler::bind_to(Label& L, jint code_offset) {
-  (void)L; (void)code_offset;
-  SHOULD_NOT_REACH_HERE();
+void BinaryAssembler::bind_to(NearLabel& L, int code_offset) {
+  GUARANTEE(!L.is_unbound(),
+            "r5900 forward-branch chain patching arrives in Fase 3");
+  L.bind_to(code_offset);
+}
+
+void BinaryAssembler::bind(Label& L, int alignment) {
+  if (alignment > 0) {
+    while ((code_size() % alignment) != 0) {
+      emit(Assembler::encode_nop());
+    }
+  }
+  bind_to(L, _code_offset);
 }
 
 #if defined(PS2ME_JIT_SELFTEST)

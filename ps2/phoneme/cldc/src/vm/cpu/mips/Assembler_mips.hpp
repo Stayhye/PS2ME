@@ -74,7 +74,7 @@ class Assembler: public AssemblerCommon {
     k0   = 26, k1 = 27,                      // kernel-reserved
     gp   = 28,               // global pointer
     sp   = 29,               // stack pointer
-    fp   = 30,               // frame pointer (a.k.a. s8)
+    s8   = 30,               // callee-saved ($30, a.k.a. ABI frame pointer)
     ra   = 31,               // return address
 
     number_of_gp_registers = 32,
@@ -100,7 +100,19 @@ class Assembler: public AssemblerCommon {
 
     // Platform-independent aliases.
     return_register     = v0,
-    stack_lock_register = t0
+    stack_lock_register = t0,
+
+    // Java-frame registers the shared compiler names (Assembler::fp / ::jsp) and
+    // that CodeGenerator_mips uses to manipulate the interpreted Java frame.
+    // These MUST equal the interpreter's global-reg pins (ps2me-global-reg.patch:
+    // s0=g_jfp, s1=g_jsp, s2=g_jpc, s3=g_jlocals) so compiled code and the C
+    // interpreter share one coherent Java frame across the call_from_interpreter
+    // boundary. (The ARM backend does the same in its C-interpreter config:
+    // fp/jsp/locals are dedicated GPRs, not the ABI frame pointer.)
+    fp     = s0,   // Java frame pointer   (g_jfp)
+    jsp    = s1,   // Java stack pointer   (g_jsp)
+    jpc    = s2,   // Java program counter (g_jpc)
+    locals = s3    // current Java locals  (g_jlocals)
   };
 
   enum {
