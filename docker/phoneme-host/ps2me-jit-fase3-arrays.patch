@@ -1,0 +1,14 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2477,6 +2477,11 @@
+         // JitTest before iaload/iastore (arrays) arrive in Marco 3.4b.
+         case Bytecodes::_aload_0:
+         case Bytecodes::_arraylength:
++        // Marco 3.4b: int-array element load/store. Both go through array_check
++        // (null_check + unsigned bounds check -> throw path) then load/store via
++        // an IndexedAddress; all covered by the backend, exceptions reuse 3.4a.
++        case Bytecodes::_iaload:
++        case Bytecodes::_iastore:
+           l = 1; break;
+         case Bytecodes::_iload:  case Bytecodes::_istore:
+         case Bytecodes::_bipush:

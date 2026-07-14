@@ -70,6 +70,16 @@ public class JitTest {
     // iastore arrive in 3.4b. Leaf bytecodes = aload_0/arraylength/ireturn.
     static int alen(int[] a) { return a.length; }          // null_check + length
 
+    // Marco 3.4b: int-array element load/store. Each access = array_check
+    // (null_check + unsigned bounds check -> throw path) + an IndexedAddress
+    // (register-index: sll+addu; disp = header). aget/aset are straight-line;
+    // asum combines arraylength + iaload inside a loop (reuses 3.2b back-edge).
+    // An OOB / negative index on a compiled aget must throw
+    // ArrayIndexOutOfBoundsException and unwind to an interpreted try/catch.
+    static int aget(int[] a, int i)        { return a[i]; }         // iaload
+    static int aset(int[] a, int i, int v) { a[i] = v; return a[i]; } // iastore + iaload
+    static int asum(int[] a) { int s = 0; for (int i = 0; i < a.length; i++) s += a[i]; return s; }
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -83,10 +93,13 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.4a harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.4b harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
+        // Read-only array for aget/asum; a separate mutable array for aset.
+        int[] arrG = { 10, 20, 30, 40, 50 };
+        int[] arrS = new int[3];
 
         // Warm every leaf: the first invocation arms it, the second compiles it
         // (still runs interpreted), the third+ run the r5900-compiled code. Loop
@@ -101,6 +114,8 @@ public class JitTest {
         int ng2 = 0, sl = 0, sr = 0, us = 0, si = 0, ib = 0, ic = 0, is = 0;
         // Marco 3.4a exception subsystem leaf.
         int al = 0;
+        // Marco 3.4b array leaves.
+        int ag = 0, sm = 0, av = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -131,6 +146,9 @@ public class JitTest {
             ic = i2cTest(-1);
             is = i2sTest(40000);
             al = alen(arr5);
+            ag = aget(arrG, 3);
+            sm = asum(arrG);
+            av = aset(arrS, 1, 99);
         }
 
         check("add(7,5)",      ra, 12);
@@ -179,6 +197,33 @@ public class JitTest {
         // Prove the handler resumes cleanly: normal compiled calls still work
         // after the unwind (globals coherent, no leaked native frame).
         check("alen(arr5) post-throw", alen(arr5), 5);
+
+        // Marco 3.4b: in-bounds int-array element load/store + sum loop.
+        check("aget(arrG,3)",   ag, 40);
+        check("asum(arrG)",     sm, 150);
+        check("aset(arrS,1,99)", av, 99);
+        check("aget(arrS,1)",   aget(arrS, 1), 99);   // read back the stored value
+        check("aget(arrG,0)",   aget(arrG, 0), 10);   // first element (index 0)
+
+        // Marco 3.4b: the compiled bounds check must throw
+        // ArrayIndexOutOfBoundsException for an out-of-range index AND for a
+        // negative one (unsigned compare catches both), unwinding to this
+        // interpreted try/catch. aget is already compiled (warmed above).
+        boolean oobCaught = false;
+        try {
+            aget(arrG, 10);   // 10 >= length 5
+        } catch (ArrayIndexOutOfBoundsException e) {
+            oobCaught = true;
+        }
+        check("aget(arrG,10) throws AIOOBE", oobCaught ? 1 : 0, 1);
+        boolean negCaught = false;
+        try {
+            aget(arrG, -1);   // negative -> huge unsigned -> out of bounds
+        } catch (ArrayIndexOutOfBoundsException e) {
+            negCaught = true;
+        }
+        check("aget(arrG,-1) throws AIOOBE", negCaught ? 1 : 0, 1);
+        check("aget(arrG,2) post-throw", aget(arrG, 2), 30);  // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

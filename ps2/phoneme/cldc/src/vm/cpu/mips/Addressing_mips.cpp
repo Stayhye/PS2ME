@@ -18,8 +18,13 @@
 // real base+disp16 addressing arrives in Fase 3. Mirrors Addressing_i386.cpp.
 
 HeapAddress::~HeapAddress() {
-  GUARANTEE(!has_address_register(),
-            "address register must be cleared and deallocated");
+  // Marco 3.4b: the register-index IndexedAddress path (compute_address_for)
+  // materializes the effective address into a freshly allocated register; free
+  // it here. Field / immediate-index accesses never allocate one, so this is a
+  // no-op for them. Mirrors HeapAddress::~HeapAddress in Addressing_arm.cpp.
+  if (has_address_register()) {
+    RegisterAllocator::dereference(address_register());
+  }
 }
 
 void HeapAddress::write_barrier_prolog() {
@@ -51,10 +56,34 @@ BinaryAssembler::Address FieldAddress::compute_address_for(jint address_offset) 
   return BinaryAssembler::Address(object()->lo_register(), address_offset + offset());
 }
 
+// Fase 3 (Marco 3.4b): address of array element [index]. The r5900 has no
+// base+index+scale operand, so only the immediate-index case is a pure disp16;
+// a register index must be folded into a register. Element offset within the
+// array data = index << index_shift (log2 of the element byte size); the array
+// header (Array::base_offset()) plus the caller's word offset become the disp.
 BinaryAssembler::Address IndexedAddress::compute_address_for(jint address_offset) {
-  (void)address_offset;
-  SHOULD_NOT_REACH_HERE();
-  return BinaryAssembler::Address(0);
+  const jint disp_base = address_offset + Array::base_offset();
+  if (index()->is_immediate()) {
+    // [ array + (base_offset + address_offset + index*scale) ] -- disp only.
+    return BinaryAssembler::Address(array()->lo_register(),
+        disp_base + (index()->as_int() << index_shift()));
+  }
+  // Register index: addr = array + (index << shift); the (base_offset +
+  // address_offset) part stays in the disp16. Allocate addr (freed by
+  // ~HeapAddress) and use $at as the shift scratch (outside the register pool).
+  set_address_register(RegisterAllocator::allocate());
+  CodeGenerator* gen = code_generator();
+  const BinaryAssembler::Register addr = address_register();
+  const BinaryAssembler::Register arr  = array()->lo_register();
+  const BinaryAssembler::Register idx  = index()->lo_register();
+  const jint shift = index_shift();
+  if (shift != 0) {
+    gen->emit(Assembler::encode_sll (Assembler::at, idx, shift));
+    gen->emit(Assembler::encode_addu(addr, arr, Assembler::at));
+  } else {
+    gen->emit(Assembler::encode_addu(addr, arr, idx));
+  }
+  return BinaryAssembler::Address(addr, disp_base);
 }
 
 // Fase 3: base register + signed displacement. base() is the interpreter's live

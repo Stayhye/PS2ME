@@ -39,7 +39,11 @@ class HeapAddress: public MemoryAddress {
   virtual BinaryAssembler::Address compute_address_for(jint address_offset)
      JVM_PURE_VIRTUAL_((BinaryAssembler::Address)0);
 
- private:
+ protected:
+  // Marco 3.4b: protected (not private) so IndexedAddress::compute_address_for
+  // can materialize the effective address into this register. (The i386 backend
+  // keeps them private -- its IndexedAddress never needs one, having a native
+  // base+index+scale operand; the r5900 must compute the address.)
   BinaryAssembler::Register _address_register;
 
   BinaryAssembler::Register address_register() const { return _address_register; }

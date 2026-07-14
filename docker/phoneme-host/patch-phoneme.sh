@@ -703,4 +703,16 @@ if ! grep -q 'Marco 3.4a: object local load' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-exc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 45) ps2me-jit-fase3-arrays (PS2ME JIT, Fase 3, Marco 3.4b). One-hunk whitelist
+#     addition to Interpreter_c.cpp ON TOP of #44: the compile trigger now accepts
+#     iaload/iastore (int-array element load/store). Each goes through the backend
+#     array_check (null_check + UNSIGNED bounds check -> the Marco-3.4a helper-C
+#     throw path) then an IndexedAddress (register index = sll+addu; immediate =
+#     pure disp). The exception subsystem is reused from 3.4a; no new interp code.
+#     Interpreter_c.cpp is LF-only. Idempotent (guard on the 'Marco 3.4b' marker).
+#     See references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.4b: int-array element' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-arrays.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

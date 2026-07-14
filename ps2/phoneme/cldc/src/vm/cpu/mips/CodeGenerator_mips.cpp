@@ -442,9 +442,36 @@ void CodeGenerator::instance_of(Value& result, Value& object, Value& klass,
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 3 (Marco 3.4b): null + bounds check for an array access. Mirrors the i386
+// array_check (CodeGenerator_i386.cpp:651), adapted to the r5900 (no compare-
+// against-memory, no flags): null_check reuses the Marco 3.4a inline throw; the
+// length is loaded into a register and the bound is an UNSIGNED compare
+// (`index < length`), which catches a negative index for free (as a huge
+// unsigned). If the index is NOT in bounds, branch into the runtime-throw path
+// (ArrayIndexOutOfBoundsException) -- same helper-C mechanism as null_check.
 void CodeGenerator::array_check(Value& array, Value& index JVM_TRAPS) {
-  (void)array; (void)index;
-  SHOULD_NOT_REACH_HERE();
+  maybe_null_check(array JVM_CHECK);
+  GUARANTEE(array.in_register(), "array must be register-resident for the check");
+
+  // length = *(array + Array::length_offset())
+  const Assembler::Register len = RegisterAllocator::allocate();
+  emit(Assembler::encode_lw(len, array.lo_register(), Array::length_offset()));
+
+  // at = (index < length)  [unsigned]; in bounds iff at == 1.
+  const Assembler::Register at = Assembler::at;
+  if (index.is_immediate()) {
+    mips_li(this, at, (juint)index.as_int());
+    emit(Assembler::encode_sltu(at, at, len));
+  } else {
+    GUARANTEE(index.in_register(), "index must be immediate or in a register");
+    emit(Assembler::encode_sltu(at, index.lo_register(), len));
+  }
+  RegisterAllocator::dereference(len);
+
+  Label ok;
+  emit_branch(Assembler::encode_bne(at, Assembler::zero, 0), ok);   // in bounds -> skip
+  mips_emit_runtime_throw(this, ThrowExceptionStub::rte_array_index_out_of_bounds);
+  bind(ok);
 }
 
 void CodeGenerator::type_check(Value& object, Value& array, Value& index JVM_TRAPS) {
