@@ -92,12 +92,15 @@ void CodeGenerator::clear_stack() {
   SHOULD_NOT_REACH_HERE();
 }
 
+// Both are literal-pool maintenance on backends that load 32-bit immediates from
+// an in-code pool (ARM/thumb). The r5900 materializes immediates with lui/ori
+// (USE_LITERAL_POOL==0), so there is never a pool to flush -> no-ops. Called
+// unconditionally in the compile loop (per bytecode / at frame flush), so they
+// must NOT bail out.
 void CodeGenerator::bytecode_prolog() {
-  SHOULD_NOT_REACH_HERE();
 }
 
 void CodeGenerator::flush_epilogue(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
 }
 
 // ---- loads / stores / moves --------------------------------------------------

@@ -589,4 +589,21 @@ if ! grep -q 'jit_frame_enter' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase2-helpers.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 38) ps2me-jit-fase2-trigger (PS2ME JIT, Fase 2). Two gated (PS2ME_JIT_FASE2) hooks that
+#     drive the Fase-2 milestone; both absent unless the Fase-2 build is requested:
+#       (a) call site: invoke_java_method arms the target once (jit_fase2_arm, from #37),
+#           inserted right after set_callee_method. Block-scope forward decl (plain C++
+#           linkage -- same TU as the definition).
+#       (b) OmitLeafMethodFrames = false at VM init: the C-interpreter hybrid's compiled
+#           methods always build a full Java frame (the ARM omit shortcut needs the compiled
+#           calling convention, which the C return path does not use), so omit must be off
+#           to keep the VSF consistent. Injected next to the #34 dormant switch.
+#     Idempotent (markers).
+grep -q 'jit_fase2_arm(method)' "$INTERPC" || \
+  sed -i 's@\(    set_callee_method(method);\)@\1\n#if defined(PS2ME_JIT_FASE2)\n    { void jit_fase2_arm(address); jit_fase2_arm(method); }\n#endif@' \
+      "$INTERPC"
+grep -q 'OmitLeafMethodFrames = false' "$JVMCPP" || \
+  sed -i 's@\(  UseCompiler = false; /\* ps2me-jit-dormant.*/\)@\1\n#if defined(PS2ME_JIT_FASE2)\n  OmitLeafMethodFrames = false; \/* ps2me-jit-fase2: compiled methods build a full frame *\/\n#endif@' \
+      "$JVMCPP"
+
 echo "phoneME patches applied to: $PHONEME"
