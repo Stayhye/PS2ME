@@ -1,6 +1,9 @@
 # External SDK sources and internal-only notes — never versioned
 references/
 
+# graphify knowledge graph — local only, never versioned
+graphify-out/
+
 # Build artifacts
 *.o
 *.elf
