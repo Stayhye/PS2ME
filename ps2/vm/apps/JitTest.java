@@ -80,6 +80,15 @@ public class JitTest {
     static int aset(int[] a, int i, int v) { a[i] = v; return a[i]; } // iastore + iaload
     static int asum(int[] a) { int s = 0; for (int i = 0; i < a.length; i++) s += a[i]; return s; }
 
+    // Marco 3.5: instance INT field load/store. getfield/putfield of an int
+    // field quicken to fast_igetfield*/fast_iputfield (possibly aload_0-fused).
+    // The compiled fast_get_field/fast_put_field reuse the 3.4a null_check +
+    // throw path (proven by gx(null) -> NPE) then load/store via FieldAddress.
+    static final class Pt { int x; int y; }
+    static int gx(Pt p)        { return p.x; }            // field load (offset x)
+    static int gy(Pt p)        { return p.y; }            // field load (offset y)
+    static int sx(Pt p, int v) { p.x = v; return p.x; }  // field store + reload
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -93,13 +102,16 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.4b harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.5 harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
         // Read-only array for aget/asum; a separate mutable array for aset.
         int[] arrG = { 10, 20, 30, 40, 50 };
         int[] arrS = new int[3];
+        // Field-access objects: pt read-only (gx/gy), pt2 mutated (sx).
+        Pt pt = new Pt(); pt.x = 7; pt.y = 9;
+        Pt pt2 = new Pt();
 
         // Warm every leaf: the first invocation arms it, the second compiles it
         // (still runs interpreted), the third+ run the r5900-compiled code. Loop
@@ -116,6 +128,8 @@ public class JitTest {
         int al = 0;
         // Marco 3.4b array leaves.
         int ag = 0, sm = 0, av = 0;
+        // Marco 3.5 field leaves.
+        int gxv = 0, gyv = 0, sxv = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -149,6 +163,9 @@ public class JitTest {
             ag = aget(arrG, 3);
             sm = asum(arrG);
             av = aset(arrS, 1, 99);
+            gxv = gx(pt);
+            gyv = gy(pt);
+            sxv = sx(pt2, 55);
         }
 
         check("add(7,5)",      ra, 12);
@@ -224,6 +241,23 @@ public class JitTest {
         }
         check("aget(arrG,-1) throws AIOOBE", negCaught ? 1 : 0, 1);
         check("aget(arrG,2) post-throw", aget(arrG, 2), 30);  // resumes clean
+
+        // Marco 3.5: instance int field load/store (compiled).
+        check("gx(pt)",      gxv, 7);
+        check("gy(pt)",      gyv, 9);
+        check("sx(pt2,55)",  sxv, 55);
+        check("gx(pt2)",     gx(pt2), 55);   // read back the stored field
+
+        // Marco 3.5: the compiled field null_check must throw NPE and unwind to
+        // this interpreted try/catch (same helper-C mechanism as 3.4a).
+        boolean fldNpe = false;
+        try {
+            gx(null);
+        } catch (NullPointerException e) {
+            fldNpe = true;
+        }
+        check("gx(null) throws NPE", fldNpe ? 1 : 0, 1);
+        check("gx(pt) post-throw",   gx(pt), 7);   // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

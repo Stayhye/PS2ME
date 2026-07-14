@@ -715,4 +715,17 @@ if ! grep -q 'Marco 3.4b: int-array element' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-arrays.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 46) ps2me-jit-fase3-fields (PS2ME JIT, Fase 3, Marco 3.5). One-hunk whitelist
+#     addition to Interpreter_c.cpp ON TOP of #45: the compile trigger now accepts
+#     the quickened INT instance-field bytecodes (fast_igetfield / fast_igetfield_1
+#     / fast_iputfield and the aload_0-fused fast_igetfield_1/_4/_8). The compiler's
+#     fast_get_field/fast_put_field reuse load_from_object/store_to_object
+#     (maybe_null_check -> the 3.4a helper-C throw path + FieldAddress + load/store)
+#     -- all already implemented; no new backend code. Object fields stay OUT (their
+#     store needs a write barrier, still a bail-out). Interpreter_c.cpp is LF-only.
+#     Idempotent (guard on the 'Marco 3.5' marker). See references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.5: instance INT field' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-fields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
