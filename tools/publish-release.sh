@@ -27,8 +27,8 @@ fi
 # Release notes = this version's CHANGELOG section.
 NOTES="$(mktemp)"
 trap 'rm -f "$NOTES"' EXIT
-awk -v ver="${VER#v}" '
-  $0 ~ "^## \\[" ver "\\]" { p = 1; next }
+awk -v hdr="## [${VER#v}]" '
+  index($0, hdr) == 1 { p = 1; next }
   p && /^## \[/ { exit }
   p { print }
 ' CHANGELOG.md > "$NOTES"
