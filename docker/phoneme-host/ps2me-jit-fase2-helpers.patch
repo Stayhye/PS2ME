@@ -2,7 +2,7 @@ diff --git a/cldc/src/vm/cpu/c/Interpreter_c.cpp b/cldc/src/vm/cpu/c/Interpreter
 index 5c230b9..00937bd 100644
 --- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
 +++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
-@@ -2265,6 +2265,95 @@ enum {
+@@ -2265,6 +2265,106 @@ enum {
      }
    }
  
@@ -74,23 +74,34 @@ index 5c230b9..00937bd 100644
 +  }
 +
 +#if defined(PS2ME_JIT_FASE2)
-+  // Fase 2 one-shot trigger. Arms the FIRST trivial empty-void method (single
-+  // `return` bytecode, non-native, non-synchronized) for compilation by pointing
-+  // its execution entry at shared_invoke_compiler: the next invocation compiles it
++  // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
++  // non-native, non-synchronized) for compilation by pointing their execution
++  // entry at shared_invoke_compiler: the next invocation compiles the method
 +  // through the normal GC-safe VM-call path, and every later invocation runs the
-+  // r5900-compiled code. This shape is exactly what the Fase-2 CodeGenerator
-+  // handles (method_entry + return_void); arming anything richer would hit a
-+  // bail-out, so the whitelist is deliberately strict. Plain C++ linkage: it is
++  // r5900-compiled code. We arm up to JIT_FASE2_MAX_ARMED distinct methods (not
++  // just the first): the first empty-void method seen at boot may run only once,
++  // whereas an empty MIDlet callback (e.g. keyReleased/hideNotify) is hit every
++  // frame -- arming several guarantees at least one is re-invoked >=3x so the
++  // compiled path actually executes. The whitelist stays strict (only `_return`),
++  // so every armed method is trivially compilable (method_entry + return_void),
++  // never a bail-out. Dedup is GC-safe: it reads the method's own entry/compiled
++  // flag (updated by the GC), never a cached raw oop pointer. Plain C++ linkage:
 +  // only called from within this file (invoke_java_method), never cross-TU.
-+  static bool jit_fase2_armed = false;
++  enum { JIT_FASE2_MAX_ARMED = 32 };
++  static int jit_fase2_armed_count = 0;
 +  void jit_fase2_arm(address method) {
-+    if (jit_fase2_armed || Universe::before_main()) return;
++    if (Universe::before_main()) return;
++    if (jit_fase2_armed_count >= JIT_FASE2_MAX_ARMED) return;
 +    if (get_access_flags(method) & (JVM_ACC_NATIVE | JVM_ACC_SYNCHRONIZED)) return;
 +    Method::Raw m = (ReturnOop)method;
 +    if (m().code_size() != 1 || m().ubyte_at(0) != Bytecodes::_return) return;
-+    jit_fase2_armed = true;
++    if (m().has_compiled_code()) return;                    // already compiled: let it run
++    if (m().execution_entry() == (address)shared_invoke_compiler) return; // already armed
++    jit_fase2_armed_count++;
 +    m().set_execution_entry((address)shared_invoke_compiler);
-+    tty->print_cr("[PS2ME-JIT] Fase 2: armed a trivial void method for compilation");
++    tty->print("[PS2ME-JIT] Fase 2: armed #%d ", jit_fase2_armed_count);
++    m().print_name_on_tty();
++    tty->cr();
 +  }
 +#endif // PS2ME_JIT_FASE2
 +#endif // ENABLE_COMPILER

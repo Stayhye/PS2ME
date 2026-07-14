@@ -1,0 +1,22 @@
+--- a/cldc/src/vm/share/memory/ObjectHeap.cpp
++++ b/cldc/src/vm/share/memory/ObjectHeap.cpp
+@@ -1745,10 +1745,19 @@
+    * UseCompiler is false for source romizer, but we still need compiler area
+    * for AOT compilation. See 6432131.
+    */
++#if !defined(PS2ME_JIT_FASE2)
+   if( !UseCompiler && !GenerateROMImage ) {
+     CompilerAreaPercentage = 0;
+     CompilerAreaSlack = 0;
+   }
++#else
++  /* ps2me-jit-fase2: the r5900 JIT keeps UseCompiler dormant (the hotness path
++   * would hand arbitrary methods to still-bailing CodeGenerator handlers); only
++   * our strict trivial-void trigger drives compilation. But a dormant UseCompiler
++   * zeroes the compiler area, so try_to_compile() always returns NULL (soft fail,
++   * no crash) and no method ever runs compiled. Keep the default 20% area so the
++   * Fase-2 milestone can actually emit and enter r5900 code. */
++#endif
+ 
+   if (CompilerAreaPercentage < 0) {
+     CompilerAreaPercentage = 0;

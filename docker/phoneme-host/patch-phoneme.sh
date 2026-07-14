@@ -606,4 +606,27 @@ grep -q 'OmitLeafMethodFrames = false' "$JVMCPP" || \
   sed -i 's@\(  UseCompiler = false; /\* ps2me-jit-dormant.*/\)@\1\n#if defined(PS2ME_JIT_FASE2)\n  OmitLeafMethodFrames = false; \/* ps2me-jit-fase2: compiled methods build a full frame *\/\n#endif@' \
       "$JVMCPP"
 
+# 39) ps2me-jit-fase2-fired-log (PS2ME JIT, Fase 2). One-shot diagnostic in
+#     shared_invoke_compiler(): proves an armed method was re-invoked and the
+#     compile path fired (companion to the arm/entered logs). Gated PS2ME_JIT_FASE2,
+#     absent in production. Idempotent (marker string). Anchored on the unique
+#     shared_invoke_compiler() definition line.
+grep -q 'shared_invoke_compiler fired' "$INTERPC" || \
+  sed -i 's@\(  void shared_invoke_compiler() {\)@\1\n#if defined(PS2ME_JIT_FASE2)\n    { static bool _f2c = false; if (!_f2c) { _f2c = true; tty->print_cr("[PS2ME-JIT] Fase 2: shared_invoke_compiler fired (re-invoked armed method -> compiling)"); } }\n#endif@' \
+      "$INTERPC"
+
+# 40) ps2me-jit-fase2-compilerarea (PS2ME JIT, Fase 2). The r5900 JIT keeps
+#     UseCompiler dormant (the hotness path would feed still-bailing CodeGenerator
+#     handlers arbitrary methods). But ObjectHeap::init zeroes CompilerAreaPercentage
+#     whenever UseCompiler is false, so try_to_compile() can never allocate a
+#     CompiledMethod -> returns NULL (soft fail, no crash) -> no method ever runs
+#     compiled. On the Fase-2 build only, keep the default 20% compiler area so our
+#     strict trivial-void trigger can actually emit and enter r5900 code (the hotness
+#     path stays off via UseCompiler). Wrap the zeroing block in #if !PS2ME_JIT_FASE2.
+#     Gated ENABLE_COMPILER; absent in production. Idempotent (marker).
+OHCPP="$PHONEME/cldc/src/vm/share/memory/ObjectHeap.cpp"
+if ! grep -q 'ps2me-jit-fase2: the r5900 JIT keeps UseCompiler dormant' "$OHCPP"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase2-compilerarea.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
