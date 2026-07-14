@@ -83,6 +83,7 @@ JC_SRCS="
     hal/TimerService.cpp
     hal/MemoryManager.cpp
     platform/StdoutSink.cpp
+    platform/SifLock.cpp
     platform/Ps2CpuCache.cpp
     platform/Ps2AlarmTimer.cpp
     platform/PosixClock.cpp
@@ -95,6 +96,13 @@ for src in $JC_SRCS; do
     JC_OBJS="$JC_OBJS $obj"
 done
 
+# Frontend-free CLDC ELF: StdoutSink references Ps2Frontend::instance()/logWrite();
+# the real menu (Ps2Frontend.cpp) drags in the whole frontend, so link a tiny no-op
+# stand-in instead (System.out still reaches the EE console via StdoutSink's fwrite).
+$EE_CXX $JC_FLAGS -I"$JC/platform" -c /work/ps2/vm/apps/CldcFrontendStub.cpp \
+    -o "$OUT/jc_CldcFrontendStub.o"
+JC_OBJS="$JC_OBJS $OUT/jc_CldcFrontendStub.o"
+
 # --- 3) Ps2Main.o: our entrypoint, with the VM's flag set ----------------------
 echo "+ [3/4] Ps2Main.o (entrypoint)"
 VM_DEFS="-DMIPS -G0 -DUSE_UNICODE_FOR_FILENAMES=1 -DSUPPORTS_MONOTONIC_CLOCK=0 \
@@ -103,6 +111,12 @@ VM_DEFS="-DMIPS -G0 -DUSE_UNICODE_FOR_FILENAMES=1 -DSUPPORTS_MONOTONIC_CLOCK=0 \
     -DROMIZING=1 -DJVM_RELEASE_VERSION='\"1.1\"' -DJVM_BUILD_VERSION='\"internal\"' \
     -DJVM_NAME='\"phoneME Feature VM\"' \
     -fno-gnu-keywords -fno-operator-names -fno-exceptions -fno-optional-diags -fno-rtti"
+# PS2ME JIT Fase 3 harness: Ps2Main.cpp gates the launched class (JitTest) on this
+# define, so it must reach the entrypoint compile too (the -D in ps2_mips.cfg only
+# reaches the VM archives, not this ELF stage). Pass PS2ME_JIT_FASE3=true to enable.
+if [ "$PS2ME_JIT_FASE3" = "true" ]; then
+    VM_DEFS="$VM_DEFS -DPS2ME_JIT_FASE3"
+fi
 VM_INCS="-I$GEN \
     -I$WS/src/vm/share/compiler -I$WS/src/vm/share/debugger \
     -I$WS/src/vm/share/handles -I$WS/src/vm/share/memory \

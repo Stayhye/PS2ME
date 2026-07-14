@@ -48,21 +48,26 @@ BinaryAssembler::Address IndexedAddress::compute_address_for(jint address_offset
   return BinaryAssembler::Address(0);
 }
 
+// Fase 3: base register + signed displacement. base() is the interpreter's live
+// pointer (g_jlocals for locals, g_jsp for stack slots); compute_base_offset()
+// supplies the byte displacement. MIPS disp16 is signed, so (unlike i386) the
+// offset is allowed to be negative -- locals sit BELOW g_jlocals.
 BinaryAssembler::Address StackAddress::address_for(jint address_offset) {
-  (void)address_offset;
-  SHOULD_NOT_REACH_HERE();
-  return BinaryAssembler::Address(0);
+  return BinaryAssembler::Address(base(), address_offset + compute_base_offset());
 }
 
 jint LocationAddress::compute_base_offset() {
-  SHOULD_NOT_REACH_HERE();
-  return 0;
+  // Fase 3 (Marco 3.1): only local addressing is implemented. Whitelisted
+  // straight-line methods keep all expression values in registers, so the
+  // expression-stack (jsp-relative) path is never reached here.
+  GUARANTEE(is_local(), "Fase 3: expression-stack slots not addressable yet");
+  // Mirror Interpreter_c.cpp's GET_LOCAL(n) == *((jint*)g_jlocals - n): local n
+  // lives at g_jlocals - n*BytesPerWord. base() == locals == s3 == g_jlocals.
+  return - index() * BytesPerWord;
 }
 
 bool LocationAddress::is_local_index(jint index) {
-  (void)index;
-  SHOULD_NOT_REACH_HERE();
-  return false;
+  return code_generator()->root_method()->is_local(index);
 }
 
 #endif // ENABLE_COMPILER

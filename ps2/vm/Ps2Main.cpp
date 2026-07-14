@@ -70,7 +70,14 @@ int main(int /*argc*/, char** /*argv*/) {
      * docker/phoneme-cross/romize-app.sh), so JVM_Start finds it without any
      * file I/O. The parse loop stops at the first non-option (the class name). */
     char  a_prog[] = "j2me";
+#if defined(PS2ME_JIT_FASE3)
+    /* PS2ME JIT Fase 3 (Marco 3.1) test harness: launch the romized JitTest
+     * instead of HelloWorld. Its main() drives the r5900-compiled leaf methods
+     * and prints a PASS/FAIL table. See references/JIT_PLAN.md and JitTest.java. */
+    char  a_cls[]  = "JitTest";
+#else
     char  a_cls[]  = "HelloWorld";
+#endif
     char* jargv[]  = { a_prog, a_cls };
     int   jargc    = 2;
 

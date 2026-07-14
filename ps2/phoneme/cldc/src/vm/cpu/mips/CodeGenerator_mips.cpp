@@ -83,13 +83,17 @@ void CodeGenerator::method_entry(Method* method JVM_TRAPS) {
   mips_call_c(this, (address)jit_frame_enter);
 }
 
+// In the C-interpreter hybrid the Java expression stack is g_jsp (s1), owned by
+// the interpreter and set up by jit_frame_enter; the compiled body keeps
+// expression values in registers and (for Marco 3.1 whitelisted methods) never
+// spills them to the Java stack. So these CPU-stack adjustments are no-ops here
+// (real g_jsp maintenance for expression-stack flushing arrives with a later
+// Marco). They are called during normal compilation, so they must NOT bail out.
 void CodeGenerator::increment_stack_pointer_by(int adjustment) {
   (void)adjustment;
-  SHOULD_NOT_REACH_HERE();
 }
 
 void CodeGenerator::clear_stack() {
-  SHOULD_NOT_REACH_HERE();
 }
 
 // Both are literal-pool maintenance on backends that load 32-bit immediates from
@@ -105,10 +109,39 @@ void CodeGenerator::flush_epilogue(JVM_SINGLE_ARG_TRAPS) {
 
 // ---- loads / stores / moves --------------------------------------------------
 
+// Fase 3 (Marco 3.1): load a single-word value from memory (base+disp16). Used
+// for iload (LocationAddress over g_jlocals) and later array/field loads. The
+// shared read_value() calls this eagerly for a flushed local, so after iload the
+// value is register-resident -- which is what int_binary_do requires.
 void CodeGenerator::load_from_address(Value& result, BasicType type,
                                       MemoryAddress& address, Condition cond) {
-  (void)result; (void)type; (void)address; (void)cond;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(cond == Assembler::always, "Fase 3: unconditional loads only");
+  (void)cond;
+  if (type == T_ILLEGAL) {
+    return;  // illegal types require no load
+  }
+  GUARANTEE(stack_type_for(type) == result.stack_type(),
+            "types must match (taking stack types into account)");
+  result.try_to_assign_register();
+  const Assembler::Register lo = result.lo_register();
+  const BinaryAssembler::Address addr = address.lo_address();
+  const Assembler::Register base = addr.base();
+  const int off = addr.disp();
+
+  switch (type) {
+    case T_BOOLEAN:                              // fall through (signed byte)
+    case T_BYTE:   emit(Assembler::encode_lb (lo, base, off)); break;
+    case T_CHAR:   emit(Assembler::encode_lhu(lo, base, off)); break;
+    case T_SHORT:  emit(Assembler::encode_lh (lo, base, off)); break;
+    case T_INT:                                  // fall through
+    case T_FLOAT:                                // fall through
+    case T_ARRAY:                                // fall through
+    case T_OBJECT: emit(Assembler::encode_lw (lo, base, off)); break;
+    default:
+      // T_LONG / T_DOUBLE are two-word; those arrive with a later Marco.
+      SHOULD_NOT_REACH_HERE();
+      break;
+  }
 }
 
 void CodeGenerator::store_to_address(Value& value, BasicType type,
@@ -117,9 +150,23 @@ void CodeGenerator::store_to_address(Value& value, BasicType type,
   SHOULD_NOT_REACH_HERE();
 }
 
+// move(Value,Value): the shared Value::materialize()/writable_copy() call this to
+// (a) materialize an immediate into an assigned register, or (b) copy a register
+// value. Single-word only for Marco 3.1.
 void CodeGenerator::move(const Value& dst, const Value& src, const Condition cond) {
-  (void)dst; (void)src; (void)cond;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(cond == Assembler::always, "Fase 3: unconditional moves only");
+  (void)cond;
+  GUARANTEE(dst.in_register(), "move destination must have a register");
+  GUARANTEE(dst.is_one_word() && src.is_one_word(),
+            "Fase 3: single-word moves only");
+  if (src.is_immediate()) {
+    mips_li(this, dst.lo_register(), (juint)src.as_int());
+  } else {
+    GUARANTEE(src.in_register(), "source must be immediate or in a register");
+    if (dst.lo_register() != src.lo_register()) {
+      mov(dst.lo_register(), src.lo_register());  // BinaryAssembler::mov -> `or`
+    }
+  }
 }
 
 void CodeGenerator::move(Value& dst, Oop* obj, Condition cond) {
@@ -129,8 +176,11 @@ void CodeGenerator::move(Value& dst, Oop* obj, Condition cond) {
 
 void CodeGenerator::move(Assembler::Register dst, Assembler::Register src,
                          Condition cond) {
-  (void)dst; (void)src; (void)cond;
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(cond == Assembler::always, "Fase 3: unconditional moves only");
+  (void)cond;
+  if (dst != src) {
+    mov(dst, src);  // BinaryAssembler::mov -> `or dst,src,zero`
+  }
 }
 
 // ---- comparisons / conditional control flow ----------------------------------
@@ -285,10 +335,100 @@ void CodeGenerator::return_void(JVM_SINGLE_ARG_TRAPS) {
 
 // ---- integer / long arithmetic ----------------------------------------------
 
+// Fase 3 (Marco 3.1): integer add/sub/and/or/xor/mul. The shared int_binary()
+// guarantees op1 is in a register and op2 is a register or an immediate (and
+// folds the all-immediate case away). We take a writable copy of op1 into the
+// result register (reusing op1's register when it is dead) and emit the r5900
+// three-operand form. Shifts/div/rem and reverse-subtract stay in bail-out until
+// their Marcos (they must not be admitted by the compile trigger's whitelist).
 void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
                                   BytecodeClosure::binary_op op JVM_TRAPS) {
-  (void)result; (void)op1; (void)op2; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  JVM_IGNORE_TRAPS;
+  GUARANTEE(!result.is_present(), "result must not be present");
+  GUARANTEE(op1.in_register(), "op1 must be in a register");
+  GUARANTEE(op2.is_immediate() || op2.in_register(),
+            "op2 must be in a register or an immediate");
+
+  op1.writable_copy(result);
+  const Assembler::Register rd = result.lo_register();
+
+  if (op2.in_register()) {
+    const Assembler::Register rt = op2.lo_register();
+    switch (op) {
+      case BytecodeClosure::bin_add:
+        emit(Assembler::encode_addu(rd, rd, rt)); return;
+      case BytecodeClosure::bin_sub:
+        emit(Assembler::encode_subu(rd, rd, rt)); return;
+      case BytecodeClosure::bin_and:
+        emit(Assembler::encode_and (rd, rd, rt)); return;
+      case BytecodeClosure::bin_or:
+        emit(Assembler::encode_or  (rd, rd, rt)); return;
+      case BytecodeClosure::bin_xor:
+        emit(Assembler::encode_xor (rd, rd, rt)); return;
+      case BytecodeClosure::bin_mul:
+        emit(Assembler::encode_mult(rd, rt));
+        emit(Assembler::encode_mflo(rd)); return;
+      default:
+        SHOULD_NOT_REACH_HERE(); return;
+    }
+  }
+
+  // op2 is an immediate. Use an inline I-type form when the constant fits its
+  // field (addiu sign-extends; andi/ori/xori zero-extend), else materialize it
+  // into a scratch register and use the R-type form.
+  const jint imm = op2.as_int();
+  switch (op) {
+    case BytecodeClosure::bin_add:
+      if (imm >= -32768 && imm <= 32767) {
+        emit(Assembler::encode_addiu(rd, rd, imm)); return;
+      }
+      break;
+    case BytecodeClosure::bin_sub:
+      if (-imm >= -32768 && -imm <= 32767) {
+        emit(Assembler::encode_addiu(rd, rd, -imm)); return;  // rd += (-imm)
+      }
+      break;
+    case BytecodeClosure::bin_and:
+      if (imm >= 0 && imm <= 0xffff) {
+        emit(Assembler::encode_andi(rd, rd, imm)); return;
+      }
+      break;
+    case BytecodeClosure::bin_or:
+      if (imm >= 0 && imm <= 0xffff) {
+        emit(Assembler::encode_ori(rd, rd, imm)); return;
+      }
+      break;
+    case BytecodeClosure::bin_xor:
+      if (imm >= 0 && imm <= 0xffff) {
+        emit(Assembler::encode_xori(rd, rd, imm)); return;
+      }
+      break;
+    case BytecodeClosure::bin_mul:
+      break;  // no mul-immediate form; always materialize
+    default:
+      SHOULD_NOT_REACH_HERE(); return;
+  }
+
+  const Assembler::Register rt = RegisterAllocator::allocate();
+  mips_li(this, rt, (juint)imm);
+  switch (op) {
+    case BytecodeClosure::bin_add:
+      emit(Assembler::encode_addu(rd, rd, rt)); break;
+    case BytecodeClosure::bin_sub:
+      emit(Assembler::encode_subu(rd, rd, rt)); break;
+    case BytecodeClosure::bin_and:
+      emit(Assembler::encode_and (rd, rd, rt)); break;
+    case BytecodeClosure::bin_or:
+      emit(Assembler::encode_or  (rd, rd, rt)); break;
+    case BytecodeClosure::bin_xor:
+      emit(Assembler::encode_xor (rd, rd, rt)); break;
+    case BytecodeClosure::bin_mul:
+      emit(Assembler::encode_mult(rd, rt));
+      emit(Assembler::encode_mflo(rd)); break;
+    default:
+      SHOULD_NOT_REACH_HERE(); break;
+  }
+  RegisterAllocator::dereference(rt);
 }
 
 void CodeGenerator::int_unary_do(Value& result, Value& op1,

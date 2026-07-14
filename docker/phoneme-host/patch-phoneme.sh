@@ -629,4 +629,20 @@ if ! grep -q 'ps2me-jit-fase2: the r5900 JIT keeps UseCompiler dormant' "$OHCPP"
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase2-compilerarea.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 41) ps2me-jit-fase3-trigger (PS2ME JIT, Fase 3, Marco 3.1). Two gated
+#     (PS2ME_JIT_FASE3) additions to Interpreter_c.cpp, applied ON TOP of the Fase 2
+#     hunks (#37/#38): (a) jit_fase3_whitelisted()/jit_fase3_arm() -- arms only
+#     straight-line integer-arithmetic methods (bytecode whitelist: local loads +
+#     iadd/isub/imul/iand/ior/ixor + int consts + ireturn), every one fully covered
+#     by the incremental CodeGenerator (never a bail-out); (b) the invoke_java_method
+#     call site prefers jit_fase3_arm under FASE3 (#if FASE3 / #elif FASE2). FASE3 is
+#     a superset of FASE2 (the cfg defines both), so the compiler-area (#40) and
+#     OmitLeafMethodFrames-off (#38) gates apply unchanged. Gated PS2ME_JIT_FASE3 ->
+#     absent in production and in the plain PS2ME_JIT build. Interpreter_c.cpp is
+#     LF-only here, so a plain patch applies cleanly. Idempotent (marker). See
+#     references/JIT_PLAN.md §15.
+if ! grep -q 'jit_fase3_arm' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-trigger.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

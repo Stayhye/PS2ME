@@ -126,10 +126,13 @@ class LocationAddress: public StackAddress {
   jint index() const { return _index; }
   bool is_local() const { return is_local_index(index()); }
   static bool is_local_index(jint index);
-  // fp addresses locals, sp addresses expression-stack slots.
+  // In the C-interpreter hybrid, locals and the Java expression stack live in
+  // interpreter memory addressed by dedicated global-reg pointers, NOT the EE
+  // $sp: `locals` (s3 == g_jlocals) bases locals, `jsp` (s1 == g_jsp) bases
+  // expression-stack slots -- matching Interpreter_c.cpp's GET_LOCAL/stack.
   static BinaryAssembler::Register base_for(jint index) {
     return is_local_index(index) ?
-      BinaryAssembler::fp : BinaryAssembler::sp;
+      BinaryAssembler::locals : BinaryAssembler::jsp;
   }
 };
 
