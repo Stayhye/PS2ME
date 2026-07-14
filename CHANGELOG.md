@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version number lives in a single source of truth, `ps2/version.h`, and is bumped
 with `./version.sh {major|minor|patch}`.
 
+## [1.4.0] - 2026-07-14
+
+### Changed
+- Games run faster: the CLDC bytecode interpreter now keeps its hottest state — the frame,
+  stack, program-counter and locals pointers — pinned in dedicated MIPS registers
+  ("global-reg") instead of memory, cutting per-bytecode overhead. Measured Zombie Infection
+  18 → 23 FPS, crossing the 20 FPS mark, and validated on real hardware.
+- The screen present path now converts pixels four at a time (SWAR), about 73% faster.
+
+### Fixed
+- The event wait could sleep past its deadline; the receive nap is now clamped to the frame
+  deadline, recovering a few milliseconds per frame.
+
 ## [1.3.0] - 2026-07-11
 
 ### Added
