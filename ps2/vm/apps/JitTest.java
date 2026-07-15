@@ -211,6 +211,24 @@ public class JitTest {
     static int aaGet(Node[] a, int i) { return a[i].tag; }                  // aaload + igetfield
     static int aaStore(Object[] a, int i, Object v) { a[i] = v; return i; } // aastore (typecheck+barrier)
 
+    // Marco 3.8: object allocation (new) + type checks (checkcast / instanceof).
+    // new quickens to fast_new (both chain to bc_impl_new); the closure resolved AND
+    // initialized Box at compile time, so jit_new is a plain call-vm allocation (may
+    // GC -> flush first; may throw OutOfMemoryError -> option-B fp-check). mkBox
+    // exercises the full `Foo f = new Foo(); f.field = v; return f.field` shape: new +
+    // dup + invokespecial <init> (a real call to Box.<init>, non-leaf -> never inlined,
+    // reusing 3.6c) + astore/aload of a reference local + int field put/get. The type
+    // checks take an `Object` parameter so the compile-time type is not exact and the
+    // type-info fast-path cannot elide the runtime check: isBox lowers to jit_instanceof
+    // (0/1, no throw), castBox to jit_checkcast (throws ClassCastException on a bad cast,
+    // unwinding option-B to an interpreted try/catch) followed by a field load. isAnimal
+    // proves the subtype walk succeeds across a real hierarchy (Dog extends Animal).
+    static final class Box { int v; }
+    static int mkBox(int v)        { Box b = new Box(); b.v = v; return b.v; } // new+dup+<init>+astore+put/get
+    static boolean isBox(Object o)    { return o instanceof Box; }            // instanceof (Object param)
+    static boolean isAnimal(Object o) { return o instanceof Animal; }         // instanceof (subtype hierarchy)
+    static int castBox(Object o)      { return ((Box)o).v; }                  // checkcast + field load
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -224,7 +242,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.7b harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.8 harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -283,6 +301,16 @@ public class JitTest {
         Object[] narrAsObj = narr;
         Node someNode = new Node(); someNode.tag = 88;
         int aag = 0, aas = 0;
+        // Marco 3.8: object allocation + type checks. Box is instantiated here first so
+        // it is INITIALIZED before mkBox is armed (the new_object closure needs an
+        // initialized class or it takes uncommon_trap). boxObj holds a Box seen as
+        // Object (non-exact type -> the type-info check-elision does not fire); strObj
+        // is a non-Box reference for the negative / ClassCastException cases.
+        Box boxWarm = new Box(); boxWarm.v = 5;
+        Object boxObj = boxWarm;
+        Object strObj = "hello";
+        int mb = 0, cbx = 0;
+        boolean ibx = false, ianm = false;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -334,6 +362,10 @@ public class JitTest {
             glt = getLinkTag(n2);      // n2.link.tag = 71 (read reference field)
             aag = aaGet(narr, 1);      // narr[1].tag = 62 (aaload + field deref)
             aas = aaStore(oarr, 0, someNode); // oarr[0] = someNode (aastore: typecheck+barrier)
+            mb = mkBox(42);            // new Box(); b.v=42; return b.v (new + <init> + field)
+            ibx = isBox(boxObj);       // Box instanceof Box -> true
+            ianm = isAnimal(dog);      // Dog instanceof Animal -> true (subtype)
+            cbx = castBox(boxObj);     // (Box)boxObj).v = 5 (checkcast + field)
         }
 
         check("add(7,5)",      ra, 12);
@@ -566,6 +598,31 @@ public class JitTest {
         boolean aagNpe = false;
         try { aaGet(null, 0); } catch (NullPointerException e) { aagNpe = true; }
         check("aaGet(null,0) throws NPE", aagNpe ? 1 : 0, 1);
+
+        // Marco 3.8: object allocation (new) -- mkBox allocated a Box, ran its <init>,
+        // stored a field and read it back, all from compiled code.
+        check("mkBox(42)",     mb, 42);
+        check("mkBox(7)",      mkBox(7), 7);          // fresh allocation, other value
+        // instanceof: 0/1 result, no throw. Object parameter -> the compiler cannot
+        // elide the runtime check, so jit_instanceof actually runs.
+        check("isBox(box)",    ibx ? 1 : 0, 1);
+        check("isBox(str)",    isBox(strObj) ? 1 : 0, 0);      // String is not a Box
+        check("isBox(null)",   isBox(null) ? 1 : 0, 0);        // null is never an instance
+        check("isAnimal(dog)", ianm ? 1 : 0, 1);               // Dog extends Animal (subtype walk)
+        check("isAnimal(str)", isAnimal(strObj) ? 1 : 0, 0);
+        // checkcast: a good cast passes through to the field load; a null passes the cast.
+        check("castBox(box)",  cbx, 5);
+        check("castBox(box) direct", castBox(boxObj), 5);
+        // The compiled checkcast must throw ClassCastException for an incompatible type
+        // and unwind (option-B) out of the compiled leaf to this interpreted try/catch.
+        boolean cceCaught = false;
+        try {
+            castBox(strObj);   // a String cannot be cast to Box
+        } catch (ClassCastException e) {
+            cceCaught = true;
+        }
+        check("castBox(str) throws CCE", cceCaught ? 1 : 0, 1);
+        check("castBox(box) post-throw", castBox(boxObj), 5);  // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

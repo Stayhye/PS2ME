@@ -67,6 +67,16 @@ extern "C" void jit_invoke_interface(int cpool_index, int num_params);
 // OK), repositioning g_jfp for the option-B unwind. See CodeGenerator::type_check.
 extern "C" void jit_array_store_check(address ref, address obj, int idx);
 
+// Marco 3.8: object allocation + type checks from compiled code. The shared closure
+// resolves the class at COMPILE TIME and hands the backend a stable class_id (a small
+// constant -> GC-safe, no moveable oop embedded in the native code); these helpers
+// re-derive the class at runtime via get_class_by_id. jit_new allocates (may GC / may
+// throw OutOfMemoryError); jit_checkcast throws ClassCastException on a failed subtype
+// check; jit_instanceof returns 0/1 and never throws (the class is already resolved).
+extern "C" address jit_new(int class_id);
+extern "C" void    jit_checkcast(int class_id);
+extern "C" jint    jit_instanceof(int class_id);
+
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
 // lui/ori.
@@ -507,9 +517,25 @@ void CodeGenerator::lookup_switch(Value& index, jint table_index, jint default_d
 
 // ---- allocation / type checks ------------------------------------------------
 
+// Fase 3 (Marco 3.8): allocate a fixed-size instance from compiled code. The shared
+// BytecodeCompileClosure::new_object already resolved AND initialized the class at
+// compile time (get_klass_or_null(index, /*needs_init=*/true); an unresolved or
+// uninitialized/abstract/interface class takes the uncommon_trap path instead). We
+// pass its class_id -- a stable constant, so no moveable oop is embedded (GC-safe) --
+// to jit_new, which allocates via the interpreter's call_vm path (GC-safe; may throw
+// OutOfMemoryError). Because that allocation can trigger a GC, flush the frame first
+// so every live oop is memory-resident (a root) before the call. On OOM the interp's
+// find_exception_frame repositions g_jfp, so run the option-B fp-check after the call
+// to eject if the handler is an ancestor frame. The fresh instance comes back in v0.
 void CodeGenerator::new_object(Value& result, JavaClass* klass JVM_TRAPS) {
-  (void)result; (void)klass;
-  SHOULD_NOT_REACH_HERE();
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+  mips_li(this, Assembler::a0, (juint)klass->class_id());
+  mips_call_c(this, (address)jit_new);
+  mips_emit_invoke_fp_check(this);               // OOM unwind (option B)
+  result.set_register(RegisterAllocator::allocate());
+  move(result.lo_register(), Assembler::v0);     // v0 = fresh instance
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: new -> jit_new emitted (Marco 3.8)"); } }
 }
 
 void CodeGenerator::new_object_array(Value& result, JavaClass* element_class,
@@ -534,15 +560,43 @@ void CodeGenerator::init_static_array(Value& array JVM_TRAPS) {
   SHOULD_NOT_REACH_HERE();
 }
 
+// Fase 3 (Marco 3.8): checkcast. The i386 backend inlines a subtype-cache probe with a
+// slow-case stub; the C hybrid instead pushes the object onto the expression stack,
+// flushes so it lands at the top of g_jsp, and lets jit_checkcast read it (OBJ_PEEK(0)),
+// do the subtype check against the compile-time class_id, and throw ClassCastException
+// on failure. A null object always passes. The throw uses the interp's own path
+// (find_exception_frame -> g_jfp), so the option-B fp-check ejects if the CCE handler
+// is an ancestor frame. The closure re-pushes the object afterwards (checkcast leaves
+// its operand on the stack), so we pop it back into the Value here. `klass` (a moveable
+// oop) is unused -- class_id drives the runtime resolve.
 void CodeGenerator::check_cast(Value& object, Value& klass, int class_id JVM_TRAPS) {
-  (void)object; (void)klass; (void)class_id;
-  SHOULD_NOT_REACH_HERE();
+  (void)klass;
+  frame()->push(object);
+  frame()->flush(JVM_SINGLE_ARG_CHECK);          // object -> g_jsp top (OBJ_PEEK(0))
+  mips_li(this, Assembler::a0, (juint)class_id);
+  mips_call_c(this, (address)jit_checkcast);
+  mips_emit_invoke_fp_check(this);               // CCE unwind (option B)
+  frame()->pop(object);
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: checkcast -> jit_checkcast emitted (Marco 3.8)"); } }
 }
 
+// Fase 3 (Marco 3.8): instanceof. Same push/flush so jit_instanceof can read the object
+// (OBJ_PEEK(0)); it returns 0/1 in v0 and never throws for a resolved class, so there is
+// no fp-check. The object is consumed (unlike checkcast) -- pop it off the stack and put
+// the int result in a register for the closure to push.
 void CodeGenerator::instance_of(Value& result, Value& object, Value& klass,
                                 int class_id JVM_TRAPS) {
-  (void)result; (void)object; (void)klass; (void)class_id;
-  SHOULD_NOT_REACH_HERE();
+  (void)klass;
+  frame()->push(object);
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+  mips_li(this, Assembler::a0, (juint)class_id);
+  mips_call_c(this, (address)jit_instanceof);     // v0 = 0/1
+  frame()->pop(object);
+  result.set_register(RegisterAllocator::allocate());
+  move(result.lo_register(), Assembler::v0);
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: instanceof -> jit_instanceof emitted (Marco 3.8)"); } }
 }
 
 // Fase 3 (Marco 3.4b): null + bounds check for an array access. Mirrors the i386

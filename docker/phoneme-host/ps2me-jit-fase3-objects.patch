@@ -1,0 +1,126 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -53,6 +53,12 @@
+                                               OopDesc* raw_exception);
+   extern void            unlock_special_stack_lock(Thread* THREAD,
+                                                    OopDesc *lock_obj);
++  // Marco 3.8 (objects): reused by the jit_new / jit_instanceof helpers.
++  // _newobject allocates a fixed-size instance (InterpreterRuntime_<arch>.cpp);
++  // _instanceof runs a pure subtype check (no allocation, no throw).
++  extern OopDesc*        _newobject(Thread* THREAD, OopDesc* raw_klass JVM_TRAPS);
++  extern jint            _instanceof(Thread* THREAD, OopDesc* raw_object_class,
++                                     OopDesc* raw_test_class);
+ 
+   // init FPU
+   extern void InitFPU();
+@@ -1796,6 +1802,19 @@
+ 
+   }
+ 
++  // Marco 3.8: throw ClassCastException from compiled code (a failed checkcast). The
++  // interp's own checkcast() ends with the same Throw::throw_exception; jit_checkcast
++  // does the subtype test and calls this only on failure. Routed through call_vm
++  // (T_VOID) so find_exception_frame repositions g_jfp for the caller's option-B
++  // fp-check, exactly like the other interpreter_throw_* runtime exits.
++  void class_cast_exception(JVM_SINGLE_ARG_TRAPS) {
++    Throw::throw_exception(Symbols::java_lang_ClassCastException() JVM_THROW);
++  }
++
++  void interpreter_throw_ClassCastException() {
++    interpreter_call_vm((address)&class_cast_exception, T_VOID);
++  }
++
+   void interpreter_throw_ArithmeticException() {
+     interpreter_call_vm((address)&arithmetic_exception, T_VOID);
+   }
+@@ -2412,6 +2431,60 @@
+     (void)type_check(ref, obj, idx);
+   }
+ 
++  // Marco 3.8: object allocation + type checks from compiled code. Each takes a
++  // class_id -- the shared closure resolved the class at COMPILE TIME (get_klass_or_null)
++  // and the backend emits it as an immediate, so no moveable oop is baked into the
++  // native code (GC-safe); the helper re-derives the class with get_class_by_id, the
++  // same wrapper the invoke helpers use. blueprint(object) is two indirections
++  // (object -> java near -> class), matching jit_invoke_interface's receiver walk.
++
++  // jit_new(): allocate a fixed-size instance. The class is guaranteed resolved AND
++  // initialized at compile time (BCC new_object took uncommon_trap otherwise; and
++  // ENABLE_ISOLATES=0 so there is no per-task cib barrier), so this is a plain
++  // allocation with no class-init step. _newobject runs through the call_vm mechanism
++  // (interpreter_call_vm_1): GC-safe, and on OutOfMemoryError it returns true after
++  // find_exception_frame has repositioned g_jfp -> the compiled caller's fp-check
++  // ejects and the (unused) return value does not matter. On success the fresh oop is
++  // in the thread's obj_value slot (shared_call_vm_internal stored it there).
++  extern "C" address jit_new(int class_id) {
++    address klass = get_class_by_id((jushort)class_id);
++    if (interpreter_call_vm_1((address)&_newobject, T_OBJECT, (jint)klass)) {
++      return NULL;                       // OOM: g_jfp repositioned, caller fp-check ejects
++    }
++    return (address)GET_THREAD_INT(obj_value);
++  }
++
++  // jit_instanceof(): 0/1 subtype test. The backend flushed the object to the top of
++  // g_jsp; read it with OBJ_PEEK(0). A null object is never an instance. Otherwise take
++  // its blueprint and run the pure subtype check (_instanceof does object_class
++  // is_subtype_of test_class; no allocation, no throw), so it can be called directly.
++  extern "C" jint jit_instanceof(int class_id) {
++    address object = OBJ_PEEK(0);
++    if (object == NULL) {
++      return 0;
++    }
++    address obj_class  = *(address*)(*(address*)object);   // object -> near -> class
++    address test_class = get_class_by_id((jushort)class_id);
++    return _instanceof(NATIVE_ARG, (OopDesc*)obj_class, (OopDesc*)test_class);
++  }
++
++  // jit_checkcast(): like jit_instanceof but throws ClassCastException on a failed cast
++  // (a null object always passes). The throw goes through the interp's own path
++  // (interpreter_throw_ClassCastException -> call_vm), which runs find_exception_frame
++  // and repositions g_jfp so the compiled caller's option-B fp-check ejects.
++  extern "C" void jit_checkcast(int class_id) {
++    address object = OBJ_PEEK(0);
++    if (object == NULL) {
++      return;                            // null passes checkcast
++    }
++    address obj_class  = *(address*)(*(address*)object);
++    address test_class = get_class_by_id((jushort)class_id);
++    if (_instanceof(NATIVE_ARG, (OopDesc*)obj_class, (OopDesc*)test_class)) {
++      return;                            // ok: object is a subtype of the target class
++    }
++    interpreter_throw_ClassCastException();
++  }
++
+   // jit_invoke_static(): the REAL (non-inlined) resolved static call from compiled
+   // code (Marco 3.6b-real). The compiled caller emits this instead of the ARM/i386
+   // direct-call machinery (CodeGenerator::invoke): it resolves the callee from the
+@@ -2819,6 +2892,29 @@
+         case Bytecodes::_fast_invokeinterface:
+           if (!allow_invoke) return false;
+           l = 5; break;
++        // Marco 3.8: object allocation + type checks. `new` quickens to _fast_new or
++        // _fast_init_new (both chain to bc_impl_new); the compiler's new_object closure
++        // resolved AND initialized the class at compile time (get_klass_or_null with
++        // needs_init), taking the uncommon_trap path otherwise, so the runtime allocation
++        // never has to init. checkcast/instanceof quicken to the _fast_ forms; the closure
++        // hands the backend a compile-time class_id (a constant -> GC-safe). All three
++        // lower to jit_new / jit_checkcast / jit_instanceof (helper C + option-B unwind
++        // for OOM / ClassCastException). `dup` is pure VSF (emits nothing) and astore /
++        // astore_<n> store a reference into a local (store_to_address T_OBJECT to a
++        // LocationAddress = sw; the write barrier is a no-op for a local, not the heap) --
++        // together they cover `Foo f = new Foo(); f.field = x; ...`.
++        case Bytecodes::_dup:
++        case Bytecodes::_astore_1:
++        case Bytecodes::_astore_2:
++        case Bytecodes::_astore_3:
++          l = 1; break;
++        case Bytecodes::_astore:
++          l = 2; break;
++        case Bytecodes::_fast_new:
++        case Bytecodes::_fast_init_new:
++        case Bytecodes::_fast_checkcast:
++        case Bytecodes::_fast_instanceof:
++          l = 3; break;
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }

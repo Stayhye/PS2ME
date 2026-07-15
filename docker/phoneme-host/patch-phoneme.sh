@@ -878,4 +878,24 @@ if ! grep -q 'jit_array_store_check' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objarray.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 55) ps2me-jit-fase3-objects (PS2ME JIT, Fase 3, Marco 3.8). Four additions to
+#     Interpreter_c.cpp ON TOP of #54: (a) extern decls of _newobject / _instanceof
+#     (reused from InterpreterRuntime_<arch>.cpp); (b) the class_cast_exception runtime
+#     thrower + interpreter_throw_ClassCastException (molded on the sibling throwers);
+#     (c) the jit_new / jit_instanceof / jit_checkcast glue -- object allocation and the
+#     checkcast/instanceof type checks from compiled code. The shared closure resolves
+#     the class at compile time and hands the backend a class_id (a stable constant ->
+#     GC-safe, no moveable oop embedded); jit_new allocates via the call_vm path
+#     (interpreter_call_vm_1 -> _newobject) with option-B unwind on OutOfMemoryError;
+#     jit_checkcast throws ClassCastException (option-B unwind) on a failed subtype test;
+#     jit_instanceof returns 0/1 (no throw). (d) a whitelist block admitting _fast_new /
+#     _fast_init_new / _fast_checkcast / _fast_instanceof plus dup + astore/astore_<n>
+#     (reference store to a local). The backend CodeGenerator::new_object / check_cast /
+#     instance_of emission is a git-tracked overlay (mips), NOT here. Gated
+#     PS2ME_JIT_FASE3. Interpreter_c.cpp is LF-only. Idempotent (guard on jit_new).
+#     See references/JIT_PLAN.md §7.
+if ! grep -q 'jit_new' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objects.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
