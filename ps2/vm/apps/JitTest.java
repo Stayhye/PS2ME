@@ -229,6 +229,20 @@ public class JitTest {
     static boolean isAnimal(Object o) { return o instanceof Animal; }         // instanceof (subtype hierarchy)
     static int castBox(Object o)      { return ((Box)o).v; }                  // checkcast + field load
 
+    // Fase 5 (bail-limpo self-test): each of these leaves contains exactly ONE
+    // bytecode the r5900 backend does not yet emit -- newarray (mkArr) and idiv
+    // (divBy). The compile trigger's whitelist admits them via dedicated Fase-5
+    // test entries, so each IS armed and the backend STARTS compiling it, then
+    // reaches new_basic_array (a whole-method bail-out) / int_binary_do's div
+    // default (a mid-method switch-default bail-out). Both now call
+    // Compiler::abort_active_compilation cleanly instead of SHOULD_NOT_REACH_HERE:
+    // the partial compiled code is discarded and the method runs interpreted. A
+    // correct result here -- with the rest of the harness reaching ALL PASS rather
+    // than hanging/resetting -- proves the bail is clean and does not disturb the
+    // covered leaves, which still compile normally.
+    static int mkArr(int n) { int[] a = new int[n]; return a.length; }  // newarray -> new_basic_array
+    static int divBy(int a) { return a / 3; }                           // idiv -> int_binary_do default
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -242,7 +256,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.8 harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.8 + Fase 5 bail-limpo harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -311,6 +325,15 @@ public class JitTest {
         Object strObj = "hello";
         int mb = 0, cbx = 0;
         boolean ibx = false, ianm = false;
+        // Fase 5 bail-limpo self-test leaves (armed but bail-out -> interpreted).
+        int mar = 0, dvb = 0;
+        // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
+        // compiler area, so they definitely reach the backend and bail. The bail is
+        // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
+        // then runs interpreted -- no per-invocation re-compile that would churn the
+        // compiler area and evict the covered leaves' compiled code. A few iterations
+        // are enough: arm, compile+bail, confirm interpreted.
+        for (int i = 0; i < 4; i++) { mar = mkArr(5); dvb = divBy(30); }
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -623,6 +646,16 @@ public class JitTest {
         }
         check("castBox(str) throws CCE", cceCaught ? 1 : 0, 1);
         check("castBox(box) post-throw", castBox(boxObj), 5);  // resumes clean
+
+        // Fase 5 (bail-limpo): a method containing an unsupported bytecode is armed,
+        // the backend bails the compilation cleanly, and it runs interpreted with the
+        // right answer -- no crash, no corruption. Whole-method bail (newarray ->
+        // new_basic_array) and mid-method switch-default bail (idiv -> int_binary_do).
+        // The re-runs confirm the method stays runnable after repeated bail-outs.
+        check("mkArr(5) bails clean",  mar, 5);
+        check("divBy(30) bails clean", dvb, 10);
+        check("mkArr(9) bails clean",  mkArr(9), 9);
+        check("divBy(99) bails clean", divBy(99), 33);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

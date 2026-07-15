@@ -1,0 +1,22 @@
+--- a/cldc/src/vm/share/compiler/CodeGenerator.cpp
++++ b/cldc/src/vm/share/compiler/CodeGenerator.cpp
+@@ -171,6 +171,19 @@ void CodeGenerator::go_to_interpreter(JVM_SINGLE_ARG_TRAPS) {
+ void CodeGenerator::uncommon_trap(JVM_SINGLE_ARG_TRAPS) {
+   COMPILER_COMMENT(("Uncommon trap"));
+ 
++#if defined(MIPS)
++  // PS2ME r5900 hybrid (Fase 5, bail-limpo): there is no call_vm / uncommon-trap
++  // deopt stub on MIPS -- CodeGenerator::call_vm is itself a bail-out. Abort this
++  // compilation cleanly (the same primitive as the GenerateROMImage / is_inlining
++  // aborts below); the method stays interpreted. This path is taken when a class
++  // fails to resolve/initialize at compile time (e.g. a not-yet-loaded class hit
++  // inside a hot method), which the compile trigger's bytecode whitelist cannot
++  // predict from a static pre-scan. Without this the fall-through call_vm(::
++  // uncommon_trap) would crash (SHOULD_NOT_REACH_HERE) / silently corrupt in
++  // PRODUCT. See references/JIT_PLAN.md §7.
++  Compiler::abort_active_compilation(false JVM_THROW);
++#endif
++
+   if (GenerateROMImage) {
+     // We can't deal with uncommon traps in precompiled code.
+     Compiler::abort_active_compilation(false JVM_THROW);

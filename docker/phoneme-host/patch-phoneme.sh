@@ -898,4 +898,39 @@ if ! grep -q 'jit_new' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objects.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 56) ps2me-jit-fase5-uncommontrap (PS2ME JIT, Fase 5 -- bail-limpo PASSO 1). One
+#     addition to the SHARED share/compiler/CodeGenerator.cpp (the FIRST JIT patch to
+#     touch that file): gate CodeGenerator::uncommon_trap (:171) with `#if defined(MIPS)`
+#     -> Compiler::abort_active_compilation(false) at the top. uncommon_trap is emitted
+#     by the shared closure when a class fails to resolve/initialize at compile time
+#     (a not-yet-loaded class hit inside a hot method), which the static bytecode
+#     whitelist cannot predict. On MIPS there is no call_vm / uncommon-trap deopt stub
+#     (CodeGenerator::call_vm is itself a bail-out), so the fall-through
+#     call_vm(::uncommon_trap) would crash (SHOULD_NOT_REACH_HERE) / silently corrupt in
+#     PRODUCT. abort_active_compilation(false) is TRANSIENT (the class may load later);
+#     the method stays interpreted. Same primitive as the is_inlining abort right below.
+#     The matching CodeGenerator_mips.cpp bail-outs (~41 not-emitted operations ->
+#     abort_active_compilation) are git-tracked (overlay mips), NOT here. This file may
+#     have CRLF, so use the same `sed | patch --ignore-whitespace`. Idempotent (guard on
+#     the Fase-5 marker). See references/JIT_PLAN.md §7.
+if ! grep -q 'PS2ME r5900 hybrid (Fase 5, bail-limpo)' "$PHONEME/cldc/src/vm/share/compiler/CodeGenerator.cpp"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-uncommontrap.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
+# 57) ps2me-jit-fase5-bailtest-whitelist (PS2ME JIT, Fase 5 -- bail-limpo self-test).
+#     TWO edits to Interpreter_c.cpp ON TOP of #55, both TEST-ONLY (they exercise the
+#     clean compile bail-out from JitTest and MUST be removed from a production/hotness
+#     trigger -- PASSO 2): (a) the whitelist admits _idiv (l=1) and _newarray (l=2),
+#     which the r5900 backend does NOT emit. A method containing one is armed, the
+#     backend starts compiling it and then int_binary_do's div default (idiv) /
+#     new_basic_array (newarray) call Compiler::abort_active_compilation(true) instead of
+#     SHOULD_NOT_REACH_HERE, so the method runs interpreted (JitTest divBy/mkArr prove
+#     the bail is clean and does not disturb the covered leaves). (b) the arm cap
+#     JIT_FASE3_MAX_ARMED 64 -> 80 (JitTest's dedicated warm loop for mkArr/divBy pushes
+#     past 64). Interpreter_c.cpp is LF-only. Idempotent (guard on the Fase-5 marker).
+#     See references/JIT_PLAN.md §7.
+if ! grep -q 'Fase 5 (bail-limpo self-test): idiv' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-bailtest-whitelist.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

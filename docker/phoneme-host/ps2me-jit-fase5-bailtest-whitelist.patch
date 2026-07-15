@@ -1,0 +1,30 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2915,6 +2915,18 @@
+         case Bytecodes::_fast_checkcast:
+         case Bytecodes::_fast_instanceof:
+           l = 3; break;
++        // Fase 5 (bail-limpo self-test): idiv and newarray are NOT emitted by the
++        // r5900 backend -- they are admitted here ONLY to prove the clean compile
++        // bail-out. A method containing one is armed and the backend starts compiling
++        // it, then int_binary_do's div default / new_basic_array call
++        // Compiler::abort_active_compilation instead of SHOULD_NOT_REACH_HERE, and the
++        // method runs interpreted. These must stay OUT of a production hotness trigger
++        // (they would arm-and-bail on every invocation); they exist so JitTest's
++        // divBy/mkArr exercise the Fase 5 backend bail. See references/JIT_PLAN.md §7.
++        case Bytecodes::_idiv:
++          l = 1; break;
++        case Bytecodes::_newarray:
++          l = 2; break;
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }
+@@ -2923,7 +2935,7 @@
+     return true;
+   }
+ 
+-  enum { JIT_FASE3_MAX_ARMED = 64 };
++  enum { JIT_FASE3_MAX_ARMED = 80 };
+   static int jit_fase3_armed_count = 0;
+   void jit_fase3_arm(address method) {
+     if (Universe::before_main()) return;

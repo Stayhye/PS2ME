@@ -487,32 +487,68 @@ void CodeGenerator::conditional_jump_do(BytecodeClosure::cond_op condition,
   }
 }
 
+// ============================================================================
+// Fase 5 (bail-limpo): CLEAN COMPILE BAIL-OUT for not-yet-emitted operations.
+//
+// The methods below are the bytecodes/operations the r5900 backend does not yet
+// emit (float/double/long arithmetic & conversions, array allocation, monitors,
+// switch, athrow, arraycopy). The compile trigger's bytecode whitelist normally
+// keeps a method containing any of them from being armed at all -- but so that a
+// HOT method which slips one through (or a real game, once the whitelist is
+// relaxed / hotness-driven) NEVER crashes, each aborts the active compilation
+// cleanly instead of SHOULD_NOT_REACH_HERE (which is a NO-OP in PRODUCT ->
+// silent corruption). Compiler::abort_active_compilation throws the internal
+// out-of-memory signal (JVM_THROW returns from here); the Compiler catches it,
+// discards the partial compiled code, and the method stays interpreted -- the
+// exact primitive already used above for invoke-while-inlining and invoke_native.
+// Bodies keep the (void) casts so the signatures stay documented and no
+// unused-parameter warnings appear after the SHOULD_NOT_REACH_HERE is gone.
+// Bytecode-entry points reachable from a real game convert; internal invariants
+// (switch defaults over a known enum/type) and provably-dead code without a
+// JVM_TRAPS arg (overflow, fpu_clear, the *_stub queue handlers) stay
+// SHOULD_NOT_REACH_HERE.
+//
+// PERMANENT vs TRANSIENT: these operations will NEVER compile in this build, so
+// they abort with is_permanent=TRUE (set_impossible_to_compile) -- the method
+// bails ONCE and is thereafter interpreted without re-attempting. is_permanent=
+// false would re-enter try_to_compile on every invocation, and its
+// compiler_area_soft_collect can evict already-compiled methods (observed on real
+// HW as hot invokes silently losing their compiled code). Only genuinely transient
+// bails stay false: invoke-while-inlining (may compile without the inline next
+// time) and uncommon_trap (an unresolved class may load later; shared
+// CodeGenerator.cpp). See references/JIT_PLAN.md §7.
+// ============================================================================
+
+// if_then_else / if_iinc: only produced by OptimizeForwardBranches, which is
+// forced off on MIPS (USE_OPT_FORWARD_BRANCH=0, patch #38b) -- kept as a bail-out
+// for defense in depth.
 void CodeGenerator::if_then_else(Value& result, BytecodeClosure::cond_op condition,
                                  Value& op1, Value& op2,
                                  ExtendedValue& result_true,
                                  ExtendedValue& result_false JVM_TRAPS) {
   (void)result; (void)condition; (void)op1; (void)op2;
   (void)result_true; (void)result_false;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::if_iinc(Value& result, BytecodeClosure::cond_op condition,
                             Value& op1, Value& op2,
                             Value& arg, int increment JVM_TRAPS) {
   (void)result; (void)condition; (void)op1; (void)op2; (void)arg; (void)increment;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
+// tableswitch / lookupswitch: dense/sparse jump tables. Not yet emitted.
 void CodeGenerator::table_switch(Value& index, jint table_index, jint default_dest,
                                  jint low, jint high JVM_TRAPS) {
   (void)index; (void)table_index; (void)default_dest; (void)low; (void)high;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::lookup_switch(Value& index, jint table_index, jint default_dest,
                                   jint num_of_pairs JVM_TRAPS) {
   (void)index; (void)table_index; (void)default_dest; (void)num_of_pairs;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 // ---- allocation / type checks ------------------------------------------------
@@ -538,26 +574,31 @@ void CodeGenerator::new_object(Value& result, JavaClass* klass JVM_TRAPS) {
       tty->print_cr("[PS2ME-JIT] Fase 3: new -> jit_new emitted (Marco 3.8)"); } }
 }
 
+// Array allocation (anewarray / newarray / multianewarray / static array init):
+// not yet emitted (a fixed-size instance `new` is, via jit_new -- Marco 3.8).
+// Bail cleanly; a game method allocating an array stays interpreted.
 void CodeGenerator::new_object_array(Value& result, JavaClass* element_class,
                                      Value& length JVM_TRAPS) {
   (void)result; (void)element_class; (void)length;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::new_basic_array(Value& result, BasicType type,
                                     Value& length JVM_TRAPS) {
   (void)result; (void)type; (void)length;
-  SHOULD_NOT_REACH_HERE();
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 5: new_basic_array -> clean bail (abort compile)"); } }
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::new_multi_array(Value& result JVM_TRAPS) {
   (void)result;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::init_static_array(Value& array JVM_TRAPS) {
   (void)array;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 // Fase 3 (Marco 3.8): checkcast. The i386 backend inlines a subtype-cache probe with a
@@ -690,22 +731,27 @@ void CodeGenerator::null_check(const Value& object JVM_TRAPS) {
 
 // ---- monitors / returns ------------------------------------------------------
 
+// Monitors (monitorenter / monitorexit and the synchronized-method entry/exit
+// bookkeeping): not yet emitted. A synchronized method is already refused by the
+// arm trigger (JVM_ACC_SYNCHRONIZED), and a synchronized block carries an
+// exception table (refused by has_no_exception_table); these bail cleanly as a
+// backstop for any path the whitelist does not cover.
 void CodeGenerator::monitor_enter(Value& object JVM_TRAPS) {
   (void)object;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::monitor_exit(Value& object JVM_TRAPS) {
   (void)object;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::check_monitors(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::unlock_activation(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::return_result(Value& value JVM_TRAPS) {
@@ -729,9 +775,12 @@ void CodeGenerator::return_result(Value& value JVM_TRAPS) {
   emit(Assembler::encode_nop());
 }
 
+// athrow in a method with no matching handler lowers to return_error (see
+// BytecodeCompileClosure::throw_exception). Not yet emitted -> bail cleanly so a
+// method that throws is interpreted (its exception then unwinds via the interp).
 void CodeGenerator::return_error(Value& value JVM_TRAPS) {
   (void)value;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::return_void(JVM_SINGLE_ARG_TRAPS) {
@@ -748,8 +797,10 @@ void CodeGenerator::return_void(JVM_SINGLE_ARG_TRAPS) {
 // guarantees op1 is in a register and op2 is a register or an immediate (and
 // folds the all-immediate case away). We take a writable copy of op1 into the
 // result register (reusing op1's register when it is dead) and emit the r5900
-// three-operand form. Shifts/div/rem and reverse-subtract stay in bail-out until
-// their Marcos (they must not be admitted by the compile trigger's whitelist).
+// three-operand form. div/rem (idiv/irem) and reverse-subtract are not yet
+// emitted; each switch default below now bails the compilation cleanly (Fase 5)
+// instead of SHOULD_NOT_REACH_HERE, so a hot game method doing integer division
+// stays interpreted rather than crashing / corrupting in PRODUCT.
 void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
                                   BytecodeClosure::binary_op op JVM_TRAPS) {
   JVM_IGNORE_TRAPS;
@@ -785,8 +836,8 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
         emit(Assembler::encode_srav(rd, rd, rt)); return;   // arithmetic (signed)
       case BytecodeClosure::bin_ushr:
         emit(Assembler::encode_srlv(rd, rd, rt)); return;   // logical (unsigned)
-      default:
-        SHOULD_NOT_REACH_HERE(); return;
+      default:                                              // div/rem/rsub: Fase 5 bail
+        Compiler::abort_active_compilation(true JVM_THROW);
     }
   }
 
@@ -831,8 +882,11 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
       emit(Assembler::encode_sra(rd, rd, imm & 31)); return;
     case BytecodeClosure::bin_ushr:
       emit(Assembler::encode_srl(rd, rd, imm & 31)); return;
-    default:
-      SHOULD_NOT_REACH_HERE(); return;
+    default:                                            // div/rem/rsub: Fase 5 bail
+      { static bool _once = false; if (!_once) { _once = true;
+          tty->print_cr("[PS2ME-JIT] Fase 5: int_binary_do div/rem -> clean bail "
+                        "(abort compile)"); } }
+      Compiler::abort_active_compilation(true JVM_THROW);
   }
 
   const Assembler::Register rt = RegisterAllocator::allocate();
@@ -851,14 +905,15 @@ void CodeGenerator::int_binary_do(Value& result, Value& op1, Value& op2,
     case BytecodeClosure::bin_mul:
       emit(Assembler::encode_mult(rd, rt));
       emit(Assembler::encode_mflo(rd)); break;
-    default:
-      SHOULD_NOT_REACH_HERE(); break;
+    default:                                            // div/rem/rsub: Fase 5 bail
+      Compiler::abort_active_compilation(true JVM_THROW);
   }
   RegisterAllocator::dereference(rt);
 }
 
 // Marco 3.3: integer negate (ineg). una_abs is only produced by Math.abs
-// inlining (an invoke) -- outside the whitelist -- so it stays a bail-out.
+// inlining (an invoke); the default now bails cleanly (Fase 5) instead of
+// SHOULD_NOT_REACH_HERE.
 void CodeGenerator::int_unary_do(Value& result, Value& op1,
                                  BytecodeClosure::unary_op op JVM_TRAPS) {
   JVM_IGNORE_TRAPS;
@@ -868,63 +923,67 @@ void CodeGenerator::int_unary_do(Value& result, Value& op1,
     case BytecodeClosure::una_neg:
       emit(Assembler::encode_subu(rd, Assembler::zero, rd)); return;  // rd = 0 - rd
     default:
-      SHOULD_NOT_REACH_HERE(); return;
+      Compiler::abort_active_compilation(true JVM_THROW);
   }
 }
 
+// long (two-word integer) arithmetic / compare: not yet emitted. Bail cleanly.
 void CodeGenerator::long_binary_do(Value& result, Value& op1, Value& op2,
                                    BytecodeClosure::binary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op2; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::long_unary_do(Value& result, Value& op1,
                                   BytecodeClosure::unary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::long_cmp(Value& result, Value& op1, Value& op2 JVM_TRAPS) {
   (void)result; (void)op1; (void)op2;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
-// ---- float / double arithmetic (bodies emulated in Fase 4) -------------------
+// ---- float / double arithmetic (Fase 4) --------------------------------------
+// Not yet emitted (FPU r5900 single non-IEEE for float; soft-float for double).
+// Bail cleanly so a game method using float/double stays interpreted; the profile
+// on real games decides whether Fase 4 comes next (JIT_PLAN §7).
 
 void CodeGenerator::float_binary_do(Value& result, Value& op1, Value& op2,
                                     BytecodeClosure::binary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op2; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::float_unary_do(Value& result, Value& op1,
                                    BytecodeClosure::unary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::double_binary_do(Value& result, Value& op1, Value& op2,
                                      BytecodeClosure::binary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op2; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::double_unary_do(Value& result, Value& op1,
                                     BytecodeClosure::unary_op op JVM_TRAPS) {
   (void)result; (void)op1; (void)op;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::float_cmp(Value& result, BytecodeClosure::cond_op cond,
                               Value& op1, Value& op2 JVM_TRAPS) {
   (void)result; (void)cond; (void)op1; (void)op2;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::double_cmp(Value& result, BytecodeClosure::cond_op cond,
                                Value& op1, Value& op2 JVM_TRAPS) {
   (void)result; (void)cond; (void)op1; (void)op2;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 void CodeGenerator::fpu_clear(bool flush) {
@@ -960,38 +1019,40 @@ void CodeGenerator::i2s(Value& result, Value& value JVM_TRAPS) {
   emit(Assembler::encode_sll(rd, value.lo_register(), 16));
   emit(Assembler::encode_sra(rd, rd, 16));
 }
+// Conversions involving long/float/double: not yet emitted (Fase 4). i2b/i2c/i2s
+// (narrowing int->int) are covered above (Marco 3.3). Bail cleanly.
 void CodeGenerator::i2l(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::i2f(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::i2d(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::l2f(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::l2d(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::f2i(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::f2l(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::f2d(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::d2i(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::d2l(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 void CodeGenerator::d2f(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; SHOULD_NOT_REACH_HERE();
+  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 // ---- invokes -----------------------------------------------------------------
@@ -1033,7 +1094,7 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
   if (Compiler::is_inlining()) {
     { static bool _once = false; if (!_once) { _once = true;
         tty->print_cr("[PS2ME-JIT] Fase 3: invoke while inlining -> abort compile"); } }
-    Compiler::abort_active_compilation(false JVM_THROW);
+    Compiler::abort_active_compilation(false JVM_THROW);   // inlining is transient
   }
 
   // Read the cpool index from the current invoke bytecode's operand in the (root)
@@ -1106,7 +1167,7 @@ void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
                                    BasicType return_type JVM_TRAPS) {
   (void)vtable_index;
   if (Compiler::is_inlining()) {
-    Compiler::abort_active_compilation(false JVM_THROW);
+    Compiler::abort_active_compilation(false JVM_THROW);   // inlining is transient
     return;
   }
 
@@ -1160,7 +1221,7 @@ void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
                                      BasicType return_type JVM_TRAPS) {
   (void)klass; (void)itable_index;
   if (Compiler::is_inlining()) {
-    Compiler::abort_active_compilation(false JVM_THROW);
+    Compiler::abort_active_compilation(false JVM_THROW);   // inlining is transient
     return;
   }
 
@@ -1203,15 +1264,19 @@ void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
 
 void CodeGenerator::invoke_native(BasicType return_kind, address entry JVM_TRAPS) {
   (void)return_kind; (void)entry;
-  Compiler::abort_active_compilation(false JVM_THROW);
+  Compiler::abort_active_compilation(false JVM_THROW);   // native call: keep transient
 }
 
 // ---- exceptions / vm calls ---------------------------------------------------
 
+// Fast in-line catch of a compile-time-known exception type (athrow-as-goto). Only
+// reached for a method WITH an exception table, which the arm trigger already
+// refuses (has_no_exception_table) -- bail cleanly as a backstop. Returns bool, so
+// use JVM_THROW_(false) (the internal OOM signal returns `false` from here).
 bool CodeGenerator::quick_catch_exception(const Value& value, JavaClass* catch_type,
                                           int handler_bci JVM_TRAPS) {
   (void)value; (void)catch_type; (void)handler_bci;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW_(false));
   return false;
 }
 
@@ -1226,14 +1291,24 @@ void CodeGenerator::throw_simple_exception(int rte JVM_TRAPS) {
   mips_emit_runtime_throw(this, rte);
 }
 
+// call_vm_extra_arg always immediately precedes a call_vm (it just parks an extra
+// argument register); since call_vm below bails the compilation, the parked arg is
+// irrelevant. Make it a NO-OP (not SHOULD_NOT_REACH_HERE, which is a silent no-op
+// in PRODUCT anyway) so the pair is harmless if ever reached. It has no JVM_TRAPS
+// arg, so it cannot bail itself -- the following call_vm does.
 void CodeGenerator::call_vm_extra_arg(const Register extra_arg) {
   (void)extra_arg;
-  SHOULD_NOT_REACH_HERE();
 }
 
+// Generic VM call: the r5900 hybrid emits VM interactions through dedicated C
+// helpers (jit_invoke_* / jit_throw_* / jit_timer_tick), never this generic path,
+// which the ARM/i386 backends use for deoptimize / uncommon_trap / debugger
+// athrow. uncommon_trap is already gated to abort on MIPS (shared CodeGenerator.
+// cpp); this bail-out covers any remaining caller (e.g. go_to_interpreter's
+// deoptimize) so it never crashes -- the method stays interpreted.
 void CodeGenerator::call_vm(address entry, BasicType return_value_type JVM_TRAPS) {
   (void)entry; (void)return_value_type;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW);
 }
 
 // Fase 3 (Marco 3.2b): emitted on every backward branch (loop back-edge) by the
@@ -1275,14 +1350,17 @@ void CodeGenerator::new_type_array_stub(CompilationQueueElement* cqe JVM_TRAPS) 
 
 // ---- arraycopy ---------------------------------------------------------------
 
+// System.arraycopy inlining: not yet emitted. Returns bool (true = handled inline);
+// bailing the compilation leaves the method interpreted (arraycopy runs natively
+// there). Use JVM_THROW_(false).
 bool CodeGenerator::arraycopy(JVM_SINGLE_ARG_TRAPS) {
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW_(false));
   return false;
 }
 
 bool CodeGenerator::unchecked_arraycopy(BasicType array_element_type JVM_TRAPS) {
   (void)array_element_type;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(true JVM_THROW_(false));
   return false;
 }
 
