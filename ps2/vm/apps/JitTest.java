@@ -121,6 +121,23 @@ public class JitTest {
     static int bigLen(int[] a)       { int n = a.length; return n+n+n+n+n+n+n+n; } // 8*len, can NPE
     static int callThrow(int[] a)    { return bigLen(a) + 1; }        // real call; NPE unwinds through it
 
+    // Marco 3.6c: _fast_invokevirtual_final (constructors <init> + FINAL methods).
+    // The rewriter quickens a final instance-method invokevirtual to it, and it
+    // resolves DIRECTLY from the cpool (like the static forms) -- so it reuses
+    // jit_invoke_static (class-init is a no-op: the receiver already exists) plus a
+    // RECEIVER null-check in the backend. fadd is small (inlines, exercising the
+    // instance-method inline path); fbig is >13 bytes (never inlines -> real call,
+    // exercising the receiver null-check + direct resolution). callVBig(null,..)
+    // proves the receiver NPE unwinds out of the compiled caller (option-B).
+    static final class Adder {
+        int base;
+        Adder(int b) { base = b; }
+        final int fadd(int a) { return base + a; }                    // small final -> inlines
+        final int fbig(int a) { return base+a+a+a+a+a+a+a+a; }        // >13 bytes -> real call
+    }
+    static int callVAdd(Adder x, int a) { return x.fadd(a) + 1; }     // invokevirtual_final (inline)
+    static int callVBig(Adder x, int a) { return x.fbig(a) + 1; }     // invokevirtual_final (real call)
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -134,7 +151,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.6b-real harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.6c harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -166,6 +183,9 @@ public class JitTest {
         int c3 = 0, c3b = 0;
         // Marco 3.6b-real: static-call (non-inlined REAL call) leaves.
         int cb = 0, cin = 0, ct = 0;
+        // Marco 3.6c: _fast_invokevirtual_final (final instance methods) leaves.
+        Adder adr = new Adder(10);
+        int va = 0, vb = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -207,6 +227,8 @@ public class JitTest {
             cb = callBig(7, 5);        // real call -> compiled bigAdd
             cin = callInterp(7, 5);    // real call -> interpreted interpAdd
             ct = callThrow(arr5);      // real call -> compiled bigLen (in-bounds)
+            va = callVAdd(adr, 5);     // invokevirtual_final -> inlined fadd
+            vb = callVBig(adr, 5);     // invokevirtual_final -> real call fbig
         }
 
         check("add(7,5)",      ra, 12);
@@ -329,6 +351,21 @@ public class JitTest {
         check("callThrow(null) throws NPE", realNpe ? 1 : 0, 1);
         // The compiled caller resumes cleanly after the unwind.
         check("callThrow(arr5) post-throw", callThrow(arr5), 41);
+
+        // Marco 3.6c: _fast_invokevirtual_final (final instance methods).
+        check("callVAdd(adr,5)",  va, 16);                // fadd=10+5=15, +1 (inlined)
+        check("callVBig(adr,5)",  vb, 51);                // fbig=10+8*5=50, +1 (real call)
+        check("callVBig(adr,9)",  callVBig(adr, 9), 83);  // 10+72=82, +1
+        // Receiver null-check: callVBig(null,..) must throw NPE and unwind OUT of the
+        // compiled caller's frame (backend null_check -> 3.4a throw -> option-B).
+        boolean vNpe = false;
+        try {
+            callVBig(null, 5);
+        } catch (NullPointerException e) {
+            vNpe = true;
+        }
+        check("callVBig(null,5) throws NPE", vNpe ? 1 : 0, 1);
+        check("callVBig(adr,5) post-throw", callVBig(adr, 5), 51);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

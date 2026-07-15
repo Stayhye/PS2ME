@@ -880,14 +880,20 @@ void CodeGenerator::d2f(Value& result, Value& value JVM_TRAPS) {
 //   size -> call jit_invoke_static -> adjust_for_invoke updates the model (pop
 //   params, push the memory-resident result) -> option-B fp-check.
 //
-// Only the resolved static call is compiled: a non-static direct call (receiver
-// null-check) and an invoke reached while inlining (the cpool index would not match
-// the single runtime frame's cpool) are barred by the whitelist and bail cleanly.
+// Resolution: invokestatic and _fast_invokevirtual_final (Marco 3.6c: constructors
+// <init> + final methods) both resolve the callee DIRECTLY from the cpool (a direct
+// method pointer), so jit_invoke_static resolves them the same way at runtime -- its
+// class-init barrier is a guaranteed no-op for the _final case (the holder is already
+// initialized: a receiver / a just-constructed instance exists). The only extra work
+// for _final is the receiver null-check (must_do_null_check). An invoke reached while
+// inlining (the cpool index would not match the single runtime frame's cpool) is
+// barred and bails cleanly. Vtable/itable-resolved calls (_fast_invokespecial /
+// _fast_invokevirtual / interface) are a later Marco and stay in invoke_virtual/
+// invoke_interface (still abort).
 void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRAPS) {
-  if (must_do_null_check || Compiler::is_inlining()) {
+  if (Compiler::is_inlining()) {
     { static bool _once = false; if (!_once) { _once = true;
-        tty->print_cr("[PS2ME-JIT] Fase 3: invoke unsupported here "
-                      "(null-check/inlining) -> abort compile"); } }
+        tty->print_cr("[PS2ME-JIT] Fase 3: invoke while inlining -> abort compile"); } }
     Compiler::abort_active_compilation(false JVM_THROW);
   }
 
@@ -896,15 +902,28 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
   Method* caller = root_method();
   const jint at_bci = bci();
   GUARANTEE(caller->ubyte_at(at_bci) == Bytecodes::_fast_invokestatic ||
-            caller->ubyte_at(at_bci) == Bytecodes::_fast_init_invokestatic,
-            "Marco 3.6b-real compiles only resolved static calls");
+            caller->ubyte_at(at_bci) == Bytecodes::_fast_init_invokestatic ||
+            caller->ubyte_at(at_bci) == Bytecodes::_fast_invokevirtual_final,
+            "Marco 3.6b/3.6c compile only direct (cpool-resolved) calls");
   const jushort cp_index = (jushort)
     (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
 
   // Flush args + live temporaries to g_jsp memory (see header note on safety).
   frame()->flush(JVM_SINGLE_ARG_CHECK);
 
-  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic / _init_ length).
+  // Marco 3.6c: receiver null-check for a call with a receiver (_final). After the
+  // flush the receiver (the deepest arg) lives in g_jsp memory at
+  // arg_offset_from_sp(size_of_parameters - 1); load it and null_check it (reuses the
+  // 3.4a inline throw path -- on null it throws NPE and unwinds out of this frame).
+  if (must_do_null_check) {
+    Value receiver(T_OBJECT);
+    receiver.set_register(RegisterAllocator::allocate());
+    emit(Assembler::encode_lw(receiver.lo_register(), Assembler::jsp,
+             JavaFrame::arg_offset_from_sp(method->size_of_parameters() - 1)));
+    null_check(receiver JVM_CHECK);
+  }   // receiver Value destructs here -> frees its register
+
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic / _final length).
   mips_li(this, Assembler::a0, (juint)cp_index);
   mips_li(this, Assembler::a1, (juint)3);
   mips_call_c(this, (address)jit_invoke_static);

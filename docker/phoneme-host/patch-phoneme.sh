@@ -765,4 +765,20 @@ if ! grep -q 'jit_invoke_static' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokestatic-real.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 49) ps2me-jit-fase3-invokevirtualfinal (PS2ME JIT, Fase 3, Marco 3.6c). One-hunk
+#     whitelist addition to Interpreter_c.cpp ON TOP of #48: the compile trigger now
+#     also admits _fast_invokevirtual_final (constructors <init> + final methods). The
+#     rewriter quickens both invokespecial-to-<init> and a final invokevirtual to it,
+#     and the interp resolves it DIRECTLY from the cpool (fast_invoke_internal
+#     has_fixed_target -> get_from_cpool), exactly like the static forms -- so it
+#     reuses jit_invoke_static + the same inline/never-inline callee rule. The extra
+#     receiver null-check lives in the backend (CodeGenerator::invoke, git-tracked).
+#     Vtable/itable-resolved forms (_fast_invokespecial / _fast_invokevirtual /
+#     interface) stay off (later Marco). Gated PS2ME_JIT_FASE3. Interpreter_c.cpp is
+#     LF-only. Idempotent (guard on the 'Marco 3.6c adds' marker -- the bytecode name
+#     itself already occurs in the interp). See references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.6c adds' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokevirtualfinal.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

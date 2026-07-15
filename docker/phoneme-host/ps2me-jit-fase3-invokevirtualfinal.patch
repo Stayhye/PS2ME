@@ -1,0 +1,23 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2600,10 +2600,19 @@
+         //      pass through our backend -> coverage is NOT required; it runs via the
+         //      normal VM path (interpreted, or compiled if separately armed). This is
+         //      what lets a compiled method call arbitrary callees.
++        // Marco 3.6c adds _fast_invokevirtual_final (constructors <init> + final
++        // methods): the rewriter quickens both invokespecial-to-<init> and a final
++        // invokevirtual to it, and the interp resolves it DIRECTLY from the cpool
++        // (fast_invoke_internal has_fixed_target -> get_from_cpool), exactly like the
++        // static forms -- so the callee resolves and the inline/never-inline rule is
++        // identical. The extra work (a receiver null-check) lives in the backend
++        // (CodeGenerator::invoke, must_do_null_check). Vtable/itable-resolved forms
++        // (_fast_invokespecial / _fast_invokevirtual / interface) are a later Marco.
+         // Only at the top level (allow_invoke). Raw (unresolved) _invokestatic stays
+         // off: it re-arms once the rewriter quickens it to _fast_invokestatic.
+         case Bytecodes::_fast_invokestatic:
+-        case Bytecodes::_fast_init_invokestatic: {
++        case Bytecodes::_fast_init_invokestatic:
++        case Bytecodes::_fast_invokevirtual_final: {
+           if (!allow_invoke) return false;
+           const jushort cp_index = (jushort)
+             (((jint)m().ubyte_at(bci + 1) << 8) | (jint)m().ubyte_at(bci + 2));
