@@ -138,6 +138,27 @@ public class JitTest {
     static int callVAdd(Adder x, int a) { return x.fadd(a) + 1; }     // invokevirtual_final (inline)
     static int callVBig(Adder x, int a) { return x.fbig(a) + 1; }     // invokevirtual_final (real call)
 
+    // Marco 3.6c-vtable: _fast_invokespecial (super.m() non-init + private methods).
+    // invokespecial binds STATICALLY, via the cpool class's vtable (vindex+klazz_id),
+    // NOT the receiver's dynamic type -- the opposite of invokevirtual. Derived
+    // overrides who(); super.who() from callSuper MUST call Base.who()=1 even though
+    // the receiver is a Derived whose who()=2, proving the static (cpool-class)
+    // resolution jit_invoke_special performs. A private method is likewise invoked
+    // via invokespecial. Both quicken to _fast_invokespecial (is_init false) and
+    // ALWAYS emit a real call (fast_invoke_special -> __ invoke, never inlined),
+    // reusing jit_invoke_special + the nested dispatch loop + option-B fp-check +
+    // the backend receiver null-check. callSuper/callPriv are INSTANCE methods
+    // (this = local 0), armed and compiled like the static leaves.
+    static class Base {
+        int who() { return 1; }
+    }
+    static final class Derived extends Base {
+        int who() { return 2; }                                       // override
+        int callSuper() { return super.who() + 10; }                  // invokespecial Base.who -> 11
+        private int priv(int a) { return a * 3; }                     // private -> invokespecial
+        int callPriv(int a) { return priv(a) + 1; }                   // invokespecial priv
+    }
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -151,7 +172,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.6c harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.6c-vtable harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -186,6 +207,9 @@ public class JitTest {
         // Marco 3.6c: _fast_invokevirtual_final (final instance methods) leaves.
         Adder adr = new Adder(10);
         int va = 0, vb = 0;
+        // Marco 3.6c-vtable: _fast_invokespecial (super.m() + private) leaves.
+        Derived der = new Derived();
+        int cs = 0, cpv = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -229,6 +253,8 @@ public class JitTest {
             ct = callThrow(arr5);      // real call -> compiled bigLen (in-bounds)
             va = callVAdd(adr, 5);     // invokevirtual_final -> inlined fadd
             vb = callVBig(adr, 5);     // invokevirtual_final -> real call fbig
+            cs = der.callSuper();      // invokespecial super.who() -> Base.who()=1, +10
+            cpv = der.callPriv(7);     // invokespecial private priv(7)=21, +1
         }
 
         check("add(7,5)",      ra, 12);
@@ -366,6 +392,16 @@ public class JitTest {
         }
         check("callVBig(null,5) throws NPE", vNpe ? 1 : 0, 1);
         check("callVBig(adr,5) post-throw", callVBig(adr, 5), 51);
+
+        // Marco 3.6c-vtable: _fast_invokespecial. callSuper()=11 PROVES static
+        // (cpool-class) binding: super.who() resolves Base.who()=1, NOT the
+        // receiver's overriding Derived.who()=2 (which would give 12). callPriv
+        // exercises a private-method invokespecial. Both run through the compiled
+        // caller -> jit_invoke_special (dynamic-vtable resolution of the cpool class).
+        check("der.callSuper()",  cs,  11);               // super.who()=1 (NOT Derived's 2), +10
+        check("der.callPriv(7)",  cpv, 22);               // private priv(7)=21, +1
+        check("der.callSuper() again", der.callSuper(), 11);  // compiled path, stable
+        check("der.callPriv(11)", der.callPriv(11), 34);      // priv(11)=33, +1
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

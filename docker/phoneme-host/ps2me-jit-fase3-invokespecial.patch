@@ -1,0 +1,62 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2464,6 +2464,38 @@
+     }
+   }
+ 
++  // jit_invoke_special(): the REAL super.m()/private call from compiled code
++  // (Marco 3.6c-vtable). Mirrors bc_impl_fast_invokespecial. Unlike the static/
++  // final forms, invokespecial does NOT store a direct method pointer in the cpool:
++  // it stores vindex + klazz_id, so the callee is resolved via the CPOOL class's
++  // vtable (first/second_ushort_from_cpool -> get_class_by_id -> class_info ->
++  // get_method_from_ci). Resolution binds to the class NAMED IN THE CPOOL (e.g. the
++  // superclass for super.m()), never the receiver's dynamic type -- that static
++  // binding is the whole point of invokespecial (get_method_from_ci indexes the
++  // cpool class's vtable, not the receiver's). No class-init barrier is needed: a
++  // receiver exists, so its holder is already initialized. The receiver null-check
++  // lives in the backend (CodeGenerator::invoke, must_do_null_check). After
++  // resolution the machinery is identical to jit_invoke_static: invoke_java_method,
++  // then the nested dispatch loop bounded by the caller frame (drives an interpreted
++  // callee, no-op for a compiled one), then the caller's post-invoke option-B
++  // fp-check ejects if the callee unwound past this frame.
++  extern "C" void jit_invoke_special(int cpool_index, int invoker_size) {
++    address caller_fp = g_jfp;
++    address cpool = GET_FRAME(cpool);
++    jushort vindex   = first_ushort_from_cpool(cpool, (jushort)cpool_index);
++    jushort klazz_id = second_ushort_from_cpool(cpool, (jushort)cpool_index);
++    address klazz = get_class_by_id(klazz_id);
++    address ci = *(address*)(klazz + JavaClass::class_info_offset());
++    address method = get_method_from_ci(ci, vindex);
++
++    invoke_java_method(method, invoker_size);
++
++    // Drive an interpreted callee to completion (no-op for a compiled callee).
++    while ((address)g_jfp < caller_fp) {
++      interpreter_dispatch_table[*g_jpc]();
++    }
++  }
++
+ #if defined(PS2ME_JIT_FASE2)
+   // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
+   // non-native, non-synchronized) for compilation by pointing their execution
+@@ -2632,6 +2664,20 @@
+           }
+           l = 3; break;
+         }
++        // Marco 3.6c-vtable: _fast_invokespecial (super.m() non-init + private
++        // methods -- invokespecial-to-<init> quickens to _fast_invokevirtual_final
++        // above). It resolves via the cpool class's vtable (vindex+klazz_id ->
++        // get_class_by_id -> class_info -> get_method_from_ci), NOT a direct method
++        // pointer, so it cannot be scanned with get_from_cpool. But the shared
++        // fast_invoke_special closure ALWAYS lowers through __ invoke -- a real call,
++        // it NEVER inlines (unlike the static/final do_direct_invoke path) -- so the
++        // callee runs via the normal VM path (interpreted, or compiled if separately
++        // armed) and its bytecodes never pass through our backend: coverage is NOT
++        // required. Accept at the top level; the backend (CodeGenerator::invoke)
++        // routes it to jit_invoke_special (dynamic-vtable resolution).
++        case Bytecodes::_fast_invokespecial:
++          if (!allow_invoke) return false;
++          l = 3; break;
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }

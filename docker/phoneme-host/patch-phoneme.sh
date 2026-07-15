@@ -781,4 +781,26 @@ if ! grep -q 'Marco 3.6c adds' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokevirtualfinal.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 50) ps2me-jit-fase3-invokespecial (PS2ME JIT, Fase 3, Marco 3.6c-vtable). Two
+#     additions to Interpreter_c.cpp ON TOP of #49: (a) the jit_invoke_special() glue
+#     -- the REAL super.m()/private call from compiled code. Unlike the static/final
+#     forms, invokespecial stores vindex+klazz_id in the cpool (NOT a direct method
+#     pointer), so the callee is resolved via the CPOOL class's vtable (first/second_
+#     ushort_from_cpool -> get_class_by_id -> class_info -> get_method_from_ci),
+#     binding to the class NAMED IN THE CPOOL (e.g. the superclass for super.m()),
+#     never the receiver's dynamic type -- that static binding is the whole point of
+#     invokespecial. No class-init barrier (a receiver exists -> holder initialized).
+#     After resolution it reuses jit_invoke_static's machinery: invoke_java_method +
+#     the nested dispatch loop bounded by the caller frame + option-B fp-check
+#     (backend). (b) the whitelist now admits _fast_invokespecial: the shared
+#     fast_invoke_special closure ALWAYS lowers through __ invoke (a real call, never
+#     inlined), so the callee runs the normal VM path and needs no backend coverage.
+#     The receiver null-check lives in the backend (CodeGenerator::invoke, git-tracked;
+#     _fast_invokespecial routes to jit_invoke_special there). Gated PS2ME_JIT_FASE3 ->
+#     absent in production and the plain PS2ME_JIT build. Interpreter_c.cpp is LF-only.
+#     Idempotent (guard on jit_invoke_special). See references/JIT_PLAN.md §7.
+if ! grep -q 'jit_invoke_special' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokespecial.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

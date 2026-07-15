@@ -46,6 +46,12 @@ extern "C" void jit_throw_array_index();
 // in CodeGenerator::invoke, the option-B fp-check in mips_emit_invoke_fp_check,
 // and JIT_PLAN.md 7.
 extern "C" void jit_invoke_static(int cpool_index, int invoker_size);
+// Marco 3.6c-vtable: super.m()/private call (_fast_invokespecial). Same shape as
+// jit_invoke_static, but the callee is resolved via the CPOOL class's vtable
+// (vindex+klazz_id -> class -> ClassInfo -> get_method_from_ci), not a direct
+// method pointer -- the static binding of invokespecial (e.g. the superclass for
+// super.m()). See CodeGenerator::invoke's helper branch.
+extern "C" void jit_invoke_special(int cpool_index, int invoker_size);
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -887,9 +893,18 @@ void CodeGenerator::d2f(Value& result, Value& value JVM_TRAPS) {
 // initialized: a receiver / a just-constructed instance exists). The only extra work
 // for _final is the receiver null-check (must_do_null_check). An invoke reached while
 // inlining (the cpool index would not match the single runtime frame's cpool) is
-// barred and bails cleanly. Vtable/itable-resolved calls (_fast_invokespecial /
-// _fast_invokevirtual / interface) are a later Marco and stay in invoke_virtual/
-// invoke_interface (still abort).
+// barred and bails cleanly.
+//
+// Marco 3.6c-vtable also routes _fast_invokespecial (super.m() non-init + private)
+// HERE, because the shared fast_invoke_special closure lowers through __ invoke.
+// But unlike the static/final forms it does NOT resolve to a direct method pointer
+// -- the cpool holds vindex+klazz_id, so jit_invoke_static (which re-resolves with
+// get_from_cpool) would fetch garbage. We branch on the invoke bytecode and emit
+// jit_invoke_special instead (it re-resolves via the cpool class's vtable, mirroring
+// bc_impl_fast_invokespecial). Everything else -- flush, receiver null-check,
+// adjust_for_invoke, fp-check -- is identical. Vtable/itable-resolved forms that
+// re-dispatch on the RECEIVER (_fast_invokevirtual / interface) stay in
+// invoke_virtual/invoke_interface (still abort).
 void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRAPS) {
   if (Compiler::is_inlining()) {
     { static bool _once = false; if (!_once) { _once = true;
@@ -901,10 +916,12 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
   // method being compiled. Not inlining here (guarded above) -> root == current.
   Method* caller = root_method();
   const jint at_bci = bci();
-  GUARANTEE(caller->ubyte_at(at_bci) == Bytecodes::_fast_invokestatic ||
-            caller->ubyte_at(at_bci) == Bytecodes::_fast_init_invokestatic ||
-            caller->ubyte_at(at_bci) == Bytecodes::_fast_invokevirtual_final,
-            "Marco 3.6b/3.6c compile only direct (cpool-resolved) calls");
+  const jubyte invoke_bc = caller->ubyte_at(at_bci);
+  GUARANTEE(invoke_bc == Bytecodes::_fast_invokestatic ||
+            invoke_bc == Bytecodes::_fast_init_invokestatic ||
+            invoke_bc == Bytecodes::_fast_invokevirtual_final ||
+            invoke_bc == Bytecodes::_fast_invokespecial,
+            "Marco 3.6b/3.6c compile only cpool-resolved calls here");
   const jushort cp_index = (jushort)
     (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
 
@@ -923,10 +940,14 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
     null_check(receiver JVM_CHECK);
   }   // receiver Value destructs here -> frees its register
 
-  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic / _final length).
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic/_special/_final length).
   mips_li(this, Assembler::a0, (juint)cp_index);
   mips_li(this, Assembler::a1, (juint)3);
-  mips_call_c(this, (address)jit_invoke_static);
+  // Marco 3.6c-vtable: _fast_invokespecial re-resolves via the cpool class's vtable
+  // (vindex+klazz_id), so it needs jit_invoke_special; the direct (cpool method
+  // pointer) forms use jit_invoke_static.
+  mips_call_c(this, (invoke_bc == Bytecodes::_fast_invokespecial)
+                      ? (address)jit_invoke_special : (address)jit_invoke_static);
 
   // Model update: pop the parameter block, push the result (marked flushed to
   // memory -- return_internal PUSHed it onto g_jsp, so later reads reload it).
@@ -937,9 +958,15 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
   // Option-B unwind: eject if the callee unwound past this frame.
   mips_emit_invoke_fp_check(this);
 
-  { static bool _once = false; if (!_once) { _once = true;
+  if (invoke_bc == Bytecodes::_fast_invokespecial) {
+    static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: _fast_invokespecial -> jit_invoke_special "
+                    "emitted (Marco 3.6c-vtable)"); }
+  } else {
+    static bool _once = false; if (!_once) { _once = true;
       tty->print_cr("[PS2ME-JIT] Fase 3: non-inlined invoke -> REAL call emitted "
-                    "(Marco 3.6b-real)"); } }
+                    "(Marco 3.6b-real)"); }
+  }
 }
 
 void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
