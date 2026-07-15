@@ -844,4 +844,20 @@ if ! grep -q 'jit_invoke_interface' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokeinterface.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 53) ps2me-jit-fase3-objfields (PS2ME JIT, Fase 3, Marco 3.7a). One-hunk whitelist
+#     addition to Interpreter_c.cpp ON TOP of #52: admit the instance OBJECT/reference
+#     field fast forms (fast_agetfield / fast_aputfield / fast_agetfield_1 /
+#     aload_0_fast_agetfield_{1,4,8}) plus reference local loads (aload / aload_1..3).
+#     fast_agetfield reuses load_from_object (already covered by 3.4a/3.5);
+#     fast_aputfield stores a heap pointer and emits the GC WRITE BARRIER -- the one
+#     new backend piece -- now in the git-tracked mips overlay (Addressing_mips::
+#     write_barrier_prolog/epilog, mirroring i386's shrl+bts: set the slot's word bit
+#     in the object-heap marking bit vector, base loaded live to survive heap
+#     expansion). The store_to_address change that calls it is likewise git-tracked
+#     (overlay mips), NOT here. Gated PS2ME_JIT_FASE3. Interpreter_c.cpp is LF-only.
+#     Idempotent (guard on the 3.7a marker). See references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.7a: instance OBJECT' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objfields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

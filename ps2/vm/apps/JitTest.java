@@ -184,6 +184,22 @@ public class JitTest {
     static final class Yo implements Greeter { public int greet() { return 8; } }
     static int callGreet(Greeter g) { return g.greet() + 200; }          // invokeinterface
 
+    // Marco 3.7a: instance OBJECT/reference field load/store. getfield/putfield of
+    // a reference field quicken to fast_agetfield/fast_aputfield (aload_0-fused
+    // forms too). fast_agetfield reuses load_from_object (already covered).
+    // fast_aputfield stores a heap pointer and needs the GC WRITE BARRIER
+    // (HeapAddress::write_barrier_prolog/epilog, now inline in Addressing_mips,
+    // mirroring i386's shrl+bts: set the slot's word bit in the object-heap marking
+    // bit vector so the GC visits the stored pointer). linkTag writes the ref field
+    // then reads it back THROUGH the stored pointer (n.link.tag), proving the store
+    // landed AND the barrier emission left value/registers intact; getLinkTag is a
+    // read-only deref (fast_agetfield). getLinkTag(null) throws NPE that unwinds
+    // out of the compiled leaf (3.4a throw path). Both are leaves: aload_0/aload_1/
+    // fast_aputfield/fast_agetfield/fast_igetfield/ireturn -- all whitelisted.
+    static final class Node { int tag; Node link; }
+    static int linkTag(Node n, Node v) { n.link = v; return n.link.tag; } // aputfield(barrier)+agetfield
+    static int getLinkTag(Node n)      { return n.link.tag; }             // agetfield (read-only)
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -197,7 +213,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.6c-vtable harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.7a harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -241,6 +257,12 @@ public class JitTest {
         // Marco 3.6c-vtable 3/3: _fast_invokeinterface (itable dispatch) leaves.
         Greeter hi = new Hi(); Greeter yo = new Yo();
         int vgrt = 0;
+        // Marco 3.7a: object/reference field leaves. n2 is the container whose
+        // reference field 'link' is written (write barrier) and read back.
+        Node n1 = new Node(); n1.tag = 71;
+        Node n1b = new Node(); n1b.tag = 73;
+        Node n2 = new Node();
+        int lt = 0, glt = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -288,6 +310,8 @@ public class JitTest {
             cpv = der.callPriv(7);     // invokespecial private priv(7)=21, +1
             vsnd = callSound(animal);  // invokevirtual -> Animal.sound()=1, +100 (warms leaf)
             vgrt = callGreet(hi);      // invokeinterface -> Hi.greet()=7, +200 (warms leaf)
+            lt = linkTag(n2, n1);      // n2.link = n1 (write barrier); return n1.tag = 71
+            glt = getLinkTag(n2);      // n2.link.tag = 71 (read reference field)
         }
 
         check("add(7,5)",      ra, 12);
@@ -472,6 +496,26 @@ public class JitTest {
         }
         check("callGreet(null) throws NPE", vgrtNpe ? 1 : 0, 1);
         check("callGreet(yo) post-throw", callGreet(yo), 208);     // resumes clean
+
+        // Marco 3.7a: object/reference field load/store (compiled). linkTag stored
+        // n1 into n2.link via the write barrier and read it back through the stored
+        // pointer; getLinkTag is a read-only reference deref.
+        check("linkTag(n2,n1)",  lt,  71);                // n2.link=n1 (barrier), n1.tag=71
+        check("getLinkTag(n2)",  glt, 71);                // n2.link.tag=71
+        check("getLinkTag(n2) direct", getLinkTag(n2), 71);   // n2.link still n1
+        // Relink to a different node -> the write barrier runs again and overwrites.
+        check("linkTag(n2,n1b)", linkTag(n2, n1b), 73);   // n2.link=n1b (barrier), n1b.tag=73
+        check("getLinkTag(n2) after relink", getLinkTag(n2), 73);  // n2.link=n1b now
+        // The compiled reference null_check must throw NPE and unwind to this
+        // interpreted try/catch (same helper-C mechanism as 3.4a / 3.5).
+        boolean aFldNpe = false;
+        try {
+            getLinkTag(null);
+        } catch (NullPointerException e) {
+            aFldNpe = true;
+        }
+        check("getLinkTag(null) throws NPE", aFldNpe ? 1 : 0, 1);
+        check("getLinkTag(n2) post-throw", getLinkTag(n2), 73);   // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

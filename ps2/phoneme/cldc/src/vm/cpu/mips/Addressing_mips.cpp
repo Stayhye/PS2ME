@@ -27,12 +27,71 @@ HeapAddress::~HeapAddress() {
   }
 }
 
+// Fase 3 (Marco 3.7a): GC write barrier for object/reference field stores
+// (fast_aputfield; object-array stores later reuse it). A store of a heap pointer
+// must set the slot's bit in the object-heap marking bit vector so the GC's
+// generational/incremental scan visits it. Mirrors the i386 backend (Addressing_
+// i386.cpp: leal &slot; shrl >> LogBytesPerWord; bts [_bitvector_base]) with the
+// r5900's plain arithmetic. write_barrier_prolog/epilog are virtual no-ops on the
+// base Address, overridden only here on HeapAddress, so a reference store to a
+// LOCAL (LocationAddress, not a HeapAddress) emits no barrier -- correct, locals
+// are not in the heap.
 void HeapAddress::write_barrier_prolog() {
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(stack_type() == T_OBJECT,
+            "write barrier is only for object/array reference stores");
+  // Allocate a register to hold the slot's effective address (mirrors i386's leal
+  // into address_register). compute_address_for gives base + disp16; the MIPS
+  // "load effective address" is a plain addiu. store_to_address then finds the
+  // address register via HeapAddress::address_for and stores through it (disp 0).
+  set_address_register(RegisterAllocator::allocate());
+  const BinaryAssembler::Address a = compute_address_for(lo_offset());
+  code_generator()->emit(
+      Assembler::encode_addiu(address_register(), a.base(), a.disp()));
 }
 
 void HeapAddress::write_barrier_epilog() {
-  SHOULD_NOT_REACH_HERE();
+  GUARANTEE(stack_type() == T_OBJECT,
+            "write barrier is only for object/array reference stores");
+  GUARANTEE(has_address_register(),
+            "write_barrier_prolog must have allocated the address register");
+  CodeGenerator* const gen = code_generator();
+  const BinaryAssembler::Register addr = address_register();   // &slot
+  const BinaryAssembler::Register at   = Assembler::at;        // scratch (out of pool)
+
+  // i = oop_index(slot) = ((unsigned)&slot) >> LogBytesPerWord. This mirrors
+  // ObjectHeap::set_bit_for exactly (share/ObjectHeap.hpp), so the bit the GC
+  // reads is the bit compiled code sets.
+  gen->emit(Assembler::encode_srl(addr, addr, LogBytesPerWord));
+
+  // Load the CURRENT bit-vector base from memory (jvm_fast_globals.bitvector_base)
+  // rather than embedding its value: a heap expansion relocates the bit vector, so
+  // a live load keeps a long-lived compiled method's barrier correct.
+  const BinaryAssembler::Register bv = RegisterAllocator::allocate();
+  const juint bva = (juint)(unsigned long)(address)&_bitvector_base;
+  gen->emit(Assembler::encode_lui(bv, (bva >> 16) & 0xffff));
+  gen->emit(Assembler::encode_ori(bv, bv, bva & 0xffff));
+  gen->emit(Assembler::encode_lw (bv, bv, 0));                 // bv = _bitvector_base
+
+  // &bitvector_word = bv + (i >> LogBitsPerWord) * BytesPerWord
+  gen->emit(Assembler::encode_srl (at, addr, LogBitsPerWord)); // at = i >> 5
+  gen->emit(Assembler::encode_sll (at, at,   LogBytesPerWord));// at = (i>>5) << 2
+  gen->emit(Assembler::encode_addu(bv, bv,   at));             // bv = &word
+
+  // mask = 1 << (i & (BitsPerWord-1))
+  gen->emit(Assembler::encode_andi (at,   addr, BitsPerWord - 1)); // at = i & 31
+  const BinaryAssembler::Register mask = RegisterAllocator::allocate();
+  gen->emit(Assembler::encode_addiu(mask, Assembler::zero, 1));    // mask = 1
+  gen->emit(Assembler::encode_sllv (mask, mask, at));             // mask = 1 << (i&31)
+
+  // *word |= mask  (reuse addr as the loaded word value -- it is dead otherwise)
+  gen->emit(Assembler::encode_lw(addr, bv, 0));
+  gen->emit(Assembler::encode_or(addr, addr, mask));
+  gen->emit(Assembler::encode_sw(addr, bv, 0));
+
+  RegisterAllocator::dereference(mask);
+  RegisterAllocator::dereference(bv);
+  RegisterAllocator::dereference(address_register());
+  clear_address_register();
 }
 
 // Fase 3 (Marco 3.4a): return the base+disp16 operand for a heap access. If a

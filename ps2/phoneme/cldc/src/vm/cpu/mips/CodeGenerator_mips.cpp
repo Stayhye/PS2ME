@@ -285,18 +285,18 @@ void CodeGenerator::load_from_address(Value& result, BasicType type,
 // (RawLocation::write_changes -> store_to_location -> LocationAddress over
 // g_jlocals), which happens at branch merges (conform_to) and register spills.
 // Immediates are materialized into $at (or $zero when 0); a register value is
-// stored directly. Two-word (long/double) and heap write barriers arrive with
-// later Marcos. Locals/expression-stack are plain MemoryAddress (no barrier).
+// stored directly. Two-word (long/double) still arrive with a later Marco.
+// Marco 3.7a: an object/array (reference) store into the HEAP additionally emits
+// a GC write barrier (see HeapAddress::write_barrier_* in Addressing_mips). A
+// reference store to a LOCAL is a plain MemoryAddress whose barrier is a no-op.
 void CodeGenerator::store_to_address(Value& value, BasicType type,
                                      MemoryAddress& address) {
   if (!value.is_present()) return;   // nothing to store
   GUARANTEE(stack_type_for(type) == value.stack_type(),
             "types must match (taking stack types into account)");
 
-  const BinaryAssembler::Address addr = address.lo_address();
-  const Assembler::Register base = addr.base();
-  const int off = addr.disp();
-
+  // Resolve the source register first -- it is independent of the address, and the
+  // write-barrier prolog (below) may reallocate the address into a fresh register.
   Assembler::Register src;
   if (value.is_immediate()) {
     if (value.as_int() == 0) {
@@ -309,6 +309,21 @@ void CodeGenerator::store_to_address(Value& value, BasicType type,
     GUARANTEE(value.in_register(), "only case left");
     src = value.lo_register();
   }
+
+  // Marco 3.7a: reference store into the heap needs a write barrier UNLESS the
+  // value is provably not a heap pointer (e.g. a NULL constant). write_barrier is
+  // a no-op on LocationAddress/StackAddress, so only field/array-element stores
+  // take it. Mirrors i386 store_to_address (prolog -> store -> epilog).
+  const bool needs_barrier =
+      (type == T_OBJECT || type == T_ARRAY) && !value.not_on_heap();
+  if (needs_barrier) {
+    address.write_barrier_prolog();          // allocates addr_reg = &slot
+  }
+
+  // After the prolog, HeapAddress::address_for returns the address register (disp 0).
+  const BinaryAssembler::Address addr = address.lo_address();
+  const Assembler::Register base = addr.base();
+  const int off = addr.disp();
 
   switch (type) {
     case T_BOOLEAN:                              // fall through
@@ -323,6 +338,10 @@ void CodeGenerator::store_to_address(Value& value, BasicType type,
       // T_LONG / T_DOUBLE are two-word; those arrive with a later Marco.
       SHOULD_NOT_REACH_HERE();
       break;
+  }
+
+  if (needs_barrier) {
+    address.write_barrier_epilog();
   }
 }
 

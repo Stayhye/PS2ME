@@ -1,0 +1,29 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2665,6 +2665,26 @@
+         case Bytecodes::_fast_igetfield:
+         case Bytecodes::_fast_iputfield:
+           l = 3; break;
++        // Marco 3.7a: instance OBJECT/reference field load/store + reference local
++        // loads. getfield/putfield of a reference field quicken to the 'a' fast
++        // forms. fast_agetfield reuses load_from_object (already covered);
++        // fast_aputfield stores a heap pointer and emits the GC write barrier (now
++        // implemented in Addressing_mips::write_barrier_prolog/epilog). aload/
++        // aload_<n> load a reference from a local (covered by load_from_address
++        // T_OBJECT). Lengths mirror the int field forms (bjj=3, bi=2, b=1).
++        case Bytecodes::_aload_0_fast_agetfield_4:
++        case Bytecodes::_aload_0_fast_agetfield_8:
++        case Bytecodes::_aload_1:
++        case Bytecodes::_aload_2:
++        case Bytecodes::_aload_3:
++          l = 1; break;
++        case Bytecodes::_fast_agetfield_1:
++        case Bytecodes::_aload_0_fast_agetfield_1:
++        case Bytecodes::_aload:
++          l = 2; break;
++        case Bytecodes::_fast_agetfield:
++        case Bytecodes::_fast_aputfield:
++          l = 3; break;
+         // Marco 3.4a: object local load (the array reference) + arraylength.
+         // arraylength emits a null_check (inline test + branch to the helper-C
+         // throw path) followed by a length load via FieldAddress -- both fully
