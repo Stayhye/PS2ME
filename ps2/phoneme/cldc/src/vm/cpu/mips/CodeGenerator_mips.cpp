@@ -61,6 +61,12 @@ extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size);
 // (not invoker_size -- the length 5 is fixed inside the helper). See invoke_interface.
 extern "C" void jit_invoke_interface(int cpool_index, int num_params);
 
+// Marco 3.7b: array-store type check for a compiled aastore. Mirrors the interp's
+// aastore type_check (-> array_store_type_check via call_vm): raises ArrayStoreException
+// if obj is not assignable to the element type of the array ref (null obj is always
+// OK), repositioning g_jfp for the option-B unwind. See CodeGenerator::type_check.
+extern "C" void jit_array_store_check(address ref, address obj, int idx);
+
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
 // lui/ori.
@@ -571,9 +577,46 @@ void CodeGenerator::array_check(Value& array, Value& index JVM_TRAPS) {
   bind(ok);
 }
 
-void CodeGenerator::type_check(Value& object, Value& array, Value& index JVM_TRAPS) {
-  (void)object; (void)array; (void)index;
-  SHOULD_NOT_REACH_HERE();
+// Fase 3 (Marco 3.7b): the aastore array-store type check. The shared header names
+// the parameters (object, array, index), but POSITIONALLY they are the array, the
+// index, and the value being stored (see BytecodeCompileClosure::store_array's call
+// `type_check(array, index, value)` and the i386 backend); we use semantic names.
+// The interp raises ArrayStoreException when the value is not assignable to the
+// array's element type; we mirror it with a C helper (jit_array_store_check ->
+// interp type_check -> array_store_type_check via call_vm). Since that call can GC
+// and can throw (repositioning g_jfp), we flush the frame first and run the option-B
+// fp-check after -- exactly like a real invoke. The operands are re-pushed (mirrors
+// i386) so the flush materializes them in g_jsp: the call clobbers t0-t8, so they
+// must survive in memory (the popped Values reload from g_jsp when store_to_array
+// runs next).
+void CodeGenerator::type_check(Value& array, Value& index, Value& value JVM_TRAPS) {
+  frame()->push(array);
+  frame()->push(index);
+  frame()->push(value);                        // value on top of the expression stack
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+
+  // After the flush, g_jsp (s1) points at the top slot: arg_offset_from_sp(0)=value,
+  // (1)=index, (2)=array (BytesPerStackElement each), matching the invoke's receiver
+  // read convention. Load ref/obj/idx into the C-arg registers for the helper.
+  emit(Assembler::encode_lw(Assembler::a0, Assembler::jsp,
+                            JavaFrame::arg_offset_from_sp(2)));   // a0 = ref (array)
+  emit(Assembler::encode_lw(Assembler::a1, Assembler::jsp,
+                            JavaFrame::arg_offset_from_sp(0)));   // a1 = obj (value)
+  emit(Assembler::encode_lw(Assembler::a2, Assembler::jsp,
+                            JavaFrame::arg_offset_from_sp(1)));   // a2 = idx (index)
+  mips_call_c(this, (address)jit_array_store_check);
+
+  // Option-B unwind: if the check threw ArrayStoreException, find_exception_frame
+  // repositioned g_jfp past this frame -> eject via the bare native epilogue.
+  mips_emit_invoke_fp_check(this);
+
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: aastore type_check -> jit_array_store_check "
+                    "emitted (Marco 3.7b)"); } }
+
+  frame()->pop(value);
+  frame()->pop(index);
+  frame()->pop(array);
 }
 
 // Fase 3 (Marco 3.4a): inline null check. The r5900 has no flags; test the

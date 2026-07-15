@@ -200,6 +200,17 @@ public class JitTest {
     static int linkTag(Node n, Node v) { n.link = v; return n.link.tag; } // aputfield(barrier)+agetfield
     static int getLinkTag(Node n)      { return n.link.tag; }             // agetfield (read-only)
 
+    // Marco 3.7b: object-array element load/store. aaGet reads a[i] (aaload, a
+    // reference-array element load = IndexedAddress T_OBJECT) then its int field.
+    // aaStore writes a[i]=v (aastore): the array-store TYPE CHECK (jit_array_store_check
+    // -> the interp's array_store_type_check, raising ArrayStoreException on a type
+    // mismatch and unwinding via option-B) followed by the write-barrier'd store. The
+    // array parameter is declared Object[] so the compiler cannot elide the type check
+    // (not an exact/final type), which is what exercises the new backend path. Storing
+    // a String into a real Node[] aliased as Object[] must throw ArrayStoreException.
+    static int aaGet(Node[] a, int i) { return a[i].tag; }                  // aaload + igetfield
+    static int aaStore(Object[] a, int i, Object v) { a[i] = v; return i; } // aastore (typecheck+barrier)
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -213,7 +224,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.7a harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.7b harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -263,6 +274,15 @@ public class JitTest {
         Node n1b = new Node(); n1b.tag = 73;
         Node n2 = new Node();
         int lt = 0, glt = 0;
+        // Marco 3.7b: object-array leaves. narr is a real Node[]; oarr is an Object[]
+        // (so aaStore's type check is not elided); narrAsObj aliases narr as Object[]
+        // to force an ArrayStoreException when a String is stored into it.
+        Node[] narr = { new Node(), new Node(), new Node() };
+        narr[0].tag = 61; narr[1].tag = 62; narr[2].tag = 63;
+        Object[] oarr = new Object[3];
+        Object[] narrAsObj = narr;
+        Node someNode = new Node(); someNode.tag = 88;
+        int aag = 0, aas = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -312,6 +332,8 @@ public class JitTest {
             vgrt = callGreet(hi);      // invokeinterface -> Hi.greet()=7, +200 (warms leaf)
             lt = linkTag(n2, n1);      // n2.link = n1 (write barrier); return n1.tag = 71
             glt = getLinkTag(n2);      // n2.link.tag = 71 (read reference field)
+            aag = aaGet(narr, 1);      // narr[1].tag = 62 (aaload + field deref)
+            aas = aaStore(oarr, 0, someNode); // oarr[0] = someNode (aastore: typecheck+barrier)
         }
 
         check("add(7,5)",      ra, 12);
@@ -516,6 +538,34 @@ public class JitTest {
         }
         check("getLinkTag(null) throws NPE", aFldNpe ? 1 : 0, 1);
         check("getLinkTag(n2) post-throw", getLinkTag(n2), 73);   // resumes clean
+
+        // Marco 3.7b: object-array element load/store (compiled).
+        check("aaGet(narr,1)", aag, 62);                 // aaload + field deref
+        check("aaGet(narr,2)", aaGet(narr, 2), 63);
+        check("aaStore(oarr,0,someNode)", aas, 0);       // aastore into Object[] (returned i)
+        check("oarr[0] stored", oarr[0] == someNode ? 1 : 0, 1);   // driver verifies the store landed
+        check("aaStore(oarr,1,null)", aaStore(oarr, 1, null), 1);  // null value: type-OK, no throw
+        // Type-compatible store into a real Node[] (aliased as Object[]) succeeds.
+        check("aaStore(narrAsObj,0,someNode)", aaStore(narrAsObj, 0, someNode), 0);
+        check("narr[0] retargeted", narr[0] == someNode ? 1 : 0, 1);
+        // The compiled array-store type check must throw ArrayStoreException for an
+        // incompatible element (a String into a Node[]) and unwind (option-B) to this
+        // interpreted try/catch. A miss (no throw / crash) fails or hangs.
+        boolean aseCaught = false;
+        try {
+            aaStore(narrAsObj, 1, "not a node");
+        } catch (ArrayStoreException e) {
+            aseCaught = true;
+        }
+        check("aaStore(Node[],String) throws ASE", aseCaught ? 1 : 0, 1);
+        check("aaStore post-throw", aaStore(narrAsObj, 2, someNode), 2);  // resumes clean
+        // null array reuses the 3.4b array_check null path (before the type check).
+        boolean aaNpe = false;
+        try { aaStore(null, 0, someNode); } catch (NullPointerException e) { aaNpe = true; }
+        check("aaStore(null,..) throws NPE", aaNpe ? 1 : 0, 1);
+        boolean aagNpe = false;
+        try { aaGet(null, 0); } catch (NullPointerException e) { aagNpe = true; }
+        check("aaGet(null,0) throws NPE", aagNpe ? 1 : 0, 1);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

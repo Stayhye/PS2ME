@@ -39,14 +39,29 @@ HeapAddress::~HeapAddress() {
 void HeapAddress::write_barrier_prolog() {
   GUARANTEE(stack_type() == T_OBJECT,
             "write barrier is only for object/array reference stores");
-  // Allocate a register to hold the slot's effective address (mirrors i386's leal
-  // into address_register). compute_address_for gives base + disp16; the MIPS
-  // "load effective address" is a plain addiu. store_to_address then finds the
-  // address register via HeapAddress::address_for and stores through it (disp 0).
-  set_address_register(RegisterAllocator::allocate());
+  // Leave the slot's effective address in address_register (mirrors i386's leal).
+  // compute_address_for yields base + disp16. Two cases:
+  //  - FieldAddress / immediate-index IndexedAddress: no register is allocated yet;
+  //    allocate one and materialize base + disp (the MIPS "load effective address").
+  //  - register-index IndexedAddress (Marco 3.4b): compute_address_for ALREADY
+  //    allocated the address register (array + index<<shift) and returns it with the
+  //    header displacement. Do NOT allocate a second one (that would leak a register
+  //    and misplace the barrier) -- fold the displacement into the existing register.
+  // store_to_address then finds the address register via HeapAddress::address_for
+  // and stores through it (disp 0).
   const BinaryAssembler::Address a = compute_address_for(lo_offset());
-  code_generator()->emit(
-      Assembler::encode_addiu(address_register(), a.base(), a.disp()));
+  if (has_address_register()) {
+    GUARANTEE(a.base() == address_register(),
+              "register-index IndexedAddress returns its own address register");
+    if (a.disp() != 0) {
+      code_generator()->emit(
+          Assembler::encode_addiu(address_register(), a.base(), a.disp()));
+    }
+  } else {
+    set_address_register(RegisterAllocator::allocate());
+    code_generator()->emit(
+        Assembler::encode_addiu(address_register(), a.base(), a.disp()));
+  }
 }
 
 void HeapAddress::write_barrier_epilog() {

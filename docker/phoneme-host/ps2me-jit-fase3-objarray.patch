@@ -1,0 +1,36 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2401,6 +2401,16 @@
+   extern "C" void jit_throw_array_index() {
+     interpreter_throw_ArrayIndexOutOfBoundsException();
+   }
++  // Marco 3.7b: the aastore array-store type check from compiled code. Mirrors the
++  // interp's array_store type_check(ref,obj,idx): a NULL obj is always assignable;
++  // otherwise array_store_type_check (via call_vm) verifies obj fits the array's
++  // element class and raises ArrayStoreException if not. On a raise, find_exception_
++  // frame repositions g_jfp for the compiled caller's option-B fp-check to eject, so
++  // the bool result is unused here (g_jfp is the signal). The three operands are
++  // passed in registers (the compiled backend loaded them from g_jsp before the call).
++  extern "C" void jit_array_store_check(address ref, address obj, jint idx) {
++    (void)type_check(ref, obj, idx);
++  }
+ 
+   // jit_invoke_static(): the REAL (non-inlined) resolved static call from compiled
+   // code (Marco 3.6b-real). The compiled caller emits this instead of the ARM/i386
+@@ -2685,6 +2695,16 @@
+         case Bytecodes::_fast_agetfield:
+         case Bytecodes::_fast_aputfield:
+           l = 3; break;
++        // Marco 3.7b: object-array element load/store. aaload reuses load_from_array
++        // (IndexedAddress T_OBJECT = lw, already covered by 3.4b's int path). aastore
++        // reuses store_to_array -> store_to_address(T_OBJECT) -> the 3.7a write barrier
++        // (via IndexedAddress, whose register-index compute_address_for now composes
++        // with write_barrier_prolog), preceded by the array-store type check
++        // (CodeGenerator::type_check -> jit_array_store_check helper -> the interp's
++        // array_store_type_check, which raises ArrayStoreException + option-B unwind).
++        case Bytecodes::_aaload:
++        case Bytecodes::_aastore:
++          l = 1; break;
+         // Marco 3.4a: object local load (the array reference) + arraylength.
+         // arraylength emits a null_check (inline test + branch to the helper-C
+         // throw path) followed by a length load via FieldAddress -- both fully

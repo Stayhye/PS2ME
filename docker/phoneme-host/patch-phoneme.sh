@@ -860,4 +860,22 @@ if ! grep -q 'Marco 3.7a: instance OBJECT' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objfields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 54) ps2me-jit-fase3-objarray (PS2ME JIT, Fase 3, Marco 3.7b). Two additions to
+#     Interpreter_c.cpp ON TOP of #53: (a) the jit_array_store_check() glue -- the
+#     aastore array-store TYPE CHECK from compiled code; it mirrors the interp's
+#     array_store type_check(ref,obj,idx) (-> array_store_type_check via call_vm),
+#     raising ArrayStoreException when obj is not assignable to the array's element
+#     class (null obj is always OK), repositioning g_jfp for the compiled caller's
+#     option-B fp-check. (b) the whitelist admits _aaload / _aastore. aaload reuses
+#     load_from_array (IndexedAddress T_OBJECT = lw, covered by 3.4b); aastore reuses
+#     store_to_array -> store_to_address(T_OBJECT) -> the 3.7a write barrier (the
+#     register-index IndexedAddress compute_address_for now composes with
+#     write_barrier_prolog -- a git-tracked overlay fix), preceded by the type check.
+#     The backend CodeGenerator::type_check emission + the write-barrier prolog fix are
+#     git-tracked (overlay mips), NOT here. Gated PS2ME_JIT_FASE3. Interpreter_c.cpp is
+#     LF-only. Idempotent (guard on jit_array_store_check). See references/JIT_PLAN.md §7.
+if ! grep -q 'jit_array_store_check' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-objarray.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
