@@ -1,0 +1,65 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2443,8 +2443,14 @@
+   // never a SHOULD_NOT_REACH_HERE bail-out. The whitelist is the safety gate;
+   // no class-name check is needed (the JitTest harness leaves are the methods
+   // that match, and its main()/check() carry invokes and stay out).
+-  static bool jit_fase3_whitelisted(address method) {
++  static bool jit_fase3_whitelisted(address method, bool allow_invoke) {
+     Method::Raw m = (ReturnOop)method;
++    // Marco 3.6b: a compiled method never installs an exception handler (we do not
++    // compile catch blocks), so both the inlined-throw path and the option-B call
++    // unwind require the method to be unable to catch. Reject any method with an
++    // exception table -- true of every straight-line leaf armed so far (they have
++    // no try/catch), so this adds no regression.
++    if (!m().has_no_exception_table()) return false;
+     const int len = m().code_size();
+     if (len < 1 || len > 60) return false;              // keep bring-up small
+     int bci = 0;
+@@ -2519,6 +2525,30 @@
+         case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
+         case Bytecodes::_goto:
+           l = 3; break;
++        // Marco 3.6b-inline: resolved static call. The shared compiler inlines a
++        // small whitelisted callee (internal_compile_inlined, reusing our int ops
++        // with no frame/call); a non-inlinable one bails the compile cleanly
++        // (CodeGenerator::invoke -> abort_active_compilation). Only allow it at the
++        // top level (allow_invoke) and only when the resolved callee is a fully-
++        // whitelisted LEAF: recurse with allow_invoke=false so the callee may not
++        // itself invoke, bounding depth to 1 (the inline recursion emits the
++        // callee's bytecodes through our backend -- each must be covered or it would
++        // SHOULD_NOT_REACH_HERE). Raw (unresolved) _invokestatic stays off: it
++        // re-arms once the rewriter quickens it to _fast_invokestatic.
++        case Bytecodes::_fast_invokestatic:
++        case Bytecodes::_fast_init_invokestatic: {
++          if (!allow_invoke) return false;
++          const jushort cp_index = (jushort)
++            (((jint)m().ubyte_at(bci + 1) << 8) | (jint)m().ubyte_at(bci + 2));
++          address cpool = get_cpool(method);
++          address callee = (address)get_from_cpool(cpool, cp_index);
++          if (callee == NULL) return false;
++          if (get_access_flags(callee) & (JVM_ACC_NATIVE | JVM_ACC_SYNCHRONIZED)) {
++            return false;
++          }
++          if (!jit_fase3_whitelisted(callee, false)) return false;
++          l = 3; break;
++        }
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }
+@@ -2527,13 +2557,13 @@
+     return true;
+   }
+ 
+-  enum { JIT_FASE3_MAX_ARMED = 32 };
++  enum { JIT_FASE3_MAX_ARMED = 64 };
+   static int jit_fase3_armed_count = 0;
+   void jit_fase3_arm(address method) {
+     if (Universe::before_main()) return;
+     if (jit_fase3_armed_count >= JIT_FASE3_MAX_ARMED) return;
+     if (get_access_flags(method) & (JVM_ACC_NATIVE | JVM_ACC_SYNCHRONIZED)) return;
+-    if (!jit_fase3_whitelisted(method)) return;
++    if (!jit_fase3_whitelisted(method, true)) return;
+     Method::Raw m = (ReturnOop)method;
+     if (m().has_compiled_code()) return;                    // already compiled
+     if (m().execution_entry() == (address)shared_invoke_compiler) return; // armed

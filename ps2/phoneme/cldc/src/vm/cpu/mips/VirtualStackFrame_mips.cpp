@@ -11,11 +11,10 @@
 #if ENABLE_COMPILER
 #include "incls/_VirtualStackFrame_mips.cpp.incl"
 
-// FASE 0 (dormant JIT): the only arch-specific VirtualStackFrame member the
-// shared framework references. Compile path only; bail out. Mirrors
-// VirtualStackFrame_i386.cpp.
+// The quick (post/pre-indexed) flush is an ARM-only optimization; every other
+// backend flushes location-by-location. Return false so the shared flush() takes
+// the generic path. Mirrors VirtualStackFrame_i386.cpp (which also returns false).
 bool VirtualStackFrame::flush_quick() {
-  SHOULD_NOT_REACH_HERE();
   return false;
 }
 

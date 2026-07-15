@@ -728,4 +728,20 @@ if ! grep -q 'Marco 3.5: instance INT field' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-fields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 47) ps2me-jit-fase3-invokestatic (PS2ME JIT, Fase 3, Marco 3.6b-inline). Whitelist
+#     changes to Interpreter_c.cpp ON TOP of #46: (a) jit_fase3_whitelisted gains an
+#     allow_invoke parameter and now accepts fast_invokestatic/fast_init_invokestatic
+#     when the resolved callee is a fully-whitelisted LEAF (recurse allow_invoke=false,
+#     bounding depth to 1), so the shared front-end can INLINE a small static callee
+#     into the compiled caller (internal_compile_inlined reuses our ops -- no frame/
+#     call/unwind; a NON-inlined call bails cleanly via CodeGenerator::invoke ->
+#     abort_active_compilation instead of crashing); (b) a compiled method may not
+#     catch, so an armed method must have no exception table; (c) the arm cap is
+#     raised 32 -> 64 to leave room for the new caller leaves. Interpreter_c.cpp is
+#     LF-only. Idempotent (guard on the 'Marco 3.6b-inline' whitelist marker). See
+#     references/JIT_PLAN.md §7.
+if ! grep -q 'Marco 3.6b-inline: resolved static call' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokestatic.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

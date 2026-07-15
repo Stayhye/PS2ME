@@ -142,15 +142,42 @@ void CodeGenerator::method_entry(Method* method JVM_TRAPS) {
 }
 
 // In the C-interpreter hybrid the Java expression stack is g_jsp (s1), owned by
-// the interpreter and set up by jit_frame_enter; the compiled body keeps
-// expression values in registers and (for Marco 3.1 whitelisted methods) never
-// spills them to the Java stack. So these CPU-stack adjustments are no-ops here
-// (real g_jsp maintenance for expression-stack flushing arrives with a later
-// Marco). They are called during normal compilation, so they must NOT bail out.
+// the interpreter and set up by jit_frame_enter. Marco 3.6a makes the physical
+// stack pointer real: the shared VirtualStackFrame calls increment_stack_pointer_by
+// (via set_stack_pointer) whenever the real stack pointer must catch up to the
+// virtual one -- at a flush with live expression values (spill) or when
+// materializing invoke arguments. Values stay register-resident; moving s1 only
+// reserves/releases their memory homes so store_to_address (jsp-relative) and the
+// C helpers that read g_jsp (jit_invoke/jit_timer_tick/jit_throw_*) see the right
+// stack depth. The Java stack grows down (JavaStackDirection < 0), so a deeper
+// virtual sp (positive adjustment) decreases g_jsp -- mirrors i386's
+// leal(esp, [esp - elt*adjustment]). For the straight-line whitelisted methods of
+// Marcos 3.1-3.5 the expression stack is empty at every flush, so adjustment is
+// always 0 and nothing is emitted (byte-identical to the old no-op). Called in the
+// normal compile flow -> must NOT bail out.
 void CodeGenerator::increment_stack_pointer_by(int adjustment) {
-  (void)adjustment;
+  if (adjustment == 0) {
+    return;
+  }
+  const int delta = -BytesPerStackElement * adjustment;
+  if (delta >= -32768 && delta <= 32767) {
+    emit(Assembler::encode_addiu(Assembler::jsp, Assembler::jsp, delta));
+  } else {
+    // Deep frames beyond the addiu imm16 range: materialize into $at (scratch,
+    // outside the register pool) and add. Realistic method stacks never hit this.
+    mips_li(this, Assembler::at, (juint)delta);
+    emit(Assembler::encode_addu(Assembler::jsp, Assembler::jsp, Assembler::at));
+  }
 }
 
+// No-op on the C-interpreter hybrid: jit_frame_enter already leaves s1 (g_jsp) at
+// the callee's empty expression stack (SET_FRAME(stack_bottom_pointer, g_jsp)),
+// which is the physical work i386's clear_stack does in its compiled prologue
+// (leal esp, [ebp + stack_bottom_pointer_offset]). VirtualStackFrame::clear()
+// resets the model's real stack pointer to max_locals-1 (empty stack) right after
+// the method entry helper ran, so s1 already matches -- nothing to emit. (clear()
+// is otherwise only reached from throw_simple_exception, a dead end.) Called in
+// the normal compile flow -> must NOT bail out.
 void CodeGenerator::clear_stack() {
 }
 
@@ -802,27 +829,47 @@ void CodeGenerator::d2f(Value& result, Value& value JVM_TRAPS) {
 
 // ---- invokes -----------------------------------------------------------------
 
+// Fase 3 (Marco 3.6b-inline): the shared front-end inlines small callees
+// (internal_compile_inlined) BEFORE reaching these emitters, reusing our existing
+// ops with no frame/call/unwind. These CodeGenerator::invoke* paths are the
+// NON-inlined REAL calls. Until the real-call machinery lands (Marco 3.6b-real:
+// jit_invoke helper + nested dispatch loop + option-B fp-check unwind), bail out of
+// the current compilation CLEANLY rather than crashing: abort_active_compilation is
+// the framework's own compile-time deopt (uncommon_trap uses it). An armed method
+// whose call does not inline then simply runs interpreted -- never a
+// SHOULD_NOT_REACH_HERE. The Fase-3 whitelist only arms static calls to inlinable
+// whitelisted leaves, so in practice inlining fires and these are not reached; the
+// abort is the safety net for the space/heuristic cases where it does not.
 void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRAPS) {
   (void)method; (void)must_do_null_check;
-  SHOULD_NOT_REACH_HERE();
+  // Diagnostic (one-shot): a reached invoke means the shared front-end did NOT
+  // inline this call. On the JitTest harness every whitelisted call targets a tiny
+  // inlinable leaf, so this line should NOT appear -- its absence confirms
+  // caller3/caller3b actually compiled with the callee inlined (vs silently
+  // aborting to the interpreter). In real games it will mark where the real-call
+  // path (Marco 3.6b-real) is needed.
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: non-inlined invoke -> abort compile "
+                    "(real call = Marco 3.6b-real)"); } }
+  Compiler::abort_active_compilation(false JVM_THROW);
 }
 
 void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
                                    BasicType return_type JVM_TRAPS) {
   (void)method; (void)vtable_index; (void)return_type;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(false JVM_THROW);
 }
 
 void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
                                      int parameters_size,
                                      BasicType return_type JVM_TRAPS) {
   (void)klass; (void)itable_index; (void)parameters_size; (void)return_type;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(false JVM_THROW);
 }
 
 void CodeGenerator::invoke_native(BasicType return_kind, address entry JVM_TRAPS) {
   (void)return_kind; (void)entry;
-  SHOULD_NOT_REACH_HERE();
+  Compiler::abort_active_compilation(false JVM_THROW);
 }
 
 // ---- exceptions / vm calls ---------------------------------------------------

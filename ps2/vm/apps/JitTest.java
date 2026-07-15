@@ -89,6 +89,17 @@ public class JitTest {
     static int gy(Pt p)        { return p.y; }            // field load (offset y)
     static int sx(Pt p, int v) { p.x = v; return p.x; }  // field store + reload
 
+    // Marco 3.6b-inline: a resolved static call. addHelper is a fully-whitelisted
+    // leaf; the shared compiler INLINES it into each caller (internal_compile_inlined
+    // reuses our int ops -- no frame, no call, no unwind), so this proves the
+    // compiled invokestatic path end to end. caller3 composes the inlined result
+    // with an immediate add; caller3b with a multiply. The whitelist arms the caller
+    // only once the rewriter has quickened invokestatic -> fast_invokestatic and the
+    // callee resolves to a whitelisted leaf (bounded to depth 1).
+    static int addHelper(int a, int b) { return a + b; }             // inlined leaf
+    static int caller3(int a, int b)   { return addHelper(a, b) + 1; } // invokestatic + iadd
+    static int caller3b(int a)         { return addHelper(a, a) * 2; } // invokestatic + imul
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -102,7 +113,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.5 harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.6b-inline harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -130,6 +141,8 @@ public class JitTest {
         int ag = 0, sm = 0, av = 0;
         // Marco 3.5 field leaves.
         int gxv = 0, gyv = 0, sxv = 0;
+        // Marco 3.6b-inline: static-call (inlined) leaves.
+        int c3 = 0, c3b = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -166,6 +179,8 @@ public class JitTest {
             gxv = gx(pt);
             gyv = gy(pt);
             sxv = sx(pt2, 55);
+            c3 = caller3(7, 5);
+            c3b = caller3b(10);
         }
 
         check("add(7,5)",      ra, 12);
@@ -258,6 +273,11 @@ public class JitTest {
         }
         check("gx(null) throws NPE", fldNpe ? 1 : 0, 1);
         check("gx(pt) post-throw",   gx(pt), 7);   // resumes clean
+
+        // Marco 3.6b-inline: static call inlined into the compiled caller.
+        check("caller3(7,5)",   c3,  13);   // addHelper(7,5)+1
+        check("caller3b(10)",   c3b, 40);   // addHelper(10,10)*2
+        check("caller3(20,22)", caller3(20, 22), 43);  // other args, compiled path
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

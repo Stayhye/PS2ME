@@ -95,13 +95,20 @@ BinaryAssembler::Address StackAddress::address_for(jint address_offset) {
 }
 
 jint LocationAddress::compute_base_offset() {
-  // Fase 3 (Marco 3.1): only local addressing is implemented. Whitelisted
-  // straight-line methods keep all expression values in registers, so the
-  // expression-stack (jsp-relative) path is never reached here.
-  GUARANTEE(is_local(), "Fase 3: expression-stack slots not addressable yet");
-  // Mirror Interpreter_c.cpp's GET_LOCAL(n) == *((jint*)g_jlocals - n): local n
-  // lives at g_jlocals - n*BytesPerWord. base() == locals == s3 == g_jlocals.
-  return - index() * BytesPerWord;
+  if (is_local()) {
+    // Mirror Interpreter_c.cpp's GET_LOCAL(n) == *((jint*)g_jlocals - n): local n
+    // lives at g_jlocals - n*BytesPerWord. base() == locals == s3 == g_jlocals.
+    return - index() * BytesPerWord;
+  }
+  // Fase 3 (Marco 3.6a): expression-stack slot, addressed relative to the physical
+  // Java stack pointer (base() == jsp == s1 == g_jsp). Same arithmetic as the i386
+  // backend: the element at absolute stack index `index` sits at
+  // jsp + arg_offset_from_sp(real_stack_pointer - index). ensure_sufficient_stack_for
+  // grows the physical stack (moving s1 via increment_stack_pointer_by) if this slot
+  // lies above the current real stack pointer, exactly as on i386. Reached when the
+  // register allocator spills, or when the invoke path materializes arguments.
+  code_generator()->ensure_sufficient_stack_for(index(), type());
+  return JavaFrame::arg_offset_from_sp(frame()->stack_pointer() - index());
 }
 
 bool LocationAddress::is_local_index(jint index) {
