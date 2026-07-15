@@ -100,6 +100,27 @@ public class JitTest {
     static int caller3(int a, int b)   { return addHelper(a, b) + 1; } // invokestatic + iadd
     static int caller3b(int a)         { return addHelper(a, a) * 2; } // invokestatic + imul
 
+    // Marco 3.6b-real: the REAL (non-inlined) static call. A callee that
+    // bytecode_inline_prepass NEVER inlines (code_size > 13, or non-leaf) is NOT
+    // inlined by the front-end, so CodeGenerator::invoke emits jit_invoke_static +
+    // the nested dispatch loop + the option-B fp-check instead.
+    //   bigAdd  : a big whitelisted leaf (>13 bytes) -> armed and compiled, so
+    //             callBig exercises a compiled->compiled real call (the nested loop
+    //             does not iterate: the compiled callee returns via jit_return).
+    //   interpAdd: carries an idiv (never whitelisted -> never armed) and is >13
+    //             bytes -> ALWAYS interpreted, so callInterp exercises a
+    //             compiled->interpreted real call whose body runs in the nested
+    //             dispatch loop.
+    //   bigLen  : returns a.length, >13 bytes -> armed/compiled; callThrow real-
+    //             calls it and bigLen(null) throws NPE that must unwind OUT of
+    //             callThrow's compiled frame (option-B fp-check) to a try/catch above.
+    static int bigAdd(int a, int b)  { return a+b+a+b+a+b+a+b; }      // 4a+4b, >13 bytes
+    static int callBig(int a, int b) { return bigAdd(a, b) + 1; }     // real call, compiled callee
+    static int interpAdd(int a, int b) { int d = a / (b + 1); return a+b+a+b+a+b + d - d; } // 3a+3b, idiv
+    static int callInterp(int a, int b) { return interpAdd(a, b) + 100; } // real call, interpreted callee
+    static int bigLen(int[] a)       { int n = a.length; return n+n+n+n+n+n+n+n; } // 8*len, can NPE
+    static int callThrow(int[] a)    { return bigLen(a) + 1; }        // real call; NPE unwinds through it
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -113,7 +134,7 @@ public class JitTest {
     }
 
     public static void main(String[] args) {
-        System.out.println("[JIT-TEST] Fase 3 Marco 3.6b-inline harness start");
+        System.out.println("[JIT-TEST] Fase 3 Marco 3.6b-real harness start");
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -143,6 +164,8 @@ public class JitTest {
         int gxv = 0, gyv = 0, sxv = 0;
         // Marco 3.6b-inline: static-call (inlined) leaves.
         int c3 = 0, c3b = 0;
+        // Marco 3.6b-real: static-call (non-inlined REAL call) leaves.
+        int cb = 0, cin = 0, ct = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -181,6 +204,9 @@ public class JitTest {
             sxv = sx(pt2, 55);
             c3 = caller3(7, 5);
             c3b = caller3b(10);
+            cb = callBig(7, 5);        // real call -> compiled bigAdd
+            cin = callInterp(7, 5);    // real call -> interpreted interpAdd
+            ct = callThrow(arr5);      // real call -> compiled bigLen (in-bounds)
         }
 
         check("add(7,5)",      ra, 12);
@@ -278,6 +304,31 @@ public class JitTest {
         check("caller3(7,5)",   c3,  13);   // addHelper(7,5)+1
         check("caller3b(10)",   c3b, 40);   // addHelper(10,10)*2
         check("caller3(20,22)", caller3(20, 22), 43);  // other args, compiled path
+
+        // Marco 3.6b-real: the REAL (non-inlined) static call.
+        // compiled->compiled: callBig real-calls the compiled big leaf bigAdd.
+        check("callBig(7,5)",    cb, 49);                 // bigAdd(7,5)=48, +1
+        check("callBig(20,22)",  callBig(20, 22), 169);   // 4*(42)=168, +1
+        // compiled->interpreted: callInterp real-calls the never-armed interpAdd
+        // (idiv), whose body runs in jit_invoke_static's nested dispatch loop.
+        check("callInterp(7,5)", cin, 136);               // interpAdd=3*(12)=36, +100
+        check("callInterp(10,4)", callInterp(10, 4), 142); // 3*(14)=42, +100
+        // In-bounds real call to the compiled bigLen.
+        check("callThrow(arr5)", ct, 41);                 // 8*5=40, +1
+
+        // Option-B unwind: bigLen(null) throws NPE that must unwind OUT of
+        // callThrow's compiled native frame (post-invoke fp-check: g_jfp != fp_A ->
+        // bare epilogue) and propagate to this interpreted try/catch above. A miss
+        // (no throw / crash / leaked frame) fails or hangs.
+        boolean realNpe = false;
+        try {
+            callThrow(null);
+        } catch (NullPointerException e) {
+            realNpe = true;
+        }
+        check("callThrow(null) throws NPE", realNpe ? 1 : 0, 1);
+        // The compiled caller resumes cleanly after the unwind.
+        check("callThrow(arr5) post-throw", callThrow(arr5), 41);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

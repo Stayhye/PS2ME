@@ -38,6 +38,14 @@ extern "C" void jit_timer_tick();       // Marco 3.2b: backward-branch timer che
 // throw-path emission in mips_emit_runtime_throw and JIT_PLAN.md 7.
 extern "C" void jit_throw_null_pointer();
 extern "C" void jit_throw_array_index();
+// Marco 3.6b-real: the real (non-inlined) resolved static call. Resolves the
+// callee from the caller frame's cpool (index = compile-time constant, GC-safe),
+// runs the class-init barrier, invokes, and drives an interpreted callee to
+// completion with a nested dispatch loop bounded by the caller frame (a compiled
+// callee returns via jit_return so the loop does not iterate). See the emission
+// in CodeGenerator::invoke, the option-B fp-check in mips_emit_invoke_fp_check,
+// and JIT_PLAN.md 7.
+extern "C" void jit_invoke_static(int cpool_index, int invoker_size);
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -115,6 +123,30 @@ static void mips_emit_runtime_throw(BinaryAssembler* a, int rte) {
   a->emit(Assembler::encode_nop());
 }
 
+// --- Fase 3 (Marco 3.6b-real): option-B unwind fp-check after a real call ------
+// Emitted after every real (non-inlined) invoke. jit_invoke_static drives the
+// callee and returns here. If an exception unwound PAST this compiled method,
+// find_exception_frame has repositioned g_jfp (s0) to a handler frame ABOVE this
+// one, so s0 no longer equals the caller frame fp_A that method_entry saved at
+// 4(sp). In that case eject via the bare native epilogue (restore $ra/$sp, jr ra;
+// NO jit_return -- the Java frame is already unwound), propagating the unwind one
+// native frame further, exactly like mips_emit_runtime_throw. When s0 == fp_A the
+// call returned normally and we fall through to the continuation. The Java stack
+// grows down (JavaStackDirection < 0), so a live callee frame has a SMALLER g_jfp;
+// equality is the only "returned to me" signal, hence beq.
+static void mips_emit_invoke_fp_check(BinaryAssembler* a) {
+  a->emit(Assembler::encode_lw(Assembler::at, Assembler::sp, 4));   // at = fp_A
+  BinaryAssembler::Label cont;
+  // if g_jfp(s0) == fp_A -> normal return, skip the eject (delay slot = nop)
+  a->emit_branch(Assembler::encode_beq(Assembler::fp, Assembler::at, 0), cont);
+  // eject: bare native epilogue (identical to mips_emit_runtime_throw's tail)
+  a->emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
+  a->emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, 16));
+  a->emit(Assembler::encode_jr(Assembler::ra));
+  a->emit(Assembler::encode_nop());
+  a->bind(cont);
+}
+
 // ---- method prologue / stack -------------------------------------------------
 
 void CodeGenerator::overflow(const Assembler::Register& stack_pointer,
@@ -139,6 +171,11 @@ void CodeGenerator::method_entry(Method* method JVM_TRAPS) {
   emit(Assembler::encode_sw(Assembler::ra, Assembler::sp, 0));
   // build the Java frame in C (shares g_jfp/g_jsp/g_jlocals via global-reg).
   mips_call_c(this, (address)jit_frame_enter);
+  // Marco 3.6b-real (option-B unwind): jit_frame_enter left s0 (g_jfp) = this
+  // method's own Java frame (fp_A). Save it so the post-invoke fp-check can detect
+  // an exception that unwound past us (s0 != fp_A). Harmless for leaves that never
+  // invoke -- one extra store, and the fp-check is only emitted at real calls.
+  emit(Assembler::encode_sw(Assembler::fp, Assembler::sp, 4));
 }
 
 // In the C-interpreter hybrid the Java expression stack is g_jsp (s1), owned by
@@ -829,29 +866,61 @@ void CodeGenerator::d2f(Value& result, Value& value JVM_TRAPS) {
 
 // ---- invokes -----------------------------------------------------------------
 
-// Fase 3 (Marco 3.6b-inline): the shared front-end inlines small callees
-// (internal_compile_inlined) BEFORE reaching these emitters, reusing our existing
-// ops with no frame/call/unwind. These CodeGenerator::invoke* paths are the
-// NON-inlined REAL calls. Until the real-call machinery lands (Marco 3.6b-real:
-// jit_invoke helper + nested dispatch loop + option-B fp-check unwind), bail out of
-// the current compilation CLEANLY rather than crashing: abort_active_compilation is
-// the framework's own compile-time deopt (uncommon_trap uses it). An armed method
-// whose call does not inline then simply runs interpreted -- never a
-// SHOULD_NOT_REACH_HERE. The Fase-3 whitelist only arms static calls to inlinable
-// whitelisted leaves, so in practice inlining fires and these are not reached; the
-// abort is the safety net for the space/heuristic cases where it does not.
+// Fase 3 (Marco 3.6b-real): the REAL (non-inlined) resolved static call. The
+// shared front-end inlines small whitelisted callees (internal_compile_inlined,
+// Marco 3.6b-inline) BEFORE reaching here; this emitter handles the ones it does
+// NOT inline (callee too big / non-leaf -- bytecode_inline_prepass rejects them),
+// which the widened whitelist now admits precisely because they never inline.
+//
+// Emission (mirrors i386, but the frame/call/unwind protocol lives in C helpers):
+//   flush the VSF (args land in g_jsp memory; every value is marked flushed so the
+//   post-call reloads come from memory -- the C helper clobbering t0-t8 is safe) ->
+//   a0 = cpool index (compile-time constant, resolved at runtime against the caller
+//   frame's cpool by jit_invoke_static -> GC-safe, no oop literal), a1 = invoker
+//   size -> call jit_invoke_static -> adjust_for_invoke updates the model (pop
+//   params, push the memory-resident result) -> option-B fp-check.
+//
+// Only the resolved static call is compiled: a non-static direct call (receiver
+// null-check) and an invoke reached while inlining (the cpool index would not match
+// the single runtime frame's cpool) are barred by the whitelist and bail cleanly.
 void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRAPS) {
-  (void)method; (void)must_do_null_check;
-  // Diagnostic (one-shot): a reached invoke means the shared front-end did NOT
-  // inline this call. On the JitTest harness every whitelisted call targets a tiny
-  // inlinable leaf, so this line should NOT appear -- its absence confirms
-  // caller3/caller3b actually compiled with the callee inlined (vs silently
-  // aborting to the interpreter). In real games it will mark where the real-call
-  // path (Marco 3.6b-real) is needed.
+  if (must_do_null_check || Compiler::is_inlining()) {
+    { static bool _once = false; if (!_once) { _once = true;
+        tty->print_cr("[PS2ME-JIT] Fase 3: invoke unsupported here "
+                      "(null-check/inlining) -> abort compile"); } }
+    Compiler::abort_active_compilation(false JVM_THROW);
+  }
+
+  // Read the cpool index from the current invoke bytecode's operand in the (root)
+  // method being compiled. Not inlining here (guarded above) -> root == current.
+  Method* caller = root_method();
+  const jint at_bci = bci();
+  GUARANTEE(caller->ubyte_at(at_bci) == Bytecodes::_fast_invokestatic ||
+            caller->ubyte_at(at_bci) == Bytecodes::_fast_init_invokestatic,
+            "Marco 3.6b-real compiles only resolved static calls");
+  const jushort cp_index = (jushort)
+    (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
+
+  // Flush args + live temporaries to g_jsp memory (see header note on safety).
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic / _init_ length).
+  mips_li(this, Assembler::a0, (juint)cp_index);
+  mips_li(this, Assembler::a1, (juint)3);
+  mips_call_c(this, (address)jit_invoke_static);
+
+  // Model update: pop the parameter block, push the result (marked flushed to
+  // memory -- return_internal PUSHed it onto g_jsp, so later reads reload it).
+  Signature::Raw signature = method->signature();
+  frame()->adjust_for_invoke(method->size_of_parameters(),
+                             signature().return_type());
+
+  // Option-B unwind: eject if the callee unwound past this frame.
+  mips_emit_invoke_fp_check(this);
+
   { static bool _once = false; if (!_once) { _once = true;
-      tty->print_cr("[PS2ME-JIT] Fase 3: non-inlined invoke -> abort compile "
-                    "(real call = Marco 3.6b-real)"); } }
-  Compiler::abort_active_compilation(false JVM_THROW);
+      tty->print_cr("[PS2ME-JIT] Fase 3: non-inlined invoke -> REAL call emitted "
+                    "(Marco 3.6b-real)"); } }
 }
 
 void CodeGenerator::invoke_virtual(Method* method, int vtable_index,

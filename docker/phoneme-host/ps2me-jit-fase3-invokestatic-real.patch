@@ -1,0 +1,119 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2402,6 +2402,68 @@
+     interpreter_throw_ArrayIndexOutOfBoundsException();
+   }
+ 
++  // jit_invoke_static(): the REAL (non-inlined) resolved static call from compiled
++  // code (Marco 3.6b-real). The compiled caller emits this instead of the ARM/i386
++  // direct-call machinery (CodeGenerator::invoke): it resolves the callee from the
++  // caller frame's constant pool using the compile-time index (a constant, so no
++  // moveable oop is embedded in the code -- GC-safe), runs the static class-init
++  // barrier exactly as fast_invoke_internal's static path, saves the caller frame
++  // and invokes, then drives an INTERPRETED callee to completion with a nested
++  // dispatch loop. A COMPILED callee runs to completion inside invoke_java_method
++  // (jit_frame_enter -> body -> jit_return restores g_jfp = caller_fp) so the loop
++  // condition is already false and it does not iterate; an INTERPRETED callee's
++  // interpreter_method_entry only BUILDS the frame and returns, so the loop runs
++  // the callee body bytecode-by-bytecode (the same flat dispatch the top-level
++  // for(;;) uses), bounded by the caller frame.
++  //
++  // Option-B unwind: if the callee (or the class-init barrier) throws and the
++  // handler is a frame ABOVE this caller, find_exception_frame repositions g_jfp
++  // above caller_fp and clears the pending exception; the loop condition then fails
++  // and control returns to the compiled method, whose post-invoke fp-check (s0 !=
++  // fp_A) ejects via its bare epilogue. This generalizes the Marco 3.4a leaf-throw
++  // mechanism to multi-frame call chains WITHOUT longjmp (a longjmp would discard an
++  // interpreted-with-handler frame sandwiched between two compiled ones). The
++  // signal is g_jfp, never _current_pending_exception (that is cleared once a
++  // handler is found). JavaStackDirection < 0 -> a live callee frame has a SMALLER
++  // g_jfp than the caller, so the loop runs while g_jfp < caller_fp.
++  extern "C" void jit_invoke_static(int cpool_index, int invoker_size) {
++    address caller_fp = g_jfp;
++    address cpool = GET_FRAME(cpool);
++    address method = (address)get_from_cpool(cpool, (jushort)cpool_index);
++
++    // Static class-init barrier (fast_invoke_internal, has_fixed_target_method
++    // + !must_do_null_check path). A barrier that throws leaves g_jfp repositioned
++    // to the handler (above caller_fp) -> we return and the caller's fp-check ejects.
++    jushort class_id = get_holder_id(method);
++#if ENABLE_ISOLATES
++    address mirror = get_mirror_by_id(class_id);
++    if (mirror == get_cib_marker()) {
++      address klass = get_class_by_id(class_id);
++      if (interpreter_call_vm_1((address)task_barrier, T_OBJECT, (jint)klass)) {
++        return;
++      }
++      cpool = GET_FRAME(cpool);
++      method = (address)get_from_cpool(cpool, (jushort)cpool_index);
++    }
++#else
++    address klass = get_class_by_id(class_id);
++    if (!is_initialized_class(klass)) {
++      if (interpreter_call_vm_1((address)initialize_class, T_VOID, (jint)klass)) {
++        return;
++      }
++      cpool = GET_FRAME(cpool);
++      method = (address)get_from_cpool(cpool, (jushort)cpool_index);
++    }
++#endif
++
++    invoke_java_method(method, invoker_size);
++
++    // Drive an interpreted callee to completion (no-op for a compiled callee).
++    while ((address)g_jfp < caller_fp) {
++      interpreter_dispatch_table[*g_jpc]();
++    }
++  }
++
+ #if defined(PS2ME_JIT_FASE2)
+   // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
+   // non-native, non-synchronized) for compilation by pointing their execution
+@@ -2525,16 +2587,21 @@
+         case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
+         case Bytecodes::_goto:
+           l = 3; break;
+-        // Marco 3.6b-inline: resolved static call. The shared compiler inlines a
+-        // small whitelisted callee (internal_compile_inlined, reusing our int ops
+-        // with no frame/call); a non-inlinable one bails the compile cleanly
+-        // (CodeGenerator::invoke -> abort_active_compilation). Only allow it at the
+-        // top level (allow_invoke) and only when the resolved callee is a fully-
+-        // whitelisted LEAF: recurse with allow_invoke=false so the callee may not
+-        // itself invoke, bounding depth to 1 (the inline recursion emits the
+-        // callee's bytecodes through our backend -- each must be covered or it would
+-        // SHOULD_NOT_REACH_HERE). Raw (unresolved) _invokestatic stays off: it
+-        // re-arms once the rewriter quickens it to _fast_invokestatic.
++        // Marco 3.6b: resolved static call. Two safe shapes:
++        //  (a) INLINED (Marco 3.6b-inline): a small whitelisted LEAF is inlined by
++        //      the shared front-end (internal_compile_inlined, reusing our int ops
++        //      with no frame/call). The inline emits the callee's bytecodes through
++        //      our backend, so each MUST be covered -- require the callee to be a
++        //      fully-whitelisted leaf (recurse allow_invoke=false, bounding depth 1).
++        //  (b) REAL CALL (Marco 3.6b-real): a callee that bytecode_inline_prepass
++        //      NEVER inlines (code_size > 13, or non-leaf) is emitted as a real call
++        //      (CodeGenerator::invoke -> jit_invoke_static + nested dispatch loop +
++        //      option-B fp-check). Because it never inlines, its bytecodes never
++        //      pass through our backend -> coverage is NOT required; it runs via the
++        //      normal VM path (interpreted, or compiled if separately armed). This is
++        //      what lets a compiled method call arbitrary callees.
++        // Only at the top level (allow_invoke). Raw (unresolved) _invokestatic stays
++        // off: it re-arms once the rewriter quickens it to _fast_invokestatic.
+         case Bytecodes::_fast_invokestatic:
+         case Bytecodes::_fast_init_invokestatic: {
+           if (!allow_invoke) return false;
+@@ -2546,7 +2613,14 @@
+           if (get_access_flags(callee) & (JVM_ACC_NATIVE | JVM_ACC_SYNCHRONIZED)) {
+             return false;
+           }
+-          if (!jit_fase3_whitelisted(callee, false)) return false;
++          Method::Raw mc = (ReturnOop)callee;
++          // A callee bytecode_inline_prepass rejects (>13 bytes or has an invoke)
++          // NEVER inlines -> the real-call path handles it, coverage not required.
++          const bool never_inlined =
++            (mc().code_size() > 13) || !mc().is_leaf();
++          if (!never_inlined && !jit_fase3_whitelisted(callee, false)) {
++            return false;
++          }
+           l = 3; break;
+         }
+         default:

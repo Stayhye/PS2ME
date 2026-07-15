@@ -738,10 +738,31 @@ fi
 #     abort_active_compilation instead of crashing); (b) a compiled method may not
 #     catch, so an armed method must have no exception table; (c) the arm cap is
 #     raised 32 -> 64 to leave room for the new caller leaves. Interpreter_c.cpp is
-#     LF-only. Idempotent (guard on the 'Marco 3.6b-inline' whitelist marker). See
-#     references/JIT_PLAN.md §7.
-if ! grep -q 'Marco 3.6b-inline: resolved static call' "$INTERPC"; then
+#     LF-only. Idempotent (guard on the 'bool allow_invoke' signature marker, which
+#     #48 preserves -- the old 'Marco 3.6b-inline: resolved static call' comment is
+#     rewritten by #48). See references/JIT_PLAN.md §7.
+if ! grep -q 'bool allow_invoke' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokestatic.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
+# 48) ps2me-jit-fase3-invokestatic-real (PS2ME JIT, Fase 3, Marco 3.6b-real). Two
+#     additions to Interpreter_c.cpp ON TOP of #47: (a) the jit_invoke_static() glue
+#     -- the REAL (non-inlined) resolved static call from compiled code. It resolves
+#     the callee from the caller frame's cpool by a compile-time index (GC-safe, no
+#     oop literal), runs the static class-init barrier (fast_invoke_internal's path),
+#     saves the caller frame + invokes, then drives an INTERPRETED callee with a
+#     nested dispatch loop bounded by the caller frame (a compiled callee returns via
+#     jit_return so the loop does not iterate). Option-B unwind: an exception that
+#     repositions g_jfp above the caller frame ends the loop and the compiled
+#     method's post-invoke fp-check (CodeGenerator::invoke, git-tracked) ejects. (b)
+#     the whitelist now also admits fast_invokestatic whose callee bytecode_inline_
+#     prepass NEVER inlines (code_size > 13, or non-leaf): it always becomes a real
+#     call, never passes through our backend, so its bytecodes need no coverage.
+#     Gated PS2ME_JIT_FASE3 -> absent in production and the plain PS2ME_JIT build.
+#     Interpreter_c.cpp is LF-only. Idempotent (guard on jit_invoke_static). See
+#     references/JIT_PLAN.md §7.
+if ! grep -q 'jit_invoke_static' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokestatic-real.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
 echo "phoneME patches applied to: $PHONEME"
