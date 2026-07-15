@@ -159,6 +159,21 @@ public class JitTest {
         int callPriv(int a) { return priv(a) + 1; }                   // invokespecial priv
     }
 
+    // Marco 3.6c-vtable 2/3: _fast_invokevirtual (DYNAMIC dispatch on the receiver's
+    // vtable). callSound is ONE compiled leaf; a.sound() re-resolves at runtime via the
+    // receiver's vtable, so the SAME compiled code returns 101/102/103 for an Animal/
+    // Dog/Cat receiver -- proving true dynamic dispatch (the opposite of invokespecial's
+    // static binding). The receiver is a parameter (declared type Animal, not exact),
+    // so the type-info devirtualization does not fire even if it were on; on MIPS it is
+    // gated off anyway. callSound(null) throws NPE (backend receiver null-check -> 3.4a
+    // throw -> option-B unwind out of the compiled frame).
+    static class Animal {
+        int sound() { return 1; }
+    }
+    static final class Dog extends Animal { int sound() { return 2; } }   // override
+    static final class Cat extends Animal { int sound() { return 3; } }   // override
+    static int callSound(Animal a) { return a.sound() + 100; }            // invokevirtual
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -210,6 +225,9 @@ public class JitTest {
         // Marco 3.6c-vtable: _fast_invokespecial (super.m() + private) leaves.
         Derived der = new Derived();
         int cs = 0, cpv = 0;
+        // Marco 3.6c-vtable 2/3: _fast_invokevirtual (dynamic dispatch) leaves.
+        Animal animal = new Animal(); Dog dog = new Dog(); Cat cat = new Cat();
+        int vsnd = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -255,6 +273,7 @@ public class JitTest {
             vb = callVBig(adr, 5);     // invokevirtual_final -> real call fbig
             cs = der.callSuper();      // invokespecial super.who() -> Base.who()=1, +10
             cpv = der.callPriv(7);     // invokespecial private priv(7)=21, +1
+            vsnd = callSound(animal);  // invokevirtual -> Animal.sound()=1, +100 (warms leaf)
         }
 
         check("add(7,5)",      ra, 12);
@@ -402,6 +421,25 @@ public class JitTest {
         check("der.callPriv(7)",  cpv, 22);               // private priv(7)=21, +1
         check("der.callSuper() again", der.callSuper(), 11);  // compiled path, stable
         check("der.callPriv(11)", der.callPriv(11), 34);      // priv(11)=33, +1
+
+        // Marco 3.6c-vtable 2/3: _fast_invokevirtual. The SAME compiled callSound leaf
+        // (warmed with an Animal above) dispatches DYNAMICALLY on the receiver's vtable:
+        // Animal.sound()=1, Dog.sound()=2, Cat.sound()=3 -> 101/102/103. Different
+        // results from one compiled method PROVE runtime dispatch by the receiver.
+        check("callSound(animal)", vsnd, 101);            // Animal.sound()=1, +100
+        check("callSound(dog)",   callSound(dog), 102);   // Dog.sound()=2 (override), +100
+        check("callSound(cat)",   callSound(cat), 103);   // Cat.sound()=3 (override), +100
+        check("callSound(animal) again", callSound(animal), 101);  // stable base dispatch
+        // Receiver null-check: callSound(null) must throw NPE and unwind OUT of the
+        // compiled leaf's frame (backend null_check -> 3.4a throw -> option-B).
+        boolean vsndNpe = false;
+        try {
+            callSound(null);
+        } catch (NullPointerException e) {
+            vsndNpe = true;
+        }
+        check("callSound(null) throws NPE", vsndNpe ? 1 : 0, 1);
+        check("callSound(dog) post-throw", callSound(dog), 102);   // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

@@ -52,6 +52,10 @@ extern "C" void jit_invoke_static(int cpool_index, int invoker_size);
 // method pointer -- the static binding of invokespecial (e.g. the superclass for
 // super.m()). See CodeGenerator::invoke's helper branch.
 extern "C" void jit_invoke_special(int cpool_index, int invoker_size);
+// Marco 3.6c-vtable 2/3: virtual call (_fast_invokevirtual). Dispatches DYNAMICALLY
+// on the receiver's vtable (get_method_from_vtable), so an overriding subclass method
+// is chosen at runtime. Same (cpool_index, invoker_size) shape. See invoke_virtual.
+extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size);
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -969,10 +973,60 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
   }
 }
 
+// Fase 3 (Marco 3.6c-vtable 2/3): the REAL virtual call (_fast_invokevirtual). The
+// receiver's DYNAMIC type selects the method at runtime (unlike _final/special, which
+// bind statically). This mirrors CodeGenerator::invoke's real-call emission exactly,
+// but calls jit_invoke_virtual (which re-resolves via the receiver's vtable). The
+// type-info devirtualization fast-path is gated OFF on MIPS (BytecodeCompileClosure.
+// cpp), so fast_invoke_virtual ALWAYS lands here -- a real call, never an inline nor a
+// CodeGenerator::invoke direct-call -- keeping the whitelist's 100%-coverage invariant.
+// vtable_index is not needed by the emitter (the helper reads vindex from the cpool,
+// GC-safe); the receiver null-check is mandatory for a virtual call.
 void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
                                    BasicType return_type JVM_TRAPS) {
-  (void)method; (void)vtable_index; (void)return_type;
-  Compiler::abort_active_compilation(false JVM_THROW);
+  (void)vtable_index;
+  if (Compiler::is_inlining()) {
+    Compiler::abort_active_compilation(false JVM_THROW);
+    return;
+  }
+
+  // Read the cpool index from the current _fast_invokevirtual bytecode's operand in
+  // the (root) method being compiled (not inlining -> root == current).
+  Method* caller = root_method();
+  const jint at_bci = bci();
+  GUARANTEE(caller->ubyte_at(at_bci) == Bytecodes::_fast_invokevirtual,
+            "Marco 3.6c-vtable compiles _fast_invokevirtual here");
+  const jushort cp_index = (jushort)
+    (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
+
+  // Flush args + live temporaries to g_jsp memory (same safety note as invoke()).
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+
+  // Receiver null-check (a virtual call always has a receiver). After the flush the
+  // receiver (deepest arg) lives in g_jsp at arg_offset_from_sp(size_of_parameters-1);
+  // load and null_check it (reuses the 3.4a inline throw path -> NPE unwinds out).
+  {
+    Value receiver(T_OBJECT);
+    receiver.set_register(RegisterAllocator::allocate());
+    emit(Assembler::encode_lw(receiver.lo_register(), Assembler::jsp,
+             JavaFrame::arg_offset_from_sp(method->size_of_parameters() - 1)));
+    null_check(receiver JVM_CHECK);
+  }   // receiver Value destructs here -> frees its register
+
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokevirtual length).
+  mips_li(this, Assembler::a0, (juint)cp_index);
+  mips_li(this, Assembler::a1, (juint)3);
+  mips_call_c(this, (address)jit_invoke_virtual);
+
+  // Model update: pop the parameter block, push the memory-resident result.
+  frame()->adjust_for_invoke(method->size_of_parameters(), return_type);
+
+  // Option-B unwind: eject if the callee unwound past this frame.
+  mips_emit_invoke_fp_check(this);
+
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: _fast_invokevirtual -> jit_invoke_virtual "
+                    "emitted (Marco 3.6c-vtable 2/3)"); } }
 }
 
 void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,

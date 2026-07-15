@@ -803,4 +803,26 @@ if ! grep -q 'jit_invoke_special' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokespecial.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 51) ps2me-jit-fase3-invokevirtual (PS2ME JIT, Fase 3, Marco 3.6c-vtable 2/3). TWO
+#     files ON TOP of #50: (a) BytecodeCompileClosure.cpp -- gate the type-info
+#     devirtualization fast-path in fast_invoke_virtual OFF on MIPS
+#     (`#if ENABLE_COMPILER_TYPE_INFO && !defined(MIPS)`). With it ON a known-exact
+#     receiver would do_direct_invoke() the concrete callee, which may INLINE an
+#     uncovered method (bail-out = crash) or land in CodeGenerator::invoke tagged with
+#     _fast_invokevirtual (cpool = vindex+klazz_id, not a method pointer). Gating it off
+#     keeps invokevirtual ALWAYS lowering through __ invoke_virtual -> jit_invoke_virtual
+#     (dynamic vtable dispatch, always covered); phoneME supports
+#     ENABLE_COMPILER_TYPE_INFO=0 and the fall-through is that config's exact path.
+#     (b) Interpreter_c.cpp -- the jit_invoke_virtual() glue (mirrors
+#     fast_invoke_internal's !has_fixed_target branch: resolve the callee via the
+#     RECEIVER's vtable = get_method_from_vtable, so an overriding subclass method is
+#     chosen at runtime; receiver null-checked in the backend) + the whitelist now
+#     admits _fast_invokevirtual (never inlines -> real call, no callee coverage). The
+#     backend CodeGenerator::invoke_virtual emission is git-tracked (overlay mips).
+#     Gated PS2ME_JIT_FASE3. Both files LF-only. Idempotent (guard on jit_invoke_virtual;
+#     the patch applies both files atomically). See references/JIT_PLAN.md §7.
+if ! grep -q 'jit_invoke_virtual' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokevirtual.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
