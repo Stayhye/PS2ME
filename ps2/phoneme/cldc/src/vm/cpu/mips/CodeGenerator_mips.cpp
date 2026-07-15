@@ -56,6 +56,10 @@ extern "C" void jit_invoke_special(int cpool_index, int invoker_size);
 // on the receiver's vtable (get_method_from_vtable), so an overriding subclass method
 // is chosen at runtime. Same (cpool_index, invoker_size) shape. See invoke_virtual.
 extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size);
+// Marco 3.6c-vtable 3/3: interface call (_fast_invokeinterface). Dynamic dispatch via
+// the receiver's itable (linear search of the interface class_id). Takes num_params
+// (not invoker_size -- the length 5 is fixed inside the helper). See invoke_interface.
+extern "C" void jit_invoke_interface(int cpool_index, int num_params);
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
 // instruction for values that fit a signed/zero-extended 16-bit field, else
@@ -1029,11 +1033,56 @@ void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
                     "emitted (Marco 3.6c-vtable 2/3)"); } }
 }
 
+// Fase 3 (Marco 3.6c-vtable 3/3): the REAL interface call (_fast_invokeinterface).
+// Dynamic dispatch via the receiver's itable. Mirrors invoke_virtual's emission but
+// calls jit_invoke_interface, and passes parameters_size (the interface bytecode's arg
+// count) as the receiver-locating index -- the helper reads method_index/class_id from
+// the cpool and computes the fixed invoker size 5 itself. klass/itable_index are not
+// needed by the emitter (the helper resolves the itable at runtime, GC-safe).
 void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
                                      int parameters_size,
                                      BasicType return_type JVM_TRAPS) {
-  (void)klass; (void)itable_index; (void)parameters_size; (void)return_type;
-  Compiler::abort_active_compilation(false JVM_THROW);
+  (void)klass; (void)itable_index;
+  if (Compiler::is_inlining()) {
+    Compiler::abort_active_compilation(false JVM_THROW);
+    return;
+  }
+
+  // Read the cpool index from the current _fast_invokeinterface bytecode's operand.
+  Method* caller = root_method();
+  const jint at_bci = bci();
+  GUARANTEE(caller->ubyte_at(at_bci) == Bytecodes::_fast_invokeinterface,
+            "Marco 3.6c-vtable compiles _fast_invokeinterface here");
+  const jushort cp_index = (jushort)
+    (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
+
+  // Flush args + live temporaries to g_jsp memory (same safety note as invoke()).
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+
+  // Receiver null-check: after flush the receiver (deepest arg) lives in g_jsp at
+  // arg_offset_from_sp(parameters_size - 1). parameters_size includes the receiver.
+  {
+    Value receiver(T_OBJECT);
+    receiver.set_register(RegisterAllocator::allocate());
+    emit(Assembler::encode_lw(receiver.lo_register(), Assembler::jsp,
+             JavaFrame::arg_offset_from_sp(parameters_size - 1)));
+    null_check(receiver JVM_CHECK);
+  }   // receiver Value destructs here -> frees its register
+
+  // a0 = cpool index, a1 = num_params (the helper uses the fixed invoker size 5).
+  mips_li(this, Assembler::a0, (juint)cp_index);
+  mips_li(this, Assembler::a1, (juint)parameters_size);
+  mips_call_c(this, (address)jit_invoke_interface);
+
+  // Model update: pop the parameter block, push the memory-resident result.
+  frame()->adjust_for_invoke(parameters_size, return_type);
+
+  // Option-B unwind: eject if the callee unwound past this frame.
+  mips_emit_invoke_fp_check(this);
+
+  { static bool _once = false; if (!_once) { _once = true;
+      tty->print_cr("[PS2ME-JIT] Fase 3: _fast_invokeinterface -> jit_invoke_interface "
+                    "emitted (Marco 3.6c-vtable 3/3)"); } }
 }
 
 void CodeGenerator::invoke_native(BasicType return_kind, address entry JVM_TRAPS) {

@@ -174,6 +174,16 @@ public class JitTest {
     static final class Cat extends Animal { int sound() { return 3; } }   // override
     static int callSound(Animal a) { return a.sound() + 100; }            // invokevirtual
 
+    // Marco 3.6c-vtable 3/3: _fast_invokeinterface (DYNAMIC dispatch via the receiver's
+    // itable). callGreet is ONE compiled leaf; g.greet() linear-searches the receiver
+    // class's itable for the Greeter interface at runtime, so the SAME compiled code
+    // returns 207/208 for a Hi/Yo receiver. callGreet(null) throws NPE (backend receiver
+    // null-check -> option-B unwind).
+    interface Greeter { int greet(); }
+    static final class Hi implements Greeter { public int greet() { return 7; } }
+    static final class Yo implements Greeter { public int greet() { return 8; } }
+    static int callGreet(Greeter g) { return g.greet() + 200; }          // invokeinterface
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -228,6 +238,9 @@ public class JitTest {
         // Marco 3.6c-vtable 2/3: _fast_invokevirtual (dynamic dispatch) leaves.
         Animal animal = new Animal(); Dog dog = new Dog(); Cat cat = new Cat();
         int vsnd = 0;
+        // Marco 3.6c-vtable 3/3: _fast_invokeinterface (itable dispatch) leaves.
+        Greeter hi = new Hi(); Greeter yo = new Yo();
+        int vgrt = 0;
         for (int i = 0; i < 8; i++) {
             ra = add(7, 5);
             rs = sub(7, 5);
@@ -274,6 +287,7 @@ public class JitTest {
             cs = der.callSuper();      // invokespecial super.who() -> Base.who()=1, +10
             cpv = der.callPriv(7);     // invokespecial private priv(7)=21, +1
             vsnd = callSound(animal);  // invokevirtual -> Animal.sound()=1, +100 (warms leaf)
+            vgrt = callGreet(hi);      // invokeinterface -> Hi.greet()=7, +200 (warms leaf)
         }
 
         check("add(7,5)",      ra, 12);
@@ -440,6 +454,24 @@ public class JitTest {
         }
         check("callSound(null) throws NPE", vsndNpe ? 1 : 0, 1);
         check("callSound(dog) post-throw", callSound(dog), 102);   // resumes clean
+
+        // Marco 3.6c-vtable 3/3: _fast_invokeinterface. The SAME compiled callGreet leaf
+        // (warmed with a Hi above) dispatches via the receiver's itable: Hi.greet()=7,
+        // Yo.greet()=8 -> 207/208. Different results from one compiled method prove
+        // runtime interface dispatch (linear itable search).
+        check("callGreet(hi)",  vgrt, 207);               // Hi.greet()=7, +200
+        check("callGreet(yo)",  callGreet(yo), 208);      // Yo.greet()=8, +200
+        check("callGreet(hi) again", callGreet(hi), 207); // stable itable dispatch
+        // Receiver null-check: callGreet(null) must throw NPE and unwind OUT of the
+        // compiled leaf's frame (backend null_check -> 3.4a throw -> option-B).
+        boolean vgrtNpe = false;
+        try {
+            callGreet(null);
+        } catch (NullPointerException e) {
+            vgrtNpe = true;
+        }
+        check("callGreet(null) throws NPE", vgrtNpe ? 1 : 0, 1);
+        check("callGreet(yo) post-throw", callGreet(yo), 208);     // resumes clean
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

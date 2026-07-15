@@ -825,4 +825,23 @@ if ! grep -q 'jit_invoke_virtual' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokevirtual.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 52) ps2me-jit-fase3-invokeinterface (PS2ME JIT, Fase 3, Marco 3.6c-vtable 3/3). One
+#     addition to Interpreter_c.cpp ON TOP of #51: the jit_invoke_interface() glue --
+#     the REAL interface call from compiled code. Mirrors bc_impl_fast_invokeinterface:
+#     read method_index+class_id from the cpool, take the receiver (OBJ_PEEK(num_params-
+#     1), null-checked in the backend), two indirections to its class, LINEAR-SEARCH the
+#     receiver class's itable for the interface class_id, pick table[method_index], then
+#     invoke_java_method + the nested dispatch loop. num_params is passed in (the interp
+#     reads it from the bytecode via GET_BYTE(2), but g_jpc does not advance in compiled
+#     code); the invoker size is the fixed length 5. A class not implementing the
+#     interface raises IncompatibleClassChangeError the interp's own way. The whitelist
+#     now admits _fast_invokeinterface (never inlines -> real call, no callee coverage).
+#     The backend CodeGenerator::invoke_interface emission is git-tracked (overlay mips).
+#     No BytecodeCompileClosure change needed (invoke_interface never devirtualizes/
+#     inlines). Gated PS2ME_JIT_FASE3. Interpreter_c.cpp is LF-only. Idempotent (guard
+#     on jit_invoke_interface). See references/JIT_PLAN.md §7.
+if ! grep -q 'jit_invoke_interface' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase3-invokeinterface.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

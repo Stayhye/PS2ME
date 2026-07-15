@@ -1,0 +1,72 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2529,6 +2529,53 @@
+     }
+   }
+ 
++  // jit_invoke_interface(): the REAL interface call from compiled code (Marco
++  // 3.6c-vtable 3/3). Mirrors bc_impl_fast_invokeinterface: read method_index+class_id
++  // from the cpool, take the receiver (OBJ_PEEK(num_params-1); backend already
++  // null-checked it), two indirections to its class, then LINEAR-SEARCH the receiver
++  // class's itable for the interface class_id and pick table[method_index]. num_params
++  // is passed in (the interpreter reads it from the bytecode via GET_BYTE(2), but g_jpc
++  // does not advance in compiled code); invoker_size is the fixed invokeinterface
++  // length 5. A class that does not implement the interface raises
++  // IncompatibleClassChangeError the interp's own way (find_exception_frame unwinds ->
++  // caller fp-check ejects). After resolution: invoke_java_method + the nested dispatch
++  // loop bounded by the caller frame.
++  extern "C" void jit_invoke_interface(int cpool_index, int num_params) {
++    address caller_fp = g_jfp;
++    address cpool = GET_FRAME(cpool);
++    jushort method_index = first_ushort_from_cpool(cpool, (jushort)cpool_index);
++    jushort class_id     = second_ushort_from_cpool(cpool, (jushort)cpool_index);
++
++    address receiver = OBJ_PEEK(num_params - 1);   // non-null (backend null-checked)
++    receiver = *(address*)receiver;
++    receiver = *(address*)receiver;
++
++    address ci = *(address*)(receiver + JavaClass::class_info_offset());
++    jushort vlength = *(jushort*)(ci + ClassInfo::vtable_length_offset());
++    jint    ilength = *(jushort*)(ci + ClassInfo::itable_length_offset());
++
++    address itable;
++    for (itable = ci + ClassInfoDesc::header_size() + vlength * 4; ; ilength--) {
++      if (ilength <= 0) {
++        interpreter_throw_IncompatibleClassChangeError();
++        return;
++      }
++      if (class_id == int_from_addr(itable)) {
++        break;
++      }
++      itable += 8;
++    }
++    address table = int_from_addr(itable + 4) + ci;
++    address method = *(address*)(table + method_index * 4);
++
++    invoke_java_method(method, 5);
++
++    // Drive an interpreted callee to completion (no-op for a compiled callee).
++    while ((address)g_jfp < caller_fp) {
++      interpreter_dispatch_table[*g_jpc]();
++    }
++  }
++
+ #if defined(PS2ME_JIT_FASE2)
+   // Fase 2 trigger. Arms trivial empty-void methods (single `return` bytecode,
+   // non-native, non-synchronized) for compilation by pointing their execution
+@@ -2723,6 +2770,15 @@
+         case Bytecodes::_fast_invokevirtual:
+           if (!allow_invoke) return false;
+           l = 3; break;
++        // Marco 3.6c-vtable 3/3: _fast_invokeinterface (dynamic dispatch via the
++        // receiver's itable). Resolves via method_index+class_id from the cpool (not
++        // get_from_cpool) and NEVER inlines (invoke_interface lowers straight through
++        // __ invoke_interface -> CodeGenerator::invoke_interface -> jit_invoke_interface,
++        // a real call). Callee coverage not required. Length 5 ("bjj__": index + count +
++        // 0). Accept at the top level.
++        case Bytecodes::_fast_invokeinterface:
++          if (!allow_invoke) return false;
++          l = 5; break;
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }
