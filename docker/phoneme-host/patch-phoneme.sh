@@ -933,4 +933,29 @@ if ! grep -q 'Fase 5 (bail-limpo self-test): idiv' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-bailtest-whitelist.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 58) ps2me-jit-fase5-passo2a-whitelist (PS2ME JIT, Fase 5 -- PASSO 2, sub-marco 2A).
+#     THREE edits to Interpreter_c.cpp ON TOP of #57, the production-widening of the arm
+#     whitelist so REAL game methods qualify (not just the JitTest leaves): (a) the
+#     allow-list admits common bytecodes the r5900 backend ALREADY covers -- nop,
+#     aconst_null, pop/pop2/dup2/dup_x1/dup2_x1/dup_x2/dup2_x2/swap (pure VSF stack ops),
+#     astore_0, the void return, and areturn. All verified fail-SAFE (an allow-list only
+#     ever forfeits an optimization, never crashes); the SEM-JVM_TRAPS points that still
+#     lack a clean abort (long/double load/store, lreturn/dreturn, ldc of an object
+#     literal, long/double fields) are DELIBERATELY kept off. (b) the arm cap
+#     JIT_FASE3_MAX_ARMED 80 -> 512 so a game's many hot methods can arm (the compiler
+#     area's soft-collect evicts the cold ones under pressure). (c) jit_fase3_arm gains a
+#     `if (m().is_impossible_to_compile()) return;` guard: a method that bailed the
+#     compilation permanently (idiv/newarray test entries, or float once real games
+#     arrive) must NOT be re-armed. Without it the entry reverts to the interpreter after
+#     the bail and jit_fase3_arm re-arms it every invocation -> compile -> bail -> repeat
+#     (observed on real HW: one system newarray method re-armed 63x; the arm-and-bail is
+#     now a ONE-shot per method). The arm mechanism is A) arm-on-entry (reuses
+#     shared_invoke_compiler; UseCompiler stays dormant). The idiv/newarray TEST-ONLY
+#     entries (#57) stay for now (the harness still exercises the bail, now one-shot);
+#     they come out for the game build (sub-marco 2B). Interpreter_c.cpp is LF-only.
+#     Idempotent (guard on the PASSO-2 marker). See references/JIT_PLAN.md §7.
+if ! grep -q 'PASSO 2 (sub-marco 2A)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-passo2a-whitelist.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

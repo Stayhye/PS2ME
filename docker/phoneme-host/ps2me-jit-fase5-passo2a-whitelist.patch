@@ -1,0 +1,69 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2915,6 +2915,36 @@
+         case Bytecodes::_fast_checkcast:
+         case Bytecodes::_fast_instanceof:
+           l = 3; break;
++        // PASSO 2 (sub-marco 2A): broaden the allow-list with common bytecodes the
++        // r5900 backend ALREADY covers, so real game methods (not just JitTest leaves)
++        // qualify. All fail-SAFE (verified against the backend): pure VSF stack ops
++        // (pop/pop2/dup2/dup_x1/dup2_x1/dup_x2/dup2_x2/swap emit nothing -- they are
++        // frame()->pop()/dup2()/... in BytecodeCompileClosure); nop; the void return
++        // (return_void, covered since Fase 2) and areturn (return_result takes any
++        // one-word value); aconst_null (set_obj(NULL) parks a T_IMMEDIATE 0 ->
++        // materialized as `li 0`, NOT the move(Value,Oop*) SHOULD_NOT_REACH_HERE that a
++        // NON-null ldc would hit); astore_0 (reference store to local 0, like
++        // astore_1..3). DELIBERATELY NOT added (they reach the still-uncovered
++        // SEM-JVM_TRAPS points where clean abort is unavailable -> would crash):
++        // long/double loads/stores, lreturn/dreturn (two-word -> return_result's
++        // one-word GUARANTEE), ldc/ldc_w of an object literal (move(Value,Oop*)), and
++        // long/double instance fields. This is an ALLOW-list (fail-safe): a forgotten
++        // covered bytecode only forfeits an optimization; it can never crash. All are
++        // single-byte (no operands) -> length 1.
++        case Bytecodes::_nop:
++        case Bytecodes::_aconst_null:
++        case Bytecodes::_pop:
++        case Bytecodes::_pop2:
++        case Bytecodes::_dup2:
++        case Bytecodes::_dup_x1:
++        case Bytecodes::_dup2_x1:
++        case Bytecodes::_dup_x2:
++        case Bytecodes::_dup2_x2:
++        case Bytecodes::_swap:
++        case Bytecodes::_astore_0:
++        case Bytecodes::_return:
++        case Bytecodes::_areturn:
++          l = 1; break;
+         // Fase 5 (bail-limpo self-test): idiv and newarray are NOT emitted by the
+         // r5900 backend -- they are admitted here ONLY to prove the clean compile
+         // bail-out. A method containing one is armed and the backend starts compiling
+@@ -2935,7 +2965,11 @@
+     return true;
+   }
+ 
+-  enum { JIT_FASE3_MAX_ARMED = 80 };
++  // PASSO 2 (sub-marco 2A): raised 80 -> 512 so a real game (many hot methods) can
++  // arm well beyond the tiny JitTest set. The compiler area's own soft-collect evicts
++  // the least-used compiled methods under pressure, so this is a runaway backstop, not
++  // a working-set limit. (Still finite -- an unbounded arm loop would be a bug.)
++  enum { JIT_FASE3_MAX_ARMED = 512 };
+   static int jit_fase3_armed_count = 0;
+   void jit_fase3_arm(address method) {
+     if (Universe::before_main()) return;
+@@ -2944,6 +2978,16 @@
+     if (!jit_fase3_whitelisted(method, true)) return;
+     Method::Raw m = (ReturnOop)method;
+     if (m().has_compiled_code()) return;                    // already compiled
++    // PASSO 2 (sub-marco 2A): do NOT re-arm a method that has already bailed the
++    // compilation permanently. A method containing a not-yet-emitted op (e.g. the
++    // idiv/newarray test entries, or float once real games arrive) arms, the backend
++    // aborts with is_permanent=true -> set_impossible_to_compile, and its entry reverts
++    // to the interpreter. Without this guard jit_fase3_arm would re-arm it on the next
++    // invocation -> compile -> bail -> repeat, an endless arm/bail cycle (observed on
++    // real HW: one system newarray method re-armed 63x, vs 1x here). The bail is now a
++    // ONE-shot per method: arm, bail, stay interpreted. (has_compiled_code catches the
++    // success case; this catches the permanent-failure case.)
++    if (m().is_impossible_to_compile()) return;             // bailed permanently
+     if (m().execution_entry() == (address)shared_invoke_compiler) return; // armed
+     jit_fase3_armed_count++;
+     m().set_execution_entry((address)shared_invoke_compiler);
