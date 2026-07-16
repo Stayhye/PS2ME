@@ -1,0 +1,218 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2390,6 +2390,25 @@
+     return_internal(T_VOID);
+   }
+ 
++  // Fase 5 PASSO 2B (GC SAFEPOINT): the C-interpreter hybrid scans a COMPILED frame
++  // as if interpreted -- JavaFrame::gc_prologue takes the interpreted branch under
++  // ENABLE_C_INTERPRETER and generates the stackmap at bci(). jit_frame_enter parked
++  // g_jpc at the method base (bci=0) and compiled code never advances it, so the GC
++  // would use the ENTRY stackmap (only argument objects, an empty expression stack)
++  // and MISS any object created/derived that is live on the expression stack or in a
++  // local across this GC point -> the object is not a root -> moved/collected -> the
++  // compiled method reloads a stale pointer -> spurious NPE/crash (seen booting a real
++  // MIDlet). Fix: before every operation that can GC, set g_jpc to the CURRENT
++  // bytecode's bci so the GC uses the correct stackmap. invoke_java_method saves this
++  // as the caller frame's bcp_store, so a GC deeper in the callee also scans this frame
++  // correctly. GET_FRAME(method) is the compiled caller's method (g_jfp points at its
++  // frame when the helper runs) and is GC-relocated, so it stays valid across the GC.
++  static void jit_set_safepoint_bcp(int bci) {
++    g_jpc = GET_FRAME(method) + Method::base_offset() + bci;
++    { static bool _once = false; if (!_once) { _once = true;
++        tty->print_cr("[PS2ME-JIT] Fase 5: GC safepoint bcp ACTIVE (safepoints build)"); } }
++  }
++
+   // jit_timer_tick(): backward-branch (loop) timer check for compiled methods
+   // (Marco 3.2b). Replicates the interpreter's own check_timer_tick(): when a
+   // pending real-time tick is set, run the VM's timer_tick (which may switch
+@@ -2397,8 +2416,10 @@
+   // flushes the VirtualStackFrame to memory (g_jlocals/g_jsp) before calling
+   // this, so no Java value lives in a caller-saved register across the call and
+   // the Java frame is consistent for GC/thread-switch. When no tick is pending
+-  // (the common case) this is a single memory load + return.
+-  extern "C" void jit_timer_tick() {
++  // (the common case) this is a single memory load + return. The bci is set as
++  // the safepoint bcp so a GC/thread-switch scans this loop frame correctly.
++  extern "C" void jit_timer_tick(int bci) {
++    jit_set_safepoint_bcp(bci);
+     check_timer_tick();
+   }
+ 
+@@ -2427,7 +2448,8 @@
+   // frame repositions g_jfp for the compiled caller's option-B fp-check to eject, so
+   // the bool result is unused here (g_jfp is the signal). The three operands are
+   // passed in registers (the compiled backend loaded them from g_jsp before the call).
+-  extern "C" void jit_array_store_check(address ref, address obj, jint idx) {
++  extern "C" void jit_array_store_check(address ref, address obj, jint idx, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (type_check may GC/throw)
+     (void)type_check(ref, obj, idx);
+   }
+ 
+@@ -2446,7 +2468,8 @@
+   // find_exception_frame has repositioned g_jfp -> the compiled caller's fp-check
+   // ejects and the (unused) return value does not matter. On success the fresh oop is
+   // in the thread's obj_value slot (shared_call_vm_internal stored it there).
+-  extern "C" address jit_new(int class_id) {
++  extern "C" address jit_new(int class_id, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (_newobject allocates -> may GC)
+     address klass = get_class_by_id((jushort)class_id);
+     if (interpreter_call_vm_1((address)&_newobject, T_OBJECT, (jint)klass)) {
+       return NULL;                       // OOM: g_jfp repositioned, caller fp-check ejects
+@@ -2472,7 +2495,8 @@
+   // (a null object always passes). The throw goes through the interp's own path
+   // (interpreter_throw_ClassCastException -> call_vm), which runs find_exception_frame
+   // and repositions g_jfp so the compiled caller's option-B fp-check ejects.
+-  extern "C" void jit_checkcast(int class_id) {
++  extern "C" void jit_checkcast(int class_id, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (may throw CCE -> unwind)
+     address object = OBJ_PEEK(0);
+     if (object == NULL) {
+       return;                            // null passes checkcast
+@@ -2509,7 +2533,8 @@
+   // signal is g_jfp, never _current_pending_exception (that is cleared once a
+   // handler is found). JavaStackDirection < 0 -> a live callee frame has a SMALLER
+   // g_jfp than the caller, so the loop runs while g_jfp < caller_fp.
+-  extern "C" void jit_invoke_static(int cpool_index, int invoker_size) {
++  extern "C" void jit_invoke_static(int cpool_index, int invoker_size, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (class-init barrier / callee may GC)
+     address caller_fp = g_jfp;
+     address cpool = GET_FRAME(cpool);
+     address method = (address)get_from_cpool(cpool, (jushort)cpool_index);
+@@ -2562,7 +2587,8 @@
+   // then the nested dispatch loop bounded by the caller frame (drives an interpreted
+   // callee, no-op for a compiled one), then the caller's post-invoke option-B
+   // fp-check ejects if the callee unwound past this frame.
+-  extern "C" void jit_invoke_special(int cpool_index, int invoker_size) {
++  extern "C" void jit_invoke_special(int cpool_index, int invoker_size, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (callee may GC)
+     address caller_fp = g_jfp;
+     address cpool = GET_FRAME(cpool);
+     jushort vindex   = first_ushort_from_cpool(cpool, (jushort)cpool_index);
+@@ -2591,7 +2617,8 @@
+   // NULL_CHECK). After resolution the machinery is identical to jit_invoke_static:
+   // invoke_java_method + the nested dispatch loop bounded by the caller frame, then
+   // the caller's post-invoke option-B fp-check ejects if the callee unwound past it.
+-  extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size) {
++  extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (callee may GC)
+     address caller_fp = g_jfp;
+     address cpool = GET_FRAME(cpool);
+     jushort vindex   = first_ushort_from_cpool(cpool, (jushort)cpool_index);
+@@ -2623,7 +2650,8 @@
+   // IncompatibleClassChangeError the interp's own way (find_exception_frame unwinds ->
+   // caller fp-check ejects). After resolution: invoke_java_method + the nested dispatch
+   // loop bounded by the caller frame.
+-  extern "C" void jit_invoke_interface(int cpool_index, int num_params) {
++  extern "C" void jit_invoke_interface(int cpool_index, int num_params, int bci) {
++    jit_set_safepoint_bcp(bci);          // GC safepoint (callee may GC)
+     address caller_fp = g_jfp;
+     address cpool = GET_FRAME(cpool);
+     jushort method_index = first_ushort_from_cpool(cpool, (jushort)cpool_index);
+@@ -2700,6 +2728,24 @@
+   // never a SHOULD_NOT_REACH_HERE bail-out. The whitelist is the safety gate;
+   // no class-name check is needed (the JitTest harness leaves are the methods
+   // that match, and its main()/check() carry invokes and stay out).
++  // Fase 5 PASSO 2B (confirmation test): the C-interpreter hybrid scans a compiled
++  // frame as if interpreted at bci=0 (jit_frame_enter parks g_jpc at the method
++  // base and compiled code never advances it), so the GC uses the ENTRY stackmap
++  // -- which sees only the argument objects, an empty expression stack. Any object
++  // created/derived and kept live across a GC point (new kept live over an invoke,
++  // an invoke result stored in a local, an object on the expression stack during a
++  // call) is invisible to the GC -> moved/collected -> stale pointer -> spurious
++  // NPE (seen booting a real MIDlet). To CONFIRM this root cause, gate out every
++  // bytecode that can trigger a GC while the method runs: invokes (callee may GC),
++  // new/newarray (allocate), aastore (array_store_check via call_vm), and BACKWARD
++  // branches (loops -> jit_timer_tick -> thread-switch GC). A method with none of
++  // these cannot cause a GC on its normal path, so its live objects are never moved
++  // mid-execution -> GC-safe under the bci=0 scan. If the game then boots, the
++  // hypothesis is proven; the real fix is per-GC-point g_jpc safepoints.
++// Now 0: the GC-point safepoints (jit_set_safepoint_bcp in the helpers) make the
++// FULL whitelist GC-correct, so we no longer need to gate out invoke/new/loop. Set
++// back to 1 to fall back to the restricted allow-list (confirmation/mitigation).
++#define JIT_FASE5_GC_SAFE_ONLY 0
+   static bool jit_fase3_whitelisted(address method, bool allow_invoke) {
+     Method::Raw m = (ReturnOop)method;
+     // Marco 3.6b: a compiled method never installs an exception handler (we do not
+@@ -2776,7 +2822,11 @@
+         // (CodeGenerator::type_check -> jit_array_store_check helper -> the interp's
+         // array_store_type_check, which raises ArrayStoreException + option-B unwind).
+         case Bytecodes::_aaload:
++          l = 1; break;
+         case Bytecodes::_aastore:
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // aastore -> jit_array_store_check (call_vm) = GC point
++#endif
+           l = 1; break;
+         // Marco 3.4a: object local load (the array reference) + arraylength.
+         // arraylength emits a null_check (inline test + branch to the helper-C
+@@ -2810,8 +2860,16 @@
+         case Bytecodes::_if_icmpeq: case Bytecodes::_if_icmpne:
+         case Bytecodes::_if_icmplt: case Bytecodes::_if_icmpge:
+         case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
+-        case Bytecodes::_goto:
++        case Bytecodes::_goto: {
++#if JIT_FASE5_GC_SAFE_ONLY
++          // A backward branch (loop) emits check_timer_tick -> jit_timer_tick, a
++          // GC point (thread switch). Exclude negative-offset branches for the test.
++          const jshort branch_off = (jshort)(((jint)m().ubyte_at(bci + 1) << 8)
++                                             | (jint)m().ubyte_at(bci + 2));
++          if (branch_off < 0) return false;
++#endif
+           l = 3; break;
++        }
+         // Marco 3.6b: resolved static call. Two safe shapes:
+         //  (a) INLINED (Marco 3.6b-inline): a small whitelisted LEAF is inlined by
+         //      the shared front-end (internal_compile_inlined, reusing our int ops
+@@ -2838,6 +2896,9 @@
+         case Bytecodes::_fast_invokestatic:
+         case Bytecodes::_fast_init_invokestatic:
+         case Bytecodes::_fast_invokevirtual_final: {
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // invoke = GC point (callee may allocate/GC)
++#endif
+           if (!allow_invoke) return false;
+           const jushort cp_index = (jushort)
+             (((jint)m().ubyte_at(bci + 1) << 8) | (jint)m().ubyte_at(bci + 2));
+@@ -2869,6 +2930,9 @@
+         // required. Accept at the top level; the backend (CodeGenerator::invoke)
+         // routes it to jit_invoke_special (dynamic-vtable resolution).
+         case Bytecodes::_fast_invokespecial:
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // invoke = GC point
++#endif
+           if (!allow_invoke) return false;
+           l = 3; break;
+         // Marco 3.6c-vtable 2/3: _fast_invokevirtual (dynamic dispatch on the
+@@ -2881,6 +2945,9 @@
+         // Coverage of the callee is not required (it runs the normal VM path). Accept
+         // at the top level.
+         case Bytecodes::_fast_invokevirtual:
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // invoke = GC point
++#endif
+           if (!allow_invoke) return false;
+           l = 3; break;
+         // Marco 3.6c-vtable 3/3: _fast_invokeinterface (dynamic dispatch via the
+@@ -2890,6 +2957,9 @@
+         // a real call). Callee coverage not required. Length 5 ("bjj__": index + count +
+         // 0). Accept at the top level.
+         case Bytecodes::_fast_invokeinterface:
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // invoke = GC point
++#endif
+           if (!allow_invoke) return false;
+           l = 5; break;
+         // Marco 3.8: object allocation + type checks. `new` quickens to _fast_new or
+@@ -2912,6 +2982,11 @@
+           l = 2; break;
+         case Bytecodes::_fast_new:
+         case Bytecodes::_fast_init_new:
++#if JIT_FASE5_GC_SAFE_ONLY
++          return false;   // new = heap allocation = GC point
++#endif
++          // fall through: checkcast/instanceof only allocate on the failing path
++          // (ClassCastException), so on the normal path they are not GC points.
+         case Bytecodes::_fast_checkcast:
+         case Bytecodes::_fast_instanceof:
+           l = 3; break;

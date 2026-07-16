@@ -30,7 +30,7 @@
 extern "C" void jit_frame_enter();
 extern "C" void jit_return_int(jint result);
 extern "C" void jit_return_void();
-extern "C" void jit_timer_tick();       // Marco 3.2b: backward-branch timer check
+extern "C" void jit_timer_tick(int bci); // Marco 3.2b: backward-branch timer check (+GC safepoint bci)
 // Marco 3.4a: runtime-exception throw helpers. Thin wrappers over the C
 // interpreter's own interpreter_throw_* (Interpreter_c.cpp, patch #44): allocate
 // the exception, run find_exception_frame over the g_jfp chain jit_frame_enter
@@ -45,27 +45,27 @@ extern "C" void jit_throw_array_index();
 // callee returns via jit_return so the loop does not iterate). See the emission
 // in CodeGenerator::invoke, the option-B fp-check in mips_emit_invoke_fp_check,
 // and JIT_PLAN.md 7.
-extern "C" void jit_invoke_static(int cpool_index, int invoker_size);
+extern "C" void jit_invoke_static(int cpool_index, int invoker_size, int bci);
 // Marco 3.6c-vtable: super.m()/private call (_fast_invokespecial). Same shape as
 // jit_invoke_static, but the callee is resolved via the CPOOL class's vtable
 // (vindex+klazz_id -> class -> ClassInfo -> get_method_from_ci), not a direct
 // method pointer -- the static binding of invokespecial (e.g. the superclass for
 // super.m()). See CodeGenerator::invoke's helper branch.
-extern "C" void jit_invoke_special(int cpool_index, int invoker_size);
+extern "C" void jit_invoke_special(int cpool_index, int invoker_size, int bci);
 // Marco 3.6c-vtable 2/3: virtual call (_fast_invokevirtual). Dispatches DYNAMICALLY
 // on the receiver's vtable (get_method_from_vtable), so an overriding subclass method
 // is chosen at runtime. Same (cpool_index, invoker_size) shape. See invoke_virtual.
-extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size);
+extern "C" void jit_invoke_virtual(int cpool_index, int invoker_size, int bci);
 // Marco 3.6c-vtable 3/3: interface call (_fast_invokeinterface). Dynamic dispatch via
 // the receiver's itable (linear search of the interface class_id). Takes num_params
 // (not invoker_size -- the length 5 is fixed inside the helper). See invoke_interface.
-extern "C" void jit_invoke_interface(int cpool_index, int num_params);
+extern "C" void jit_invoke_interface(int cpool_index, int num_params, int bci);
 
 // Marco 3.7b: array-store type check for a compiled aastore. Mirrors the interp's
 // aastore type_check (-> array_store_type_check via call_vm): raises ArrayStoreException
 // if obj is not assignable to the element type of the array ref (null obj is always
 // OK), repositioning g_jfp for the option-B unwind. See CodeGenerator::type_check.
-extern "C" void jit_array_store_check(address ref, address obj, int idx);
+extern "C" void jit_array_store_check(address ref, address obj, int idx, int bci);
 
 // Marco 3.8: object allocation + type checks from compiled code. The shared closure
 // resolves the class at COMPILE TIME and hands the backend a stable class_id (a small
@@ -73,8 +73,8 @@ extern "C" void jit_array_store_check(address ref, address obj, int idx);
 // re-derive the class at runtime via get_class_by_id. jit_new allocates (may GC / may
 // throw OutOfMemoryError); jit_checkcast throws ClassCastException on a failed subtype
 // check; jit_instanceof returns 0/1 and never throws (the class is already resolved).
-extern "C" address jit_new(int class_id);
-extern "C" void    jit_checkcast(int class_id);
+extern "C" address jit_new(int class_id, int bci);
+extern "C" void    jit_checkcast(int class_id, int bci);
 extern "C" jint    jit_instanceof(int class_id);
 
 // Materialize a 32-bit constant into dst (no r5900 PC-relative load). One
@@ -566,6 +566,7 @@ void CodeGenerator::lookup_switch(Value& index, jint table_index, jint default_d
 void CodeGenerator::new_object(Value& result, JavaClass* klass JVM_TRAPS) {
   frame()->flush(JVM_SINGLE_ARG_CHECK);
   mips_li(this, Assembler::a0, (juint)klass->class_id());
+  mips_li(this, Assembler::a1, (juint)bci());    // a1 = bci (GC safepoint: alloc may GC)
   mips_call_c(this, (address)jit_new);
   mips_emit_invoke_fp_check(this);               // OOM unwind (option B)
   result.set_register(RegisterAllocator::allocate());
@@ -615,6 +616,7 @@ void CodeGenerator::check_cast(Value& object, Value& klass, int class_id JVM_TRA
   frame()->push(object);
   frame()->flush(JVM_SINGLE_ARG_CHECK);          // object -> g_jsp top (OBJ_PEEK(0))
   mips_li(this, Assembler::a0, (juint)class_id);
+  mips_li(this, Assembler::a1, (juint)bci());    // a1 = bci (GC safepoint: may throw CCE)
   mips_call_c(this, (address)jit_checkcast);
   mips_emit_invoke_fp_check(this);               // CCE unwind (option B)
   frame()->pop(object);
@@ -699,6 +701,7 @@ void CodeGenerator::type_check(Value& array, Value& index, Value& value JVM_TRAP
                             JavaFrame::arg_offset_from_sp(0)));   // a1 = obj (value)
   emit(Assembler::encode_lw(Assembler::a2, Assembler::jsp,
                             JavaFrame::arg_offset_from_sp(1)));   // a2 = idx (index)
+  mips_li(this, Assembler::a3, (juint)bci());   // a3 = bci (GC safepoint: type_check may GC)
   mips_call_c(this, (address)jit_array_store_check);
 
   // Option-B unwind: if the check threw ArrayStoreException, find_exception_frame
@@ -1125,9 +1128,13 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
     null_check(receiver JVM_CHECK);
   }   // receiver Value destructs here -> frees its register
 
-  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic/_special/_final length).
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokestatic/_special/_final length),
+  // a2 = bci. The bci is the GC safepoint: jit_set_safepoint_bcp in the helper sets
+  // g_jpc = method_base + bci so a GC inside the callee scans THIS compiled frame with
+  // the correct stackmap (the frame is otherwise stuck at bci=0 -> derived oops stale).
   mips_li(this, Assembler::a0, (juint)cp_index);
   mips_li(this, Assembler::a1, (juint)3);
+  mips_li(this, Assembler::a2, (juint)at_bci);
   // Marco 3.6c-vtable: _fast_invokespecial re-resolves via the cpool class's vtable
   // (vindex+klazz_id), so it needs jit_invoke_special; the direct (cpool method
   // pointer) forms use jit_invoke_static.
@@ -1194,9 +1201,11 @@ void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
     null_check(receiver JVM_CHECK);
   }   // receiver Value destructs here -> frees its register
 
-  // a0 = cpool index, a1 = invoker size (3 = fast_invokevirtual length).
+  // a0 = cpool index, a1 = invoker size (3 = fast_invokevirtual length), a2 = bci
+  // (GC safepoint -- see jit_set_safepoint_bcp).
   mips_li(this, Assembler::a0, (juint)cp_index);
   mips_li(this, Assembler::a1, (juint)3);
+  mips_li(this, Assembler::a2, (juint)at_bci);
   mips_call_c(this, (address)jit_invoke_virtual);
 
   // Model update: pop the parameter block, push the memory-resident result.
@@ -1246,9 +1255,11 @@ void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
     null_check(receiver JVM_CHECK);
   }   // receiver Value destructs here -> frees its register
 
-  // a0 = cpool index, a1 = num_params (the helper uses the fixed invoker size 5).
+  // a0 = cpool index, a1 = num_params (the helper uses the fixed invoker size 5),
+  // a2 = bci (GC safepoint -- see jit_set_safepoint_bcp).
   mips_li(this, Assembler::a0, (juint)cp_index);
   mips_li(this, Assembler::a1, (juint)parameters_size);
+  mips_li(this, Assembler::a2, (juint)at_bci);
   mips_call_c(this, (address)jit_invoke_interface);
 
   // Model update: pop the parameter block, push the memory-resident result.
@@ -1323,6 +1334,7 @@ void CodeGenerator::call_vm(address entry, BasicType return_value_type JVM_TRAPS
 // tick test inline (fast path when no tick is pending) is a later optimization.
 void CodeGenerator::check_timer_tick(JVM_SINGLE_ARG_TRAPS) {
   frame()->flush(JVM_SINGLE_ARG_NO_CHECK);
+  mips_li(this, Assembler::a0, (juint)bci());   // a0 = bci (GC safepoint: tick may switch/GC)
   mips_call_c(this, (address)jit_timer_tick);
 }
 

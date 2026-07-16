@@ -958,4 +958,27 @@ if ! grep -q 'PASSO 2 (sub-marco 2A)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-passo2a-whitelist.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 59) ps2me-jit-fase5-safepoints (PS2ME JIT, Fase 5 -- PASSO 2B, GC safepoints). Fixes a
+#     STRUCTURAL GC bug uncovered when the JIT first ran a real MIDlet (Zombie Infection):
+#     the C-interpreter hybrid scans a COMPILED frame as if interpreted at bci=0
+#     (jit_frame_enter parks g_jpc at the method base and compiled code never advances it;
+#     JavaFrame::gc_prologue generates the stackmap at bci()). A derived oop kept live
+#     across a GC point in a compiled method is thus not a root -> collected/moved ->
+#     stale pointer -> spurious NPE/crash (booting Zombie: NPE in Class.initialize /
+#     Vector.<init>). Fix: keep g_jpc = method_base + bci at every GC point. New
+#     jit_set_safepoint_bcp(bci) sets it; the 8 GC-point helpers (jit_timer_tick,
+#     jit_array_store_check, jit_new, jit_checkcast, jit_invoke_static/special/virtual/
+#     interface) gain a trailing `int bci` and call it first. invoke_java_method saves
+#     this as the caller frame's bcp_store, so a GC deeper in the callee also scans this
+#     frame correctly. The BACKEND emission of that bci arg (mips_li into a0/a1/a2/a3) is
+#     git overlay CodeGenerator_mips.cpp, NOT this patch -- without it the helper reads a
+#     garbage register (seen as bci=8245747 in a stale-oop NPE at scheduleRepaint). Also
+#     lands the JIT_FASE5_GC_SAFE_ONLY gate (0 = full whitelist; 1 = restricted allow-list
+#     fallback excluding GC-point bytecodes). Validated: Zombie boots to gameplay with no
+#     NPE (PCSX2, 2026-07-16). Interpreter_c.cpp is LF-only. Idempotent (guard on
+#     jit_set_safepoint_bcp). See references/JIT_PLAN.md §7 and memory [[jit-plan]].
+if ! grep -q 'jit_set_safepoint_bcp' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-safepoints.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
