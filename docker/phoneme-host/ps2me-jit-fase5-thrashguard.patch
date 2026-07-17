@@ -1,0 +1,24 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -1440,6 +1440,21 @@
+     SETUP_ERROR_CHECKER_ARG;
+     Method m = (OopDesc*)callee_method();
+     m.compile(0, false JVM_CHECK);
++#if defined(PS2ME_JIT_FASE3)
++    // PS2ME thrash guard (Fase 5 PASSO 2B). shared_invoke_compiler leaves a method's
++    // execution entry pointed at ITSELF until a compile STICKS (produces compiled code).
++    // If Compiler::compile keeps returning NULL -- compiler area full, or a transient
++    // uncommon_trap/inlining abort that never set is_impossible -- the entry never
++    // advances and EVERY invocation re-runs the full (expensive) compile and fails
++    // again: recompile-per-invocation thrash (measured on Asphalt: compile time up to
++    // 93% of the frame, game unplayable / exits during menu load, with NO new arms).
++    // Mark the method impossible so it stays interpreted for good: compile-once-or-
++    // give-up. is_impossible is honored by Compiler::compile (fast NULL) and by
++    // jit_fase3_arm (no re-arm), so the thrash dies and the method runs interpreted.
++    if (!m.has_compiled_code() && !m.is_impossible_to_compile()) {
++      m.set_impossible_to_compile();
++    }
++#endif
+ #endif
+   }
+ 

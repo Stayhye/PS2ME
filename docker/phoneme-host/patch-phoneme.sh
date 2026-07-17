@@ -981,4 +981,21 @@ if ! grep -q 'jit_set_safepoint_bcp' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-safepoints.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 60) ps2me-jit-fase5-thrashguard (PS2ME JIT, Fase 5 -- PASSO 2B, compilation-thrash guard).
+#     shared_invoke_compiler leaves a method's execution entry pointed at ITSELF until a
+#     compile STICKS. If Compiler::compile keeps returning NULL (compiler area full, or a
+#     transient uncommon_trap/inlining abort that never set is_impossible), the entry never
+#     advances and EVERY invocation re-runs the full expensive compile and fails again:
+#     recompile-per-invocation thrash (measured on Asphalt: compile time up to 93% of the
+#     frame, game exits during menu load, with NO new arms). Fix in compile_current_method:
+#     after m.compile(), if it produced no compiled code and is not already impossible, mark
+#     it impossible -> compile-once-or-give-up (honored by Compiler::compile fast-NULL and by
+#     jit_fase3_arm no-re-arm). The thrash dies; the method runs interpreted. Validated:
+#     Asphalt goes from exiting-at-menu to running gameplay (PCSX2, 2026-07-16). Gated
+#     PS2ME_JIT_FASE3. Interpreter_c.cpp is LF-only. Idempotent (guard on the thrash-guard
+#     marker). See references/JIT_PLAN.md §7 and memory [[jit-plan]].
+if ! grep -q 'PS2ME thrash guard' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-thrashguard.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
