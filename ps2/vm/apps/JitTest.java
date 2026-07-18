@@ -243,6 +243,84 @@ public class JitTest {
     static int mkArr(int n) { int[] a = new int[n]; return a.length; }  // newarray -> new_basic_array
     static int divBy(int a) { return a / 3; }                           // idiv -> int_binary_do default
 
+    // FASE 6 de-risk: compile a method that HAS an exception table (try/catch) and
+    // catches its OWN exception. The array access throws INSIDE the compiled code, and
+    // the compiled method's own handler -- not an interpreted caller as in every prior
+    // marco -- must catch it. That requires the hybrid to deopt to the interpreter at the
+    // handler bci: find_exception_frame checks each frame's table by bci (is_compiled_
+    // frame()=false, so our frame is treated interpreted), and jit_throw_* now parks the
+    // throwing-op bci as the safepoint bcp so the RIGHT handler matches. catchOOB/catchNPE
+    // use ONLY parameters (the handler reads no MODIFIED local), isolating the deopt-to-
+    // handler mechanism. catchMod additionally sets a local BEFORE the throwing op and its
+    // handler reads it back -- that needs a pre-throw frame flush (a distinct concern); if
+    // catchMod is wrong while catchOOB/catchNPE pass, the flush is the only thing missing.
+    static int catchOOB(int[] a, int i) {
+        try { return a[i]; }                // AIOOBE (or NPE if a==null) thrown in compiled code
+        catch (Exception e) { return -1; }  // caught by THIS method's own handler
+    }
+    static int catchNPE(int[] a) {
+        try { return a[0]; }                // a==null -> NPE from the compiled array_check
+        catch (Exception e) { return -2; }
+    }
+    static int catchMod(int[] a, int i) {
+        int r = 99;                         // set before the try (lazy in a register)
+        try { r = a[i]; }                   // on throw, the handler must still see r==99
+        catch (Exception e) { r = r + 7; }  // reads r -> needs the pre-throw frame flush
+        return r;
+    }
+    // FASE 6: an immediate local set BEFORE an INVOKE, read in the handler when the
+    // CALLEE throws. Exercises the immediate-materialization at CodeGenerator::invoke's
+    // flush site (mips_prepare_flush_for_handler), a distinct site from the array/null
+    // throw. throwIf is non-leaf (RuntimeException.<init>) so it is a REAL call, not
+    // inlined -> catchInvoke compiles with a jit_invoke_static and its own exc-table.
+    static int throwIf(int a) {
+        if (a < 0) { throw new RuntimeException(); }
+        return a + a;
+    }
+    static int catchInvoke(int a) {
+        int r = 88;                         // immediate local, live across the invoke
+        try { r = throwIf(a); }             // callee throws when a<0 (r must stay 88)
+        catch (Exception e) { r = r + 3; }  // reads r -> needs the pre-invoke flush
+        return r;
+    }
+    // FASE 6: an immediate local (k) live across a LOOP (timer-tick flush per back-edge)
+    // and a throwing array access, read in the handler. Exercises the materialization on
+    // the loop back-edge + array-check throw in a handler-bearing method.
+    static int catchLoop(int[] a) {
+        int k = 77;                         // immediate, untouched by the loop body
+        int s = 0;
+        try { for (int i = 0; i <= a.length; i++) s += a[i]; }  // AIOOBE at i==length
+        catch (Exception e) { return s + k; }                   // reads k=77 + full sum
+        return s;
+    }
+    // FASE 6 catchLoop ISOLATION (V1/V2): the compiled catchLoop returns garbage and
+    // never throws (no [CL-RT] fires) at i==a.length. These two minimal variants split
+    // "loop structure" from "index==length boundary value", so the log alone decides
+    // whether the fix is a boundary nit or a loop-codegen task. For EACH variant, cross-
+    // reference its [JIT-DIAG] (must be COMPILED, not NOCODE) with the returned value and
+    // whether [CL-RT] fires (fires only when the compiled self-catch handler actually runs).
+    //   V1 catchIdxLen: a VARIABLE index equal to a.length, self-catch, but NO loop.
+    //     -99 (+[CL-RT]) => the boundary check works outside a loop -> catchLoop's bug is
+    //     loop-specific. Garbage (no [CL-RT]) => the index==length boundary is broken in
+    //     general, independent of any loop (note catchOOB(arrG,10) with index>length works,
+    //     so a garbage here would pin the fault at index==length exactly).
+    static int catchIdxLen(int[] a) {
+        int idx = a.length;                 // variable index == length (out of bounds)
+        try { return a[idx]; }              // a[length] -> AIOOBE if the compiled check fires
+        catch (Exception e) { return -99; } // self-caught
+    }
+    //   V2 catchLoopMin: the MINIMAL loop (no immediate k, no accumulator) -- just the
+    //     induction variable i running 0..length inclusive and a bare a[i] read.
+    //     -98 (+[CL-RT]) => the loop bounds check works and catchLoop's bug is the k/
+    //     accumulator interaction. Garbage (no [CL-RT]) => the loop itself reproduces the
+    //     bug -> a clean minimal repro for the loop-index/length codegen fix.
+    static int catchLoopMin(int[] a) {
+        int x = 0;
+        try { for (int i = 0; i <= a.length; i++) x = a[i]; }  // AIOOBE at i==length
+        catch (Exception e) { return -98; }                    // self-caught
+        return x;                                              // dead unless the check misses
+    }
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -255,8 +333,110 @@ public class JitTest {
         }
     }
 
+    // Fase 5 PASSO 2B: raw JIT-vs-interp TIMING probe. A pure-integer compute loop
+    // with NO invokes and NO allocation -- every bytecode (iconst/iload/istore/iadd/
+    // isub/imul/ixor/ishl/iand/iinc/if_icmp/goto) is on the Fase-3 whitelist, so it
+    // arms and compiles fully. One method (boundary cost amortized over millions of
+    // iterations) + a counted loop isolates the loop back-edge cost: this is where
+    // CodeGenerator::check_timer_tick emits a full frame flush + an unconditional C
+    // call PER ITERATION. If compiled is not markedly faster than interpreted here,
+    // that per-iteration flush+call is the bottleneck (the JIT's best case crippled).
+    static int bench(int iters) {
+        int acc = 0;
+        for (int i = 0; i < iters; i++) {
+            acc += i * 3;
+            acc ^= (acc << 1);
+            acc -= (i & 15);
+        }
+        return acc;
+    }
+
+    // Time bench() interpreted (first call: armed but runs interpreted) vs compiled
+    // (after warming: r5900 code). Same big-N call in both states -> the delta is the
+    // codegen/back-edge speedup, isolated from game/boundary noise.
+    static void runBench() {
+        final int BIG = 2000000;
+        long t0 = System.currentTimeMillis();
+        int b1 = bench(BIG);                     // 1st call: interpreted
+        long t1 = System.currentTimeMillis();
+        for (int w = 0; w < 20; w++) bench(200); // warm -> arm -> compile -> run compiled
+        long t2 = System.currentTimeMillis();
+        int b2 = bench(BIG);                     // now r5900-compiled
+        long t3 = System.currentTimeMillis();
+        long interpMs = t1 - t0, jitMs = t3 - t2;
+        System.out.println("[JIT-BENCH] bench(" + BIG + "): interp=" + interpMs
+            + "ms jit=" + jitMs + "ms  result=" + b1 + "/" + b2
+            + (b1 == b2 ? " OK" : " MISMATCH"));
+        if (jitMs > 0) {
+            System.out.println("[JIT-BENCH] speedup(x100)=" + (interpMs * 100 / jitMs)
+                + "  (>100 = JIT faster, 100 = tie)");
+        }
+    }
+
+    // Fase 5 PASSO 2B: FRONTIER-cost probe. bench() above amortizes the frame
+    // boundary over millions of loop iterations (one entry) and shows the codegen
+    // wins ~7x. Games instead spend their time in MANY calls to tiny methods, where
+    // the per-call frontier (compiled caller -> jit_invoke_static, callee
+    // jit_frame_enter/jit_return -- all helper-C) is paid every time. benchCall and
+    // benchInline do the SAME 9-add work per iteration; the only difference is a REAL
+    // call vs inline, so (compiled call time - compiled inline time) isolates the
+    // per-call frontier. leafBig is >13 bytes so the front-end NEVER inlines it (a
+    // true cross-frame call, like the getters/setters that are 63% of a game's armed
+    // methods). All bytecodes are whitelisted -> everything arms and compiles.
+    static int leafBig(int a) { return a+a+a+a+a+a+a+a+a; }   // 9a; >13 bytes -> real call
+    static int benchCall(int iters) {                          // work via a real call/iter
+        int acc = 0;
+        for (int i = 0; i < iters; i++) acc += leafBig(i);
+        return acc;
+    }
+    static int benchInline(int iters) {                        // SAME work inline, no frontier
+        int acc = 0;
+        for (int i = 0; i < iters; i++) acc += i+i+i+i+i+i+i+i+i;
+        return acc;
+    }
+
+    // Measure the per-call frontier. Warm both to the r5900-compiled state (and
+    // leafBig with them), then time the same big-N in each. jitInline = loop+adds
+    // compiled with NO boundary; jitCall = the same adds reached through a
+    // compiled->compiled invoke every iteration. The gap is N * frontier cost. Also
+    // report call-vs-interp so the raw JIT-vs-interp number for a call-bound loop (the
+    // game shape) sits next to bench()'s 7x loop-bound one. NOTE: the interp baseline
+    // is conservative -- during it, leafBig warms mid-call and starts running compiled,
+    // which only makes interp look FASTER, so a call-speedup <= ~100 still proves the
+    // frontier dominates.
+    static void runBenchCall() {
+        final int BIG = 2000000;
+        long t0 = System.currentTimeMillis();
+        int ci = benchCall(BIG);                          // benchCall interpreted (compile switches next entry)
+        long t1 = System.currentTimeMillis();
+        for (int w = 0; w < 30; w++) { benchInline(300); benchCall(300); } // warm both + leafBig
+        long t2 = System.currentTimeMillis();
+        int inl = benchInline(BIG);                       // compiled, no frontier
+        long t3 = System.currentTimeMillis();
+        int cc = benchCall(BIG);                          // compiled, real call/iter
+        long t4 = System.currentTimeMillis();
+        long callInterpMs = t1 - t0, inlineMs = t3 - t2, callJitMs = t4 - t3;
+        boolean ok = (ci == cc && cc == inl);
+        System.out.println("[JIT-FRONTIER] benchCall(" + BIG + "): interp=" + callInterpMs
+            + "ms jitInline=" + inlineMs + "ms jitCall=" + callJitMs
+            + "ms  result=" + ci + "/" + inl + "/" + cc + (ok ? " OK" : " MISMATCH"));
+        if (inlineMs > 0) {
+            System.out.println("[JIT-FRONTIER] call/inline(x100)=" + (callJitMs * 100 / inlineMs)
+                + "  (100 = frontier free; higher = frontier dominates)");
+        }
+        if (callJitMs > 0) {
+            System.out.println("[JIT-FRONTIER] call speedup vs interp(x100)="
+                + (callInterpMs * 100 / callJitMs) + "  (>100 = JIT faster)");
+        }
+        long deltaMs = callJitMs - inlineMs;
+        System.out.println("[JIT-FRONTIER] frontier ~= " + (deltaMs * 1000000L / BIG)
+            + " ns/call (delta=" + deltaMs + "ms over " + BIG + " calls)");
+    }
+
     public static void main(String[] args) {
         System.out.println("[JIT-TEST] Fase 3 Marco 3.8 + Fase 5 bail-limpo harness start");
+        runBench();
+        runBenchCall();
 
         // A valid array to warm/verify the in-bounds arraylength path.
         int[] arr5 = new int[5];
@@ -327,6 +507,12 @@ public class JitTest {
         boolean ibx = false, ianm = false;
         // Fase 5 bail-limpo self-test leaves (armed but bail-out -> interpreted).
         int mar = 0, dvb = 0;
+        // FASE 6 de-risk: exception-table (try/catch) leaves, warmed on the no-throw path.
+        int cOOB = 0, cNPE = 0, cMod = 0, cInv = 0, cLp = 0;
+        // FASE 6 catchLoop isolation (V1 no-loop idx==len / V2 minimal loop). Both ALWAYS
+        // take the throwing path (idx==length / i reaches length), so the warmed value is
+        // the compiled self-catch result: -99 / -98 if the check fires, garbage if it misses.
+        int cIL = 0, cLm = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -389,6 +575,13 @@ public class JitTest {
             ibx = isBox(boxObj);       // Box instanceof Box -> true
             ianm = isAnimal(dog);      // Dog instanceof Animal -> true (subtype)
             cbx = castBox(boxObj);     // (Box)boxObj).v = 5 (checkcast + field)
+            cOOB = catchOOB(arrG, 3);  // FASE 6: normal path arrG[3]=40 (arms exc-table method)
+            cNPE = catchNPE(arrG);     // FASE 6: normal path arrG[0]=10
+            cMod = catchMod(arrG, 3);  // FASE 6: normal path arrG[3]=40
+            cInv = catchInvoke(5);     // FASE 6: normal path throwIf(5)=10 (arms exc-table method)
+            cLp  = catchLoop(arrG);    // FASE 6: normal path -> AIOOBE at i==len -> 150+77=227
+            cIL  = catchIdxLen(arrG);  // FASE 6 V1: a[a.length] -> AIOOBE self-catch -> -99
+            cLm  = catchLoopMin(arrG); // FASE 6 V2: minimal loop -> AIOOBE at i==len -> -98
         }
 
         check("add(7,5)",      ra, 12);
@@ -656,6 +849,39 @@ public class JitTest {
         check("divBy(30) bails clean", dvb, 10);
         check("mkArr(9) bails clean",  mkArr(9), 9);
         check("divBy(99) bails clean", divBy(99), 33);
+
+        // FASE 6 de-risk: a COMPILED method with an exception table catches its OWN
+        // exception. catchOOB/catchNPE (params only) isolate the deopt-to-handler path:
+        // an AIOOBE/NPE thrown inside the compiled code must resume the interpreter at
+        // this method's handler bci and return the handler's value. If these PASS, the
+        // hybrid exception-table mechanism works (the #1 gate for the Asphalt hot path).
+        check("catchOOB(arrG,3) normal",      cOOB, 40);              // compiled, no throw
+        check("catchOOB(arrG,10) self-catch", catchOOB(arrG, 10), -1); // AIOOBE caught in-method
+        check("catchOOB(null,0) self-catch",  catchOOB(null, 0), -1);  // NPE caught in-method
+        check("catchOOB(arrG,2) post-catch",  catchOOB(arrG, 2), 30);  // resumes clean after catch
+        check("catchNPE(arrG) normal",        cNPE, 10);
+        check("catchNPE(null) self-catch",    catchNPE(null), -2);     // NPE caught in-method
+        // catchMod reads a local set BEFORE the throw -> also needs the pre-throw frame
+        // flush. If this FAILS while the catchOOB/catchNPE cases PASS, the deopt-to-handler
+        // core works and only the local flush is missing (the next, separate step).
+        check("catchMod(arrG,3) normal",      cMod, 40);              // no throw
+        check("catchMod(arrG,10) needs-flush", catchMod(arrG, 10), 106); // 99 (pre-throw) + 7
+        // FASE 6: try-around-INVOKE. catchInvoke(-1) -> throwIf(-1) throws -> handler reads
+        // the pre-invoke immediate r==88 -> 91. Proves the invoke-flush materialization.
+        check("catchInvoke(5) normal",        cInv, 10);              // throwIf(5)=10, no throw
+        check("catchInvoke(-1) callee-throws", catchInvoke(-1), 91);  // 88 (pre-invoke) + 3
+        // FASE 6: immediate (k=77) live across a loop + throwing array access.
+        check("catchLoop(arrG) normal",       cLp, 227);              // 150 (sum) + 77 (k)
+        check("catchLoop(arrG) again",        catchLoop(arrG), 227);
+        // FASE 6 catchLoop ISOLATION (V1/V2): a FAIL here is EXPECTED data. The returned
+        // value + whether [CL-RT] fired (and [JIT-DIAG] COMPILED) localizes the bug:
+        //   V1 == -99  -> boundary index==length throws OUTSIDE a loop  => loop-specific.
+        //   V2 == -98  -> the minimal loop throws                        => k/accumulator.
+        //   garbage    -> the compiled bounds check missed on that shape (see method docs).
+        check("catchIdxLen(arrG) V1 no-loop idx==len", cIL, -99);
+        check("catchLoopMin(arrG) V2 minimal-loop",    cLm, -98);
+        check("catchIdxLen(arrG) V1 again",            catchIdxLen(arrG), -99);
+        check("catchLoopMin(arrG) V2 again",           catchLoopMin(arrG), -98);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.

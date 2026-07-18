@@ -36,8 +36,8 @@ extern "C" void jit_timer_tick(int bci); // Marco 3.2b: backward-branch timer ch
 // the exception, run find_exception_frame over the g_jfp chain jit_frame_enter
 // built, and reposition g_jfp/g_jsp/g_jpc/g_jlocals to the handler frame. See the
 // throw-path emission in mips_emit_runtime_throw and JIT_PLAN.md 7.
-extern "C" void jit_throw_null_pointer();
-extern "C" void jit_throw_array_index();
+extern "C" void jit_throw_null_pointer(int bci);
+extern "C" void jit_throw_array_index(int bci);
 // Marco 3.6b-real: the real (non-inlined) resolved static call. Resolves the
 // callee from the caller frame's cpool (index = compile-time constant, GC-safe),
 // runs the class-init barrier, invokes, and drives an interpreted callee to
@@ -135,7 +135,7 @@ static void mips_call_c(BinaryAssembler* a, address target) {
 // GC-safety: the compiled leaf frame is discarded, so its register-resident
 // locals/stack (t0-t8) need not be flushed before the call -- they are never read
 // again; the handler's ancestor frame state lives in interpreter memory.
-static void mips_emit_runtime_throw(BinaryAssembler* a, int rte) {
+static void mips_emit_runtime_throw(BinaryAssembler* a, int rte, int bci) {
   address helper;
   switch (rte) {
     case ThrowExceptionStub::rte_null_pointer:
@@ -145,6 +145,9 @@ static void mips_emit_runtime_throw(BinaryAssembler* a, int rte) {
     default:
       SHOULD_NOT_REACH_HERE(); return;
   }
+  // FASE 6: pass the throwing-op bci in a0 so the helper parks it as the safepoint bcp
+  // (find_exception_frame then matches the correct handler in a self-catching method).
+  mips_li(a, Assembler::a0, (juint)bci);
   mips_call_c(a, helper);
   // native-stack epilogue (mirrors return_void's, minus the jit_return helper).
   a->emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
@@ -175,6 +178,51 @@ static void mips_emit_invoke_fp_check(BinaryAssembler* a) {
   a->emit(Assembler::encode_jr(Assembler::ra));
   a->emit(Assembler::encode_nop());
   a->bind(cont);
+}
+
+// FASE 6 (exception-table de-risk): before a frame flush in a method that can catch its
+// OWN exception, every live local must be present in g_jlocals -- the throw unwinds by
+// deopt-to-interpreter (is_compiled_frame() is false in the hybrid) and the interpreted
+// handler reads locals from memory, NOT from registers/immediates. frame()->flush()
+// stores `changed` locals, but an IMMEDIATE local in such a method is marked `flushed`
+// (status 0) with its value kept only as a compile-time constant -- so it is never
+// written to memory (proven by [LOC2]/[LOC2-RT]: changed=0 flushed=1 imm=1 value=99, yet
+// g_jlocals[2] held stack garbage at the throw). Worse, after the flush a plain COMPILED
+// re-read also breaks: read_value loads a `flushed` location from memory. Re-arm every
+// present one-word immediate local as `changed` so the following flush emits its store.
+// Register-resident locals (params built by jit_frame_enter, computed locals stored by
+// the flush) are already in memory. Two-word locals never occur in whitelisted methods
+// (long/double are barred); skip them defensively.
+static void mips_materialize_live_locals(VirtualStackFrame* f, int nlocals) {
+  for (int i = 0; i < nlocals; i++) {
+    RawLocation* loc = f->raw_location_at(i);
+    // Materialize ANY present one-word local (immediate OR register-resident): re-arm as
+    // `changed` -> the flush reads the current value (immediate constant or register) and
+    // stores it. Locals only in memory (T_NOWHERE, e.g. untouched params) are
+    // is_present()==false -> skipped.
+    // NOTE (FASE 6, 2026-07-17): the "immediate-only" variant is the theoretically correct
+    // one (a flushed register's memory is already valid; re-storing a possibly-reused
+    // register could corrupt it) BUT it made catchMod/catchInvoke/catchLoop compile to
+    // NOCODE (a transient abort during compilation -- 3 handler-less <init> regressed too,
+    // so it is NOT the materialize gate; cause not yet isolated). "all present" is what
+    // reliably COMPILES the exc-table methods, so use it to validate the self-catch fix;
+    // revisit the correct materialize once the NOCODE abort is understood.
+    if (loc->is_present() && !loc->is_two_word()) {
+      loc->mark_as_changed();
+    }
+  }
+}
+
+// Guarded form: call immediately before ANY frame()->flush() so live locals survive a
+// later deopt-to-interp (or compiled re-read) when THIS method has a local handler.
+// exception_handler_exists_for (Method.cpp:262) is resolution-free -- unlike
+// is_inline_exception_allowed, whose exception_handler_bci_for does a compile-time
+// klass_at that fails to resolve the catch-type and wrongly reports "no handler". No-op
+// (one resolution-free range scan) for handler-less methods, i.e. almost all of them.
+static void mips_prepare_flush_for_handler(Method* root_m, VirtualStackFrame* f, int bci) {
+  if (root_m->exception_handler_exists_for(bci)) {
+    mips_materialize_live_locals(f, root_m->max_locals());
+  }
 }
 
 // ---- method prologue / stack -------------------------------------------------
@@ -564,6 +612,7 @@ void CodeGenerator::lookup_switch(Value& index, jint table_index, jint default_d
 // find_exception_frame repositions g_jfp, so run the option-B fp-check after the call
 // to eject if the handler is an ancestor frame. The fresh instance comes back in v0.
 void CodeGenerator::new_object(Value& result, JavaClass* klass JVM_TRAPS) {
+  mips_prepare_flush_for_handler(root_method(), frame(), bci());   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
   mips_li(this, Assembler::a0, (juint)klass->class_id());
   mips_li(this, Assembler::a1, (juint)bci());    // a1 = bci (GC safepoint: alloc may GC)
@@ -614,6 +663,7 @@ void CodeGenerator::init_static_array(Value& array JVM_TRAPS) {
 void CodeGenerator::check_cast(Value& object, Value& klass, int class_id JVM_TRAPS) {
   (void)klass;
   frame()->push(object);
+  mips_prepare_flush_for_handler(root_method(), frame(), bci());   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);          // object -> g_jsp top (OBJ_PEEK(0))
   mips_li(this, Assembler::a0, (juint)class_id);
   mips_li(this, Assembler::a1, (juint)bci());    // a1 = bci (GC safepoint: may throw CCE)
@@ -632,6 +682,7 @@ void CodeGenerator::instance_of(Value& result, Value& object, Value& klass,
                                 int class_id JVM_TRAPS) {
   (void)klass;
   frame()->push(object);
+  mips_prepare_flush_for_handler(root_method(), frame(), bci());   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
   mips_li(this, Assembler::a0, (juint)class_id);
   mips_call_c(this, (address)jit_instanceof);     // v0 = 0/1
@@ -670,7 +721,23 @@ void CodeGenerator::array_check(Value& array, Value& index JVM_TRAPS) {
 
   Label ok;
   emit_branch(Assembler::encode_bne(at, Assembler::zero, 0), ok);   // in bounds -> skip
-  mips_emit_runtime_throw(this, ThrowExceptionStub::rte_array_index_out_of_bounds);
+  // FASE 6: if a handler in THIS method may catch the AIOOBE, the interpreter resumes
+  // HERE (find_exception_frame -> deopt at the handler bci) and reads locals from
+  // g_jlocals -> materialize them to memory first. mips_materialize_live_locals re-arms
+  // immediate locals as `changed` (flush() alone skips them); PreserveVirtualStackFrame
+  // State::save() then flushes, emitting the stores only on this COLD throw path (the
+  // success branch to `ok` skipped them) and restore() leaves the fall-through
+  // continuation's VSF unchanged. The gate is exception_handler_exists_for (resolution-
+  // free): is_inline_exception_allowed calls exception_handler_bci_for, whose compile-
+  // time klass_at fails to resolve the catch-type and wrongly reports "no handler".
+  // When no local handler exists the frame is discarded on unwind, so skip the flush.
+  if (root_method()->exception_handler_exists_for(bci())) {
+    mips_materialize_live_locals(frame(), root_method()->max_locals());
+    PreserveVirtualStackFrameState preserve(frame() JVM_CHECK);
+    mips_emit_runtime_throw(this, ThrowExceptionStub::rte_array_index_out_of_bounds, bci());
+  } else {
+    mips_emit_runtime_throw(this, ThrowExceptionStub::rte_array_index_out_of_bounds, bci());
+  }
   bind(ok);
 }
 
@@ -690,6 +757,7 @@ void CodeGenerator::type_check(Value& array, Value& index, Value& value JVM_TRAP
   frame()->push(array);
   frame()->push(index);
   frame()->push(value);                        // value on top of the expression stack
+  mips_prepare_flush_for_handler(root_method(), frame(), bci());   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
 
   // After the flush, g_jsp (s1) points at the top slot: arg_offset_from_sp(0)=value,
@@ -728,7 +796,17 @@ void CodeGenerator::null_check(const Value& object JVM_TRAPS) {
   Label ok;
   // if object != null, skip the throw (emit_branch fills the delay slot with nop)
   emit_branch(Assembler::encode_bne(object.lo_register(), Assembler::zero, 0), ok);
-  mips_emit_runtime_throw(this, ThrowExceptionStub::rte_null_pointer);
+  // FASE 6: materialize locals to memory on the self-catch path (see array_check) so a
+  // handler in THIS method sees them after the deopt-to-interp; cold-path only, the
+  // continuation VSF is preserved. Skipped when no local handler catches the NPE (frame
+  // discarded on unwind). Gate = exception_handler_exists_for (resolution-free).
+  if (root_method()->exception_handler_exists_for(bci())) {
+    mips_materialize_live_locals(frame(), root_method()->max_locals());
+    PreserveVirtualStackFrameState preserve(frame() JVM_CHECK);
+    mips_emit_runtime_throw(this, ThrowExceptionStub::rte_null_pointer, bci());
+  } else {
+    mips_emit_runtime_throw(this, ThrowExceptionStub::rte_null_pointer, bci());
+  }
   bind(ok);
 }
 
@@ -1114,6 +1192,7 @@ void CodeGenerator::invoke(const Method* method, bool must_do_null_check JVM_TRA
     (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
 
   // Flush args + live temporaries to g_jsp memory (see header note on safety).
+  mips_prepare_flush_for_handler(caller, frame(), at_bci);   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
 
   // Marco 3.6c: receiver null-check for a call with a receiver (_final). After the
@@ -1188,6 +1267,7 @@ void CodeGenerator::invoke_virtual(Method* method, int vtable_index,
     (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
 
   // Flush args + live temporaries to g_jsp memory (same safety note as invoke()).
+  mips_prepare_flush_for_handler(caller, frame(), at_bci);   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
 
   // Receiver null-check (a virtual call always has a receiver). After the flush the
@@ -1243,6 +1323,7 @@ void CodeGenerator::invoke_interface(JavaClass* klass, int itable_index,
     (((jint)caller->ubyte_at(at_bci + 1) << 8) | (jint)caller->ubyte_at(at_bci + 2));
 
   // Flush args + live temporaries to g_jsp memory (same safety note as invoke()).
+  mips_prepare_flush_for_handler(caller, frame(), at_bci);   // FASE 6
   frame()->flush(JVM_SINGLE_ARG_CHECK);
 
   // Receiver null-check: after flush the receiver (deepest arg) lives in g_jsp at
@@ -1298,8 +1379,19 @@ bool CodeGenerator::quick_catch_exception(const Value& value, JavaClass* catch_t
 // array_check. The code after this point in the basic block is dead (the throw
 // never returns to compiled code).
 void CodeGenerator::throw_simple_exception(int rte JVM_TRAPS) {
+  // FASE 6: the throw is UNCONDITIONAL (no fall-through continuation), so a plain flush
+  // suffices when a handler in THIS method may catch it -- the interp resumes at the
+  // handler and reads locals from g_jlocals. No PreserveVirtualStackFrameState needed
+  // (the code after is dead). Materialize immediate locals first (flush skips them);
+  // skip entirely when no local handler exists (frame discarded on unwind). Gate =
+  // exception_handler_exists_for (resolution-free). Flush BEFORE clear() so the dirty
+  // locals reach memory.
+  if (root_method()->exception_handler_exists_for(bci())) {
+    mips_materialize_live_locals(frame(), root_method()->max_locals());
+    frame()->flush(JVM_SINGLE_ARG_CHECK);
+  }
   frame()->clear();
-  mips_emit_runtime_throw(this, rte);
+  mips_emit_runtime_throw(this, rte, bci());
 }
 
 // call_vm_extra_arg always immediately precedes a call_vm (it just parks an extra
@@ -1333,6 +1425,12 @@ void CodeGenerator::call_vm(address entry, BasicType return_value_type JVM_TRAPS
 // thread switch that a taken tick may trigger. Correctness first; folding the
 // tick test inline (fast path when no tick is pending) is a later optimization.
 void CodeGenerator::check_timer_tick(JVM_SINGLE_ARG_TRAPS) {
+  // FASE 6: NO materialize here (RUN 9 confirmed the RUN 5 removal was correct). The timer
+  // tick is a GC/thread safepoint, NOT the self-catch throw site: the AIOOBE is raised in
+  // array_check inside the loop body, which materializes the live locals on its own throw
+  // path. Restoring the materialize here (RUN 9) did NOT change catchLoop's garbage return,
+  // so it is pure dead weight on every back-edge -- keep it off. The plain flush() that
+  // always existed is enough to keep the Java frame consistent across a taken tick.
   frame()->flush(JVM_SINGLE_ARG_NO_CHECK);
   mips_li(this, Assembler::a0, (juint)bci());   // a0 = bci (GC safepoint: tick may switch/GC)
   mips_call_c(this, (address)jit_timer_tick);
