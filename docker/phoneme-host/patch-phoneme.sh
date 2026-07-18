@@ -998,4 +998,39 @@ if ! grep -q 'PS2ME thrash guard' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase5-thrashguard.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 61) ps2me-jit-fase6-timeslicing (PS2ME JIT, Fase 6 -- exception-table de-risk).
+#     Disable time-sliced compilation. Compiler::compile suspends a compile when
+#     is_time_to_suspend() fires mid-compile (_failure = out_of_time; suspend()); but
+#     Compiler::end() SKIPS terminate() on out_of_time, so update_compiler_area_top never
+#     restores _compiler_area_top -> the suspended method keeps the WHOLE compiler area
+#     claimed -> every later compile sees the area full -> a non-deterministic NOCODE
+#     cascade (RUN 3-7: no GC, no OOM, top jumps to `end`). The Fase 5 thrash-guard then
+#     marks the NOCODE victim impossible_to_compile, so it never resumes = permanent poison.
+#     Time-slicing is incompatible with the thrash-guard (which assumes compile-to-
+#     completion); PS2ME leaf compiles are short, so run to completion instead of suspending.
+#     Validated RUN 8/10: compiled_ok=75/0, zero NOCODE cascade (PCSX2, 2026-07-18). Gated
+#     nowhere (a pure control-flow fix; harmless when the timer never fires). Idempotent
+#     (guard on the fase-6 time-slicing marker). See references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'time-sliced compilation DISABLED on PS2ME' "$PHONEME/cldc/src/vm/share/compiler/Compiler.cpp"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-timeslicing.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
+# 62) ps2me-jit-fase6-selfcatch (PS2ME JIT, Fase 6 -- exception-table de-risk).
+#     Let a COMPILED method catch its OWN exception (try/catch) -- the #1 gate for the Asphalt
+#     hot path (~97% of hot interp time is in exc-table methods). Two parts: (a) the arm
+#     whitelist no longer rejects methods with an exception table (PS2ME_JIT_EXC_TABLE gate in
+#     jit_fase3_whitelisted); (b) jit_drive_self_catch, called after the nested dispatch loop
+#     in each of the 4 jit_invoke_* helpers, detects a self-catch (g_jfp back at caller_fp but
+#     g_jpc at the handler bci, NOT the post-invoke bcp) and interprets the handler until it
+#     leaves the caller frame -- a deopt-to-interpreter mirroring the inline-throw self-catch,
+#     so the compiled caller's option-B fp-check then ejects naturally (without it the caller
+#     read the exception oop off g_jsp as the invoke result = garbage). The backend materialize
+#     (live locals -> memory before a throw) + the throw-with-bci safepoint are git overlay
+#     (CodeGenerator_mips), NOT this patch. Validated RUN 10: catchOOB/NPE/Mod/Invoke +
+#     catchIdxLen all COMPILED + self-catch correct (PCSX2, 2026-07-18). Interpreter_c.cpp is
+#     LF-only. Idempotent (guard on jit_drive_self_catch). See references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'jit_drive_self_catch' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-selfcatch.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

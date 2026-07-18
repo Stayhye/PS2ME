@@ -1,0 +1,102 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2548,6 +2548,40 @@
+   // signal is g_jfp, never _current_pending_exception (that is cleared once a
+   // handler is found). JavaStackDirection < 0 -> a live callee frame has a SMALLER
+   // g_jfp than the caller, so the loop runs while g_jfp < caller_fp.
++
++  // FASE 6 (self-catch through an invoke): after the nested dispatch loop drives the
++  // callee, the caller's OWN exception handler may have caught what the callee threw.
++  // find_exception_frame then put g_jfp back at caller_fp (the handler frame IS the
++  // caller) but set g_jpc to the handler bci -- NOT the post-invoke bcp a normal return
++  // leaves (return_internal advances the caller's bcp_store by return_advance). The
++  // compiled caller has no compiled handler entry (we emit no OSR stub), and its
++  // post-invoke fp-check only ejects when g_jfp != fp_A, so a self-catch would otherwise
++  // fall through and read the exception oop off g_jsp as the "invoke result" (the garbage
++  // catchInvoke returned). Detect it here (g_jfp == caller_fp && g_jpc != post_invoke) and
++  // interpret the handler until control leaves the caller frame; when it returns, g_jfp
++  // moves above caller_fp and the compiled caller's fp-check ejects -- a deopt-to-
++  // interpreter for the handler, mirroring the inline-throw self-catch (jit_throw_*). A
++  // normal return (g_jpc == post_invoke) and a handler ABOVE the caller (g_jfp !=
++  // caller_fp, already ejected by the fp-check) are both no-ops. post_invoke uses
++  // GET_FRAME(method) (stable; find_exception_frame does not touch the method field),
++  // NOT bcp_store (overwritten with the handler bci on a self-catch). invoke_size is the
++  // value passed to invoke_java_method (= return_advance): 3 for static/special/virtual,
++  // 5 for interface.
++  static void jit_drive_self_catch(address caller_fp, int bci, int invoke_size) {
++    if ((address)g_jfp != caller_fp) {
++      return;                            // callee unwound past us (handler is an ancestor)
++    }
++    address post_invoke =
++      GET_FRAME(method) + Method::base_offset() + bci + invoke_size;
++    if (g_jpc == post_invoke) {
++      return;                            // normal return: resume the compiled caller
++    }
++    // Self-catch: run the interpreted handler until it returns out of the caller frame.
++    do {
++      interpreter_dispatch_table[*g_jpc]();
++    } while ((address)g_jfp <= caller_fp);
++  }
++
+   extern "C" void jit_invoke_static(int cpool_index, int invoker_size, int bci) {
+     jit_set_safepoint_bcp(bci);          // GC safepoint (class-init barrier / callee may GC)
+     address caller_fp = g_jfp;
+@@ -2585,6 +2619,7 @@
+     while ((address)g_jfp < caller_fp) {
+       interpreter_dispatch_table[*g_jpc]();
+     }
++    jit_drive_self_catch(caller_fp, bci, invoker_size);   // FASE 6 (self-catch)
+   }
+ 
+   // jit_invoke_special(): the REAL super.m()/private call from compiled code
+@@ -2618,6 +2653,7 @@
+     while ((address)g_jfp < caller_fp) {
+       interpreter_dispatch_table[*g_jpc]();
+     }
++    jit_drive_self_catch(caller_fp, bci, invoker_size);   // FASE 6 (self-catch)
+   }
+ 
+   // jit_invoke_virtual(): the REAL virtual call from compiled code (Marco 3.6c-vtable
+@@ -2652,6 +2688,7 @@
+     while ((address)g_jfp < caller_fp) {
+       interpreter_dispatch_table[*g_jpc]();
+     }
++    jit_drive_self_catch(caller_fp, bci, invoker_size);   // FASE 6 (self-catch)
+   }
+ 
+   // jit_invoke_interface(): the REAL interface call from compiled code (Marco
+@@ -2700,6 +2737,7 @@
+     while ((address)g_jfp < caller_fp) {
+       interpreter_dispatch_table[*g_jpc]();
+     }
++    jit_drive_self_catch(caller_fp, bci, 5);   // FASE 6 (self-catch; interface size=5)
+   }
+ 
+ #if defined(PS2ME_JIT_FASE2)
+@@ -2761,14 +2799,25 @@
+ // FULL whitelist GC-correct, so we no longer need to gate out invoke/new/loop. Set
+ // back to 1 to fall back to the restricted allow-list (confirmation/mitigation).
+ #define JIT_FASE5_GC_SAFE_ONLY 0
++// FASE 6 (exception-table de-risk): allow compiling methods that HAVE an exception
++// table. The round-2 hot-method data showed ~97% of the Asphalt hot path is in
++// try/catch-wrapped methods, so this reject was the #1 gate. The hybrid unwind deopts
++// to the interpreter at the handler bci (find_exception_frame checks every frame's table
++// by bci, is_compiled_frame()=false so our frame is treated interpreted; the throw
++// helpers set the safepoint bci so the RIGHT handler matches) and the backend
++// materializes live locals before the throw. Toggle to 0 to restore the old
++// (reject-all-exc-table) behavior.
++#define PS2ME_JIT_EXC_TABLE 1
+   static bool jit_fase3_whitelisted(address method, bool allow_invoke) {
+     Method::Raw m = (ReturnOop)method;
+     // Marco 3.6b: a compiled method never installs an exception handler (we do not
+     // compile catch blocks), so both the inlined-throw path and the option-B call
+     // unwind require the method to be unable to catch. Reject any method with an
+     // exception table -- true of every straight-line leaf armed so far (they have
+-    // no try/catch), so this adds no regression.
++    // no try/catch), so this adds no regression.  [FASE 6: gated off to compile them.]
++#if !PS2ME_JIT_EXC_TABLE
+     if (!m().has_no_exception_table()) return false;
++#endif
+     const int len = m().code_size();
+     if (len < 1 || len > 60) return false;              // keep bring-up small
+     int bci = 0;

@@ -1,0 +1,23 @@
+--- a/cldc/src/vm/share/compiler/Compiler.cpp
++++ b/cldc/src/vm/share/compiler/Compiler.cpp
+@@ -721,9 +721,17 @@
+     }
+     if( !GenerateROMImage &&!is_compilation_queue_empty()
+                           && is_time_to_suspend() ) {
+-      _failure = out_of_time;
+-      suspend();
+-      return;
++      // FASE 6: time-sliced compilation DISABLED on PS2ME. Suspending a compile sets
++      // _failure = out_of_time, which makes Compiler::end() SKIP terminate() -> the
++      // pre-compile _compiler_area_top is never restored (the suspended method keeps the
++      // whole area claimed) -> every later compile sees the area full -> NOCODE cascade
++      // (the non-deterministic collapse of RUN 3-7: no GC/OOM, top jumps to `end`). Worse,
++      // the FASE 5 thrash-guard sees the suspended method's NOCODE and marks it
++      // impossible_to_compile -> it is never re-invoked to resume -> the area is poisoned
++      // for good. Time-slicing is fundamentally incompatible with the thrash-guard (which
++      // assumes compile-to-completion). PS2ME leaf compiles are short, so run to completion
++      // instead of suspending: do NOT set out_of_time / suspend / return -- fall through
++      // and keep processing the compilation queue.
+     }
+   }
+ 
