@@ -428,9 +428,32 @@ void CodeGenerator::move(const Value& dst, const Value& src, const Condition con
   }
 }
 
+// Fase 6 (static fields): materialize an oop into a register. In the whitelisted set
+// this is reached ONLY for the class base of get_static/put_static
+// (BytecodeCompileClosure::get_static does klass_value.set_obj(&klass), and Value::set_obj
+// assigns a register then calls this move). The r5900 backend has NO oop-relocation
+// stream (Compiler::oops_do is a no-op on MIPS), so we must NEVER bake a moveable oop
+// literal into native code. Resolve the class GC-safely from its class_id via the
+// class_list indirection -- byte-for-byte the interpreter's
+// get_class_by_id(id) = *(address*)(_class_list_base + id*4). A GC that moves the class
+// updates _class_list_base (a jvm_fast_globals field), so the compiled code always reads
+// the CURRENT class pointer; class_id is a stable compile-time constant, so no oop is
+// embedded. The field offset is added afterwards by FieldAddress (load/store_to_object).
+// Non-class oop immediates (e.g. a final object-static referent) would need a real
+// relocation and are kept off the whitelist -> only classes reach here (GUARANTEEd).
 void CodeGenerator::move(Value& dst, Oop* obj, Condition cond) {
-  (void)dst; (void)obj; (void)cond;
-  SHOULD_NOT_REACH_HERE();
+  (void)cond;
+  GUARANTEE(dst.in_register(), "set_obj assigns a register before calling move");
+  GUARANTEE(obj->is_java_class(),
+            "Fase 6: only a class oop (get_static base) is materialized on r5900");
+  JavaClass::Raw klass = obj->obj();
+  const int class_id = klass().class_id();
+  const Assembler::Register d = dst.lo_register();
+  // d = &_class_list_base (a stable jvm_fast_globals field address, never an oop)
+  const juint clba = (juint)(unsigned long)(address)&_class_list_base;
+  mips_li(this, d, clba);
+  emit(Assembler::encode_lw(d, d, 0));               // d = _class_list_base (GC-current)
+  emit(Assembler::encode_lw(d, d, class_id * 4));    // d = class_list[class_id] (the class)
 }
 
 void CodeGenerator::move(Assembler::Register dst, Assembler::Register src,

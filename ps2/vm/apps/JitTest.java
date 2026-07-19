@@ -321,6 +321,31 @@ public class JitTest {
         return x;                                              // dead unless the check misses
     }
 
+    // Fase 6 (static INT fields): getstatic/putstatic of a 32-bit static field. The class
+    // BASE is materialized GC-safely via the class_list indirection (CodeGenerator::move(
+    // Value&,Oop*) == get_class_by_id) -- no moveable oop baked into native code -- then
+    // load/store at the static field offset. The compiler resolves the holder at COMPILE
+    // time (get_klass_or_null_from_id -> uncommon_trap/bail if not yet initialized), so the
+    // class-init barrier is honored without runtime code. Non-final so the load path runs (a
+    // final static int folds to a compile-time immediate, exercising nothing new).
+    //   COVERAGE (proven on PCSX2, 2026-07-19):
+    //   - sPut COMPILED: putstatic + getstatic of THIS class's field (own-class class_list base).
+    //   - sGetOther COMPILED: getstatic of ANOTHER class's field -- proves cross-class class_id
+    //     resolution (the whole point of the indirection). It quickens to _fast_init_1_getstatic
+    //     (the holder is not initialized when the ROM image rewrites it), which is why the
+    //     whitelist must accept the _fast_init_* variants (the compiler lowers them identically).
+    //   - sGet is NOT a compiled leaf: the ROM inliner (ROMInliner::try_inline_static_getter)
+    //     inlines an own-class static getter of code_size 4 straight into its caller, so sGet()
+    //     is never invoked and never arms -- its getstatic runs INLINE in the (interpreted) test
+    //     method. The compiled own-class getstatic path is already covered by sPut's "return sBox".
+    //     Kept as a value sanity check, not a JIT check (an own-class getter is always inlined).
+    static int sReadOnly = 100;   // read-only static int (sGet, inlined by romizer); never written
+    static int sBox = 0;          // static int written by sPut
+    static int sGet()        { return sReadOnly; }        // getstatic -> 100
+    static int sPut(int v)   { sBox = v; return sBox; }   // putstatic + getstatic -> v
+    static final class SHolder { static int val = 77; }   // a separate holder class
+    static int sGetOther()   { return SHolder.val; }      // getstatic of another class -> 77
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -513,6 +538,13 @@ public class JitTest {
         // take the throwing path (idx==length / i reaches length), so the warmed value is
         // the compiled self-catch result: -99 / -98 if the check fires, garbage if it misses.
         int cIL = 0, cLm = 0;
+        // Fase 6 static-field accumulators. Touch SHolder.val here to run SHolder.<clinit>
+        // BEFORE sGetOther is compiled: the holder must be INITIALIZED at compile time or
+        // get_klass_or_null_from_id returns null and the compile bails (uncommon_trap). This
+        // does NOT change the quickened form -- sGetOther stays _fast_init_1_getstatic (the ROM
+        // image rewrote it before any class was initialized); the whitelist accepts that variant.
+        int sg = 0, sp = 0, sgo = 0;
+        int shInit = SHolder.val;   // ensure SHolder is initialized before sGetOther compiles
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -582,6 +614,9 @@ public class JitTest {
             cLp  = catchLoop(arrG);    // FASE 6: normal path -> AIOOBE at i==len -> 150+77=227
             cIL  = catchIdxLen(arrG);  // FASE 6 V1: a[a.length] -> AIOOBE self-catch -> -99
             cLm  = catchLoopMin(arrG); // FASE 6 V2: minimal loop -> AIOOBE at i==len -> -98
+            sg   = sGet();             // Fase 6: getstatic sReadOnly -> 100
+            sp   = sPut(55);           // Fase 6: putstatic sBox=55 + getstatic -> 55
+            sgo  = sGetOther();        // Fase 6: getstatic SHolder.val -> 77 (cross-class)
         }
 
         check("add(7,5)",      ra, 12);
@@ -882,6 +917,21 @@ public class JitTest {
         check("catchLoopMin(arrG) V2 minimal-loop",    cLm, -98);
         check("catchIdxLen(arrG) V1 again",            catchIdxLen(arrG), -99);
         check("catchLoopMin(arrG) V2 again",           catchLoopMin(arrG), -98);
+
+        // Fase 6 (static INT fields): getstatic/putstatic compiled with a GC-safe class
+        // base (class_list indirection). sPut(v)=v / sGetOther=77 reading/writing the correct
+        // slot PROVES the class base resolved right (a stale/embedded oop base would read or
+        // clobber garbage). Cross-check [JIT-DIAG]: sPut and sGetOther must be COMPILED (not
+        // NOCODE) -- those are the JIT. sGet is romizer-INLINED (own-class getter, see above),
+        // so its getstatic runs interpreted inline in this method; sGet=100 is only a value
+        // sanity check. The compiled own-class getstatic path is proven by sPut's "return sBox".
+        check("sGet() static read",      sg, 100);
+        check("sPut(55) static write",   sp, 55);
+        check("sBox after sPut",         sBox, 55);
+        check("sGetOther() cross-class", sgo, 77);
+        check("sGet() again",            sGet(), 100);
+        check("sPut(99) fresh",          sPut(99), 99);
+        check("shInit sanity",           shInit, 77);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
