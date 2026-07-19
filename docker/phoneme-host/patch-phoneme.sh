@@ -1033,4 +1033,23 @@ if ! grep -q 'jit_drive_self_catch' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-selfcatch.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 63) ps2me-jit-fase6-staticfields (PS2ME JIT, Fase 6 -- static INT fields, 1st cut).
+#     Whitelist getstatic/putstatic of a 32-bit static field so a compiled method can read/write
+#     static ints (sampler: statics are 75-90% of the Asphalt hot path). Covers BOTH the non-init
+#     fast forms (_fast_1_getstatic/_fast_1_putstatic) AND the class-init variants
+#     (_fast_init_1_getstatic/_fast_init_1_putstatic): the rewriter routinely leaves a static
+#     accessor on the init form permanently (and the ROM image emits it -- classes are
+#     uninitialized at romization), and the compiler lowers both identically (Method.cpp dispatch
+#     -> the same get_static/put_static closure; get_klass_or_null_from_id bails if the holder is
+#     not initialized at compile time, honoring the class-init barrier). Mirrors
+#     _fast_init_invokestatic being whitelisted next to _fast_invokestatic. The GC-safe class BASE
+#     materialization (CodeGenerator::move(Value&,Oop*) = class_list indirection) is git overlay
+#     (CodeGenerator_mips), NOT this patch. NOT covered: _fast_2_* (long/double), _fast_a_putstatic
+#     (object put, write barrier). Validated PCSX2 2026-07-19: sPut + sGetOther (cross-class)
+#     COMPILED. Interpreter_c.cpp is LF-only. Idempotent (guard on the block comment). See
+#     references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'Fase 6 (static INT fields)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-staticfields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

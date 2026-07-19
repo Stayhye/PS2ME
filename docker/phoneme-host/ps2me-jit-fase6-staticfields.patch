@@ -1,0 +1,32 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2858,6 +2858,29 @@
+         case Bytecodes::_fast_igetfield:
+         case Bytecodes::_fast_iputfield:
+           l = 3; break;
++        // Fase 6 (static INT fields): getstatic/putstatic of a 32-bit static field. Both the
++        // non-init fast forms (_fast_1_getstatic/_fast_1_putstatic) and the class-init variants
++        // (_fast_init_1_getstatic/_fast_init_1_putstatic) are covered. The rewriter emits the
++        // init form -- and NEVER downgrades it back to the non-init one (fast_init_1_getstatic
++        // just CHAINs to bc_impl_fast_1_getstatic) -- whenever the holder class was not yet
++        // initialized when the bytecode was first rewritten, so an accessor routinely stays on
++        // the init form PERMANENTLY (the ROM image emits it too: classes are uninitialized at
++        // romization). The compiler dispatch (Method.cpp iterate) routes both forms to the SAME
++        // get_static/put_static closure, which resolves the holder at COMPILE time via
++        // get_klass_or_null_from_id -> uncommon_trap/bail if not yet initialized -- so the
++        // class-init barrier is honored and the init form compiles byte-identically to the
++        // non-init one (mirrors _fast_init_invokestatic being whitelisted next to
++        // _fast_invokestatic, below). The class BASE is materialized GC-safely via the class_list
++        // indirection (CodeGenerator::move(Value&,Oop*) = get_class_by_id) -- no moveable oop
++        // baked into native code -- then load/store at the static field offset. NOT covered:
++        // _fast_2_* (long/double), _fast_a_putstatic (object put, needs the write barrier), and
++        // a final object-static get (a compile-time object immediate -> needs oop relocation the
++        // r5900 lacks; see move(Value&,Oop*)). Length 3 (ADVANCE(3) in the interp handlers).
++        case Bytecodes::_fast_1_getstatic:
++        case Bytecodes::_fast_1_putstatic:
++        case Bytecodes::_fast_init_1_getstatic:
++        case Bytecodes::_fast_init_1_putstatic:
++          l = 3; break;
+         // Marco 3.7a: instance OBJECT/reference field load/store + reference local
+         // loads. getfield/putfield of a reference field quicken to the 'a' fast
+         // forms. fast_agetfield reuses load_from_object (already covered);
