@@ -1,0 +1,19 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2947,6 +2947,16 @@
+         case Bytecodes::_if_icmpeq: case Bytecodes::_if_icmpne:
+         case Bytecodes::_if_icmplt: case Bytecodes::_if_icmpge:
+         case Bytecodes::_if_icmpgt: case Bytecodes::_if_icmple:
++        // Reference branches (firstbad #1 on the Asphalt sampler, ~35% of hot interp time):
++        // ifnull/ifnonnull compare an oop against null; if_acmpeq/if_acmpne compare two oops
++        // for reference identity. All lower through the SAME shared branch_if -> cmp_values +
++        // conditional_jump_do as the int forms (the backend already handles the null/nonnull
++        // cond_ops and eq/ne reuse: CodeGenerator_mips.cpp conditional_jump_do). cmp_values only
++        // reads lo_register(), so T_OBJECT operands work unchanged; comparing oop pointers is
++        // correct for identity (no safepoint between the load and the branch -> no GC reloc).
++        // Same length (3) and same backward-branch timer-tick handling as the int branches.
++        case Bytecodes::_ifnull: case Bytecodes::_ifnonnull:
++        case Bytecodes::_if_acmpeq: case Bytecodes::_if_acmpne:
+         case Bytecodes::_goto: {
+ #if JIT_FASE5_GC_SAFE_ONLY
+           // A backward branch (loop) emits check_timer_tick -> jit_timer_tick, a

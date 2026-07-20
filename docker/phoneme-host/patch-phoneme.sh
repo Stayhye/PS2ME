@@ -1052,4 +1052,20 @@ if ! grep -q 'Fase 6 (static INT fields)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-staticfields.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 64) ps2me-jit-fase6-refbranches (PS2ME JIT, Fase 6 -- reference branches).
+#     Whitelist ifnull/ifnonnull/if_acmpeq/if_acmpne so a compiled method can branch on an
+#     oop -- firstbad #1 on the Asphalt sampler (~35% of hot interp time). The backend was
+#     ALREADY there: conditional_jump_do (CodeGenerator_mips) handles the null/nonnull cond_ops
+#     and if_acmp reuses the eq/ne path, both built in Marco 3.2 by symmetry. All four lower
+#     through the SAME shared branch_if -> cmp_values + conditional_jump_do as the int branches;
+#     cmp_values only reads lo_register(), so T_OBJECT operands work unchanged, and comparing oop
+#     pointers is correct for identity (no safepoint between the load and the branch -> no GC
+#     reloc). So this is whitelist-only (length 3, same backward-branch timer-tick handling as the
+#     int branches). Validated PCSX2 2026-07-19: refIsNull/refNotNull/refSame/refDiff COMPILED,
+#     both beq and bne polarities correct; sPut/sGetOther unregressed. Interpreter_c.cpp is
+#     LF-only. Idempotent (guard on the block comment). See references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'Reference branches (firstbad #1' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-refbranches.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
