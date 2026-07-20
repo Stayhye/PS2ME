@@ -79,6 +79,16 @@ public class JitTest {
     static int aget(int[] a, int i)        { return a[i]; }         // iaload
     static int aset(int[] a, int i, int v) { a[i] = v; return a[i]; } // iastore + iaload
     static int asum(int[] a) { int s = 0; for (int i = 0; i < a.length; i++) s += a[i]; return s; }
+    // Group 1: byte/short/char array element load/store. Verifies the element size
+    // (index_shift) AND sign/zero extension: baload/saload sign-extend (lb/lh),
+    // caload zero-extends (lhu). Store side is sb/sh (bastore/sastore/castore).
+    static int baGet(byte[] a, int i)        { return a[i]; }        // baload (signed)
+    static int baSet(byte[] a, int i, int v) { a[i] = (byte)v; return a[i]; } // bastore + baload
+    static int baSum(byte[] a) { int s = 0; for (int i = 0; i < a.length; i++) s += a[i]; return s; }
+    static int caGet(char[] a, int i)        { return a[i]; }        // caload (zero-extend)
+    static int caSet(char[] a, int i, int v) { a[i] = (char)v; return a[i]; } // castore + caload
+    static int saGet(short[] a, int i)       { return a[i]; }        // saload (signed)
+    static int saSet(short[] a, int i, int v){ a[i] = (short)v; return a[i]; } // sastore + saload
 
     // Marco 3.5: instance INT field load/store. getfield/putfield of an int
     // field quicken to fast_igetfield*/fast_iputfield (possibly aload_0-fused).
@@ -557,6 +567,14 @@ public class JitTest {
         int shInit = SHolder.val;   // ensure SHolder is initialized before sGetOther compiles
         // Reference-branch accumulators (ifnull/ifnonnull/if_acmpeq/if_acmpne).
         int rbn = 0, rbnn = 0, rbs = 0, rbd = 0;
+        // Group 1: byte/short/char array leaves. Values exercise element size + sign/zero ext.
+        byte[]  barr  = { 10, -56, 127 };          // signed byte values
+        byte[]  barrS = new byte[3];               // mutable for baSet
+        char[]  carr  = { 65, 0, 65535 };          // carr[2]=65535 tests caload zero-extend
+        char[]  carrS = new char[3];
+        short[] sarr  = { 1000, -25536, 32767 };   // sarr[1] tests saload sign-extend
+        short[] sarrS = new short[3];
+        int bag = 0, bas = 0, bsm = 0, cag = 0, cas = 0, sag = 0, sas = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -633,6 +651,13 @@ public class JitTest {
             rbnn = refNotNull(boxObj); // ref-branch ifnull:    boxObj != null -> 1
             rbs  = refSame(boxObj, boxObj); // ref-branch if_acmpne: same -> 10
             rbd  = refDiff(boxObj, strObj); // ref-branch if_acmpeq: diff -> 10
+            bag  = baGet(barr, 1);          // Group 1 baload signed -> -56
+            bas  = baSet(barrS, 1, 200);    // bastore 200->(byte)-56, read back -56
+            bsm  = baSum(barr);             // 10 + -56 + 127 = 81
+            cag  = caGet(carr, 2);          // caload zero-extend -> 65535
+            cas  = caSet(carrS, 1, 65535);  // castore ->(char)65535, read 65535
+            sag  = saGet(sarr, 1);          // saload signed -> -25536
+            sas  = saSet(sarrS, 1, 40000);  // sastore 40000->(short)-25536, read -25536
         }
 
         check("add(7,5)",      ra, 12);
@@ -961,6 +986,17 @@ public class JitTest {
         check("refNotNull(null)",        refNotNull(null), 0);        // null -> 0
         check("refSame(box,str)",        refSame(boxObj, strObj), 20);// distinct -> 20
         check("refDiff(box,box)",        refDiff(boxObj, boxObj), 20);// same -> 20
+
+        // Group 1: byte/short/char arrays. Cross-check [JIT-DIAG] shows baGet/baSet/baSum/
+        // caGet/caSet/saGet/saSet COMPILED. Values verify sign-extend (baload/saload) vs
+        // zero-extend (caload) and the element-size store (sb/sh).
+        check("baGet(barr,1) signed",    bag, -56);       // baload sign-extend
+        check("baSet(barrS,1,200)",      bas, -56);       // 200 -> (byte)-56, read back
+        check("baSum(barr)",             bsm, 81);        // 10 + -56 + 127
+        check("caGet(carr,2) zero-ext",  cag, 65535);     // caload zero-extend (unsigned)
+        check("caSet(carrS,1,65535)",    cas, 65535);     // (char)65535 stored + read
+        check("saGet(sarr,1) signed",    sag, -25536);    // saload sign-extend
+        check("saSet(sarrS,1,40000)",    sas, -25536);    // 40000 -> (short)-25536, read back
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
