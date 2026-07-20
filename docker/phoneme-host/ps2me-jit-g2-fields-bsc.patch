@@ -1,0 +1,24 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2858,6 +2858,21 @@
+         case Bytecodes::_fast_igetfield:
+         case Bytecodes::_fast_iputfield:
+           l = 3; break;
++        // Group 2 (byte/short/char instance fields): the rewriter quickens getfield/putfield
++        // of a byte/short/char field to these fast forms; Method::iterate routes each to
++        // fast_get_field/fast_put_field with its BasicType (field_op_types[code - _fast_b*]).
++        // WHITELIST-ONLY -- fast_get_field/fast_put_field reuse load_from_object/store_to_object
++        // (maybe_null_check + FieldAddress + load/store_from_address), which emit lb/lhu/lh / sb/
++        // sh by type (byte/short sign-extend, char zero-extends), exactly like the Group 1 b/s/c
++        // arrays. No write barrier (only object fields need it). There is no _fast_cputfield -- a
++        // char store uses _fast_sputfield (a store does not distinguish sign). Length 3, same NPE
++        // path as fast_igetfield.
++        case Bytecodes::_fast_bgetfield:
++        case Bytecodes::_fast_sgetfield:
++        case Bytecodes::_fast_cgetfield:
++        case Bytecodes::_fast_bputfield:
++        case Bytecodes::_fast_sputfield:
++          l = 3; break;
+         // Fase 6 (static INT fields): getstatic/putstatic of a 32-bit static field. Both the
+         // non-init fast forms (_fast_1_getstatic/_fast_1_putstatic) and the class-init variants
+         // (_fast_init_1_getstatic/_fast_init_1_putstatic) are covered. The rewriter emits the

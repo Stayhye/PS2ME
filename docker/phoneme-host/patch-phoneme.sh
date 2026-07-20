@@ -1085,4 +1085,19 @@ if ! grep -q 'Group 1 (byte/short/char arrays)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g1-arrays-bsc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 66) ps2me-jit-g2-fields-bsc (PS2ME JIT, ISA Group 2 -- byte/short/char instance fields).
+#     Whitelist fast_bgetfield/fast_sgetfield/fast_cgetfield + fast_bputfield/fast_sputfield.
+#     WHITELIST-ONLY: Method::iterate routes each to fast_get_field/fast_put_field with its
+#     BasicType (field_op_types[code - _fast_b*]); those reuse load_from_object/store_to_object
+#     (maybe_null_check + FieldAddress + load/store_from_address), which emit lb/lhu/lh / sb/sh
+#     by type -- byte/short sign-extend, char zero-extends -- exactly like the Group 1 b/s/c
+#     arrays. No write barrier (object fields only). There is no _fast_cputfield: a char store
+#     uses _fast_sputfield. Length 3, same NPE path as fast_igetfield (Marco 3.5). Validated
+#     PCSX2/HW 2026-07-20: setters sBf/sSf/sCf COMPILED prove all 5 bytecodes (store + reload);
+#     values verify sign vs zero extension. Own-field getters gBf/gSf/gCf are romizer-inlined
+#     (benign, like sGet). Interpreter_c.cpp is LF-only. Idempotent (guard on the block comment).
+if ! grep -q 'Group 2 (byte/short/char instance fields)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g2-fields-bsc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
