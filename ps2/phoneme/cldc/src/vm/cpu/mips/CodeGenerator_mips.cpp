@@ -30,6 +30,24 @@
 extern "C" void jit_frame_enter();
 extern "C" void jit_return_int(jint result);
 extern "C" void jit_return_void();
+// Grupo 4 (long): two-word return + the C long primitives backing lmul/lshl/lshr/
+// lushr/lcmp. This build has NO 64-bit-native helpers (jvm_l* live only in the ARM/
+// i386 InterpreterRuntime; GPSkeleton's are stubs and ENABLE_INTERPRETER_GENERATOR
+// is false), so the compiler calls these thin C helpers -- the EE gcc emits correct
+// `long long` code (Java shift count masked to 63). Add + logic (ladd/lsub/land/lor/
+// lxor/lneg/i2l) are inlined in the backend; mul/shift/compare go through C.
+//
+// ABI: the ps2dev EE toolchain is n32/n64, so a jlong occupies ONE 64-bit register,
+// not an o32 register pair. The JIT holds a long as two 32-bit regs (lo/hi); it
+// passes them as SEPARATE jint args (each in its own 64-bit arg register) and the C
+// helper reassembles. A returned jlong comes back 64-bit-packed in v0, which the
+// backend splits (lo=sll v0,0 ; hi=dsra32 v0,0). See JIT_PLAN.md 6 (Group 4).
+extern "C" void  jit_return_long(jint lo, jint hi);
+extern "C" jlong jit_lmul (jint alo, jint ahi, jint blo, jint bhi);
+extern "C" jlong jit_lshl (jint alo, jint ahi, jint shift);
+extern "C" jlong jit_lshr (jint alo, jint ahi, jint shift);
+extern "C" jlong jit_lushr(jint alo, jint ahi, jint shift);
+extern "C" jint  jit_lcmp (jint alo, jint ahi, jint blo, jint bhi);
 extern "C" void jit_timer_tick(int bci); // Marco 3.2b: backward-branch timer check (+GC safepoint bci)
 // Marco 3.4a: runtime-exception throw helpers. Thin wrappers over the C
 // interpreter's own interpreter_throw_* (Interpreter_c.cpp, patch #44): allocate
@@ -337,8 +355,20 @@ void CodeGenerator::load_from_address(Value& result, BasicType type,
     case T_FLOAT:                                // fall through
     case T_ARRAY:                                // fall through
     case T_OBJECT: emit(Assembler::encode_lw (lo, base, off)); break;
+    case T_LONG: {
+      // Grupo 4: two-word load. try_to_assign_register() above gave a T_LONG two
+      // registers; lo_register <- LSW (lo_address), hi_register <- MSW (hi_address).
+      // The lo/hi displacements come from the shared StackAddress offsets, verified
+      // against Interpreter_c's GET_LOCAL_LOW/HIGH (LSW at g_jlocals-(n+1)*4, MSW at
+      // g_jlocals-n*4). result registers are fresh (distinct from the address base),
+      // so the two loads do not alias -- mirrors i386 load_from_address T_LONG.
+      const BinaryAssembler::Address haddr = address.hi_address();
+      emit(Assembler::encode_lw(lo, base, off));                              // LSW
+      emit(Assembler::encode_lw(result.hi_register(), haddr.base(), haddr.disp())); // MSW
+      break;
+    }
     default:
-      // T_LONG / T_DOUBLE are two-word; those arrive with a later Marco.
+      // T_DOUBLE is a two-word float; Fase 4.
       SHOULD_NOT_REACH_HERE();
       break;
   }
@@ -358,6 +388,33 @@ void CodeGenerator::store_to_address(Value& value, BasicType type,
   if (!value.is_present()) return;   // nothing to store
   GUARANTEE(stack_type_for(type) == value.stack_type(),
             "types must match (taking stack types into account)");
+
+  // Grupo 4: two-word (long) store. A long is never a heap reference, so NO write
+  // barrier. Store LSW -> lo_address, MSW -> hi_address (mirrors i386 T_LONG). The
+  // immediate case materializes each non-zero half through $at (used-then-reloaded,
+  // so no clobber across the two stores); a zero half stores $zero directly. The
+  // address base (g_jlocals / object reg / index reg) is never $at, so $at is safe.
+  if (type == T_LONG) {
+    const BinaryAssembler::Address laddr = address.lo_address();
+    const BinaryAssembler::Address haddr = address.hi_address();
+    if (value.is_immediate()) {
+      Assembler::Register lo_src = Assembler::zero;
+      if (value.lo_bits() != 0) {
+        mips_li(this, Assembler::at, (juint)value.lo_bits()); lo_src = Assembler::at;
+      }
+      emit(Assembler::encode_sw(lo_src, laddr.base(), laddr.disp()));         // LSW
+      Assembler::Register hi_src = Assembler::zero;
+      if (value.hi_bits() != 0) {
+        mips_li(this, Assembler::at, (juint)value.hi_bits()); hi_src = Assembler::at;
+      }
+      emit(Assembler::encode_sw(hi_src, haddr.base(), haddr.disp()));         // MSW
+    } else {
+      GUARANTEE(value.in_register(), "only case left");
+      emit(Assembler::encode_sw(value.lo_register(), laddr.base(), laddr.disp())); // LSW
+      emit(Assembler::encode_sw(value.hi_register(), haddr.base(), haddr.disp())); // MSW
+    }
+    return;
+  }
 
   // Resolve the source register first -- it is independent of the address, and the
   // write-barrier prolog (below) may reallocate the address into a fresh register.
@@ -399,7 +456,7 @@ void CodeGenerator::store_to_address(Value& value, BasicType type,
     case T_ARRAY:                                // fall through
     case T_OBJECT: emit(Assembler::encode_sw(src, base, off)); break;
     default:
-      // T_LONG / T_DOUBLE are two-word; those arrive with a later Marco.
+      // T_LONG handled early (two-word, above); T_DOUBLE is Fase 4.
       SHOULD_NOT_REACH_HERE();
       break;
   }
@@ -416,8 +473,20 @@ void CodeGenerator::move(const Value& dst, const Value& src, const Condition con
   GUARANTEE(cond == Assembler::always, "Fase 3: unconditional moves only");
   (void)cond;
   GUARANTEE(dst.in_register(), "move destination must have a register");
-  GUARANTEE(dst.is_one_word() && src.is_one_word(),
-            "Fase 3: single-word moves only");
+  // Grupo 4: two-word (long) move -- copy/materialize BOTH halves. lo<->_low(LSW),
+  // hi<->_high(MSW); lo_bits/hi_bits match those registers. Mirrors i386 move T_LONG.
+  if (!dst.is_one_word()) {
+    GUARANTEE(dst.type() == T_LONG && src.type() == T_LONG, "two-word move is long");
+    if (src.is_immediate()) {
+      mips_li(this, dst.lo_register(), (juint)src.lo_bits());
+      mips_li(this, dst.hi_register(), (juint)src.hi_bits());
+    } else {
+      GUARANTEE(src.in_register(), "source must be immediate or in a register");
+      if (dst.lo_register() != src.lo_register()) mov(dst.lo_register(), src.lo_register());
+      if (dst.hi_register() != src.hi_register()) mov(dst.hi_register(), src.hi_register());
+    }
+    return;
+  }
   if (src.is_immediate()) {
     mips_li(this, dst.lo_register(), (juint)src.as_int());
   } else {
@@ -859,19 +928,34 @@ void CodeGenerator::unlock_activation(JVM_SINGLE_ARG_TRAPS) {
 }
 
 void CodeGenerator::return_result(Value& value JVM_TRAPS) {
-  // Fase 2: single-word (int/object/float) returns via the C teardown helper.
-  // long/double (two-word) returns arrive with FloatSupport/Fase 3.
-  GUARANTEE(value.is_one_word(), "Fase 2: single-word returns only");
-  // materialize the result into a0 (the jit_return_int argument register).
-  if (value.is_immediate()) {
-    mips_li(this, Assembler::a0, (juint)value.as_int());
-  } else {
-    GUARANTEE(value.in_register(), "result must be immediate or in a register");
-    if (value.lo_register() != Assembler::a0) {
-      mov(Assembler::a0, value.lo_register());
+  // Single-word (int/object/float) returns via jit_return_int; Grupo 4 adds the
+  // long (two-word) return via jit_return_long. double is Fase 4.
+  if (value.is_one_word()) {
+    // materialize the result into a0 (the jit_return_int argument register).
+    if (value.is_immediate()) {
+      mips_li(this, Assembler::a0, (juint)value.as_int());
+    } else {
+      GUARANTEE(value.in_register(), "result must be immediate or in a register");
+      if (value.lo_register() != Assembler::a0) {
+        mov(Assembler::a0, value.lo_register());
+      }
     }
+    mips_call_c(this, (address)jit_return_int);
+  } else {
+    // Grupo 4: long. jit_return_long(jint lo, jint hi) takes the two words as separate
+    // args (lo=a0, hi=a1) -- the n64 ABI gives each its own 64-bit register. a0/a1 are
+    // outside the pool, so they never alias the value's t* registers.
+    GUARANTEE(value.type() == T_LONG, "two-word return is long (double is Fase 4)");
+    if (value.is_immediate()) {
+      mips_li(this, Assembler::a0, (juint)value.lo_bits());
+      mips_li(this, Assembler::a1, (juint)value.hi_bits());
+    } else {
+      GUARANTEE(value.in_register(), "result must be immediate or in registers");
+      mov(Assembler::a0, value.lo_register());
+      mov(Assembler::a1, value.hi_register());
+    }
+    mips_call_c(this, (address)jit_return_long);
   }
-  mips_call_c(this, (address)jit_return_int);
   // native-stack epilogue: restore ra and return to call_from_interpreter.
   emit(Assembler::encode_lw(Assembler::ra, Assembler::sp, 0));
   emit(Assembler::encode_addiu(Assembler::sp, Assembler::sp, 16));
@@ -1031,22 +1115,151 @@ void CodeGenerator::int_unary_do(Value& result, Value& op1,
   }
 }
 
-// long (two-word integer) arithmetic / compare: not yet emitted. Bail cleanly.
+// Grupo 4 (long): two-word integer arithmetic / compare on the r5900 par model
+// (Value holds a long as two 32-bit GPRs, lo=LSW / hi=MSW; little-endian PS2). The
+// r5900 has NO carry flag, so add/sub synthesize the carry/borrow with sltu. mul
+// and the shifts go through a C helper (jit_l*); div/rem are Grupo 5. Mirrors the
+// i386 backend (which likewise inlines add/sub/and/or/xor and calls jvm_l* for the
+// rest), adapted to sltu-carry. See JIT_PLAN.md 6 (Group 4).
+
+// Pass a long operand pair + a long/int op2 to a C helper and capture the jlong
+// result. Flush first (the C call clobbers t0-t8; the VSF is reloaded from memory).
+void CodeGenerator::long_call_c_helper(Value& result, Value& op1, Value& op2,
+                                       address helper, bool op2_is_int JVM_TRAPS) {
+  op1.materialize();
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+  // n64 ABI: the helper takes op1's two words as separate jint args (alo=a0, ahi=a1)
+  // and op2 as either an int shift (a2) or a long's two words (blo=a2, bhi=a3); the C
+  // side reassembles each pair into a jlong. a0-a3 are outside the register pool, so
+  // copying t* -> a* never clobbers a still-needed t*.
+  mov(Assembler::a0, op1.lo_register());
+  mov(Assembler::a1, op1.hi_register());
+  if (op2_is_int) {                                   // shift count -> a2
+    if (op2.is_immediate()) mips_li(this, Assembler::a2, (juint)op2.as_int());
+    else                    mov(Assembler::a2, op2.lo_register());
+  } else if (op2.is_immediate()) {                    // long op2 -> a2:a3
+    mips_li(this, Assembler::a2, (juint)op2.lo_bits());
+    mips_li(this, Assembler::a3, (juint)op2.hi_bits());
+  } else {
+    mov(Assembler::a2, op2.lo_register());
+    mov(Assembler::a3, op2.hi_register());
+  }
+  op1.destroy();
+  op2.destroy();
+  mips_call_c(this, helper);
+  // n64 ABI: the jlong result comes back 64-bit-packed in the SINGLE register v0 (not
+  // v0:v1). Split it into the two-word Value before the next call clobbers v0: LSW =
+  // low 32 of v0 (sll v0,0 sign-extends it), MSW = high 32 (dsra32 v0,32). result was
+  // not present (GUARANTEE at the call site).
+  result.assign_register();
+  emit(Assembler::encode_sll(result.lo_register(), Assembler::v0, 0));     // LSW
+  emit(Assembler::encode_dsra32(result.hi_register(), Assembler::v0, 0));  // MSW = v0 >> 32
+}
+
 void CodeGenerator::long_binary_do(Value& result, Value& op1, Value& op2,
                                    BytecodeClosure::binary_op op JVM_TRAPS) {
-  (void)result; (void)op1; (void)op2; (void)op;
-  Compiler::abort_active_compilation(true JVM_THROW);
+  GUARANTEE(op1.in_register(), "op1 must be in a register");
+
+  switch (op) {
+    case BytecodeClosure::bin_mul:
+      long_call_c_helper(result, op1, op2, (address)jit_lmul,  false JVM_NO_CHECK_AT_BOTTOM);
+      return;
+    case BytecodeClosure::bin_shl:
+      long_call_c_helper(result, op1, op2, (address)jit_lshl,  true  JVM_NO_CHECK_AT_BOTTOM);
+      return;
+    case BytecodeClosure::bin_shr:
+      long_call_c_helper(result, op1, op2, (address)jit_lshr,  true  JVM_NO_CHECK_AT_BOTTOM);
+      return;
+    case BytecodeClosure::bin_ushr:
+      long_call_c_helper(result, op1, op2, (address)jit_lushr, true  JVM_NO_CHECK_AT_BOTTOM);
+      return;
+    case BytecodeClosure::bin_add:
+    case BytecodeClosure::bin_sub:
+    case BytecodeClosure::bin_and:
+    case BytecodeClosure::bin_or:
+    case BytecodeClosure::bin_xor:
+      break;                                           // inline below
+    default:                                           // div/rem (Grupo 5), rsb/min/max
+      Compiler::abort_active_compilation(true JVM_THROW);
+      return;
+  }
+
+  // Inline add/sub/and/or/xor. Materialize op2 into registers (the immediate-fused
+  // form is a later optimization) and make result a writable copy of op1.
+  op2.materialize();
+  op1.writable_copy(result);
+  const Assembler::Register R_lo = result.lo_register();
+  const Assembler::Register R_hi = result.hi_register();
+  const Assembler::Register B_lo = op2.lo_register();
+  const Assembler::Register B_hi = op2.hi_register();
+
+  switch (op) {
+    case BytecodeClosure::bin_add:
+      // 64-bit add. Sum parked in $at; the carry is read from A_lo before R_lo is
+      // overwritten, so the sequence is correct even if result and op2 alias.
+      emit(Assembler::encode_addu(Assembler::at, R_lo, B_lo));   // at = A_lo + B_lo
+      emit(Assembler::encode_sltu(R_lo, Assembler::at, R_lo));   // R_lo = carry (sum<A_lo)
+      emit(Assembler::encode_addu(R_hi, R_hi, B_hi));            // hi = A_hi + B_hi
+      emit(Assembler::encode_addu(R_hi, R_hi, R_lo));            // hi += carry
+      emit(Assembler::encode_or  (R_lo, Assembler::at, Assembler::zero)); // R_lo = sum
+      break;
+    case BytecodeClosure::bin_sub:
+      // borrow = (A_lo < B_lo), computed before R_lo is overwritten (alias-safe).
+      emit(Assembler::encode_sltu(Assembler::at, R_lo, B_lo));   // at = borrow
+      emit(Assembler::encode_subu(R_lo, R_lo, B_lo));            // lo = A_lo - B_lo
+      emit(Assembler::encode_subu(R_hi, R_hi, B_hi));            // hi = A_hi - B_hi
+      emit(Assembler::encode_subu(R_hi, R_hi, Assembler::at));   // hi -= borrow
+      break;
+    case BytecodeClosure::bin_and:
+      emit(Assembler::encode_and(R_lo, R_lo, B_lo));
+      emit(Assembler::encode_and(R_hi, R_hi, B_hi)); break;
+    case BytecodeClosure::bin_or:
+      emit(Assembler::encode_or (R_lo, R_lo, B_lo));
+      emit(Assembler::encode_or (R_hi, R_hi, B_hi)); break;
+    case BytecodeClosure::bin_xor:
+      emit(Assembler::encode_xor(R_lo, R_lo, B_lo));
+      emit(Assembler::encode_xor(R_hi, R_hi, B_hi)); break;
+    default:
+      SHOULD_NOT_REACH_HERE();
+  }
 }
 
 void CodeGenerator::long_unary_do(Value& result, Value& op1,
                                   BytecodeClosure::unary_op op JVM_TRAPS) {
-  (void)result; (void)op1; (void)op;
-  Compiler::abort_active_compilation(true JVM_THROW);
+  switch (op) {
+    case BytecodeClosure::una_neg: break;
+    default:                                           // una_abs (Math.abs inline)
+      Compiler::abort_active_compilation(true JVM_THROW);
+      return;
+  }
+  op1.writable_copy(result);
+  const Assembler::Register R_lo = result.lo_register();
+  const Assembler::Register R_hi = result.hi_register();
+  // 64-bit negate = 0 - x. lo = -A_lo; borrow = (0 < A_lo) = (A_lo != 0); hi =
+  // -A_hi - borrow. Compute borrow before overwriting R_lo (alias-safe).
+  emit(Assembler::encode_sltu(Assembler::at, Assembler::zero, R_lo)); // at = (A_lo != 0)
+  emit(Assembler::encode_subu(R_lo, Assembler::zero, R_lo));          // lo = -A_lo
+  emit(Assembler::encode_subu(R_hi, Assembler::zero, R_hi));          // hi = -A_hi
+  emit(Assembler::encode_subu(R_hi, R_hi, Assembler::at));            // hi -= borrow
 }
 
+// lcmp: Java's -1/0/1 long compare. The shared layer constant-folds two immediates;
+// here at least one operand is register-resident. Delegate to a C helper (jit_lcmp)
+// -- simpler and smaller than the flag-free inline the i386/ARM use, and lcmp is not
+// a hot inner-loop op. The int result (v0) feeds the following ifXX normally.
 void CodeGenerator::long_cmp(Value& result, Value& op1, Value& op2 JVM_TRAPS) {
-  (void)result; (void)op1; (void)op2;
-  Compiler::abort_active_compilation(true JVM_THROW);
+  op1.materialize();
+  op2.materialize();
+  frame()->flush(JVM_SINGLE_ARG_CHECK);
+  mov(Assembler::a0, op1.lo_register());
+  mov(Assembler::a1, op1.hi_register());
+  mov(Assembler::a2, op2.lo_register());
+  mov(Assembler::a3, op2.hi_register());
+  op1.destroy();
+  op2.destroy();
+  mips_call_c(this, (address)jit_lcmp);
+  result.assign_register();                            // single-word (T_INT)
+  mov(result.lo_register(), Assembler::v0);
 }
 
 // ---- float / double arithmetic (Fase 4) --------------------------------------
@@ -1123,10 +1336,17 @@ void CodeGenerator::i2s(Value& result, Value& value JVM_TRAPS) {
   emit(Assembler::encode_sll(rd, value.lo_register(), 16));
   emit(Assembler::encode_sra(rd, rd, 16));
 }
-// Conversions involving long/float/double: not yet emitted (Fase 4). i2b/i2c/i2s
-// (narrowing int->int) are covered above (Marco 3.3). Bail cleanly.
+// Grupo 4: i2l sign-extends a 32-bit int to a 64-bit long. Reuse the int's register
+// as the LSW and allocate one for the MSW = (LSW >>arith 31), replicating the sign
+// bit. Mirrors i386 i2l (movl hi,lo; sarl hi,31) in one r5900 arithmetic shift.
+// l2i needs no backend (the shared layer re-types the LSW register as T_INT).
+// i2f/i2d/l2f/l2d stay bailed (Fase 4, FPU). i2b/i2c/i2s are above (Marco 3.3).
 void CodeGenerator::i2l(Value& result, Value& value JVM_TRAPS) {
-  (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);
+  JVM_IGNORE_TRAPS;
+  GUARANTEE(value.in_register(), "immediate case handled by the shared layer");
+  RegisterAllocator::reference(value.lo_register());
+  result.set_registers(value.lo_register(), RegisterAllocator::allocate());
+  emit(Assembler::encode_sra(result.hi_register(), value.lo_register(), 31));
 }
 void CodeGenerator::i2f(Value& result, Value& value JVM_TRAPS) {
   (void)result; (void)value; Compiler::abort_active_compilation(true JVM_THROW);

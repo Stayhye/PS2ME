@@ -203,6 +203,10 @@ class Assembler: public AssemblerCommon {
   static Instr encode_sll (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x00); }
   static Instr encode_srl (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x02); }
   static Instr encode_sra (Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x03); }
+  // Grupo 4 (long): the only 64-bit "d" instruction the JIT emits. dsra32 rd,rt,sa
+  // = rd = rt >> (sa+32), arithmetic -- used to extract the high 32 bits (MSW) of a
+  // 64-bit jlong that an n64 C helper returned packed in a single register (v0).
+  static Instr encode_dsra32(Register rd, Register rt, int sa) { return r_type(0, 0, rt, rd, sa, 0x3f); }
   static Instr encode_nop () { return 0u; }  // sll zero,zero,0
 
   // Multiply/divide + hi/lo moves.

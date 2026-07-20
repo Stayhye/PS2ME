@@ -28,6 +28,15 @@ private:
   void ishift_helper(Value& result, Value& op1, Value& op2);
   void idiv_helper(Value& result, Value& op1, Value& op2 JVM_TRAPS);
 
+  // Grupo 4: long mul/shift via a C helper (no 64-bit-native path in this build).
+  // Flushes the frame, then (n64 ABI: the ps2dev EE toolchain, so each jlong word is
+  // passed as its own jint arg register, NOT an o32 pair) copies op1's two words to
+  // a0/a1 and op2 either as a long's two words (a2/a3) or an int shift count (a2),
+  // calls `helper`, and splits the v0-packed jlong result into result's lo/hi via
+  // sll/dsra32. Mirrors the i386 runtime_long_op.
+  void long_call_c_helper(Value& result, Value& op1, Value& op2,
+                          address helper, bool op2_is_int JVM_TRAPS);
+
   void cmp_values(Value& op1, Value& op2);
   void verify_no_redo() PRODUCT_RETURN;
 
