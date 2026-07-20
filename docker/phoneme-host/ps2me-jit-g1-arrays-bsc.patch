@@ -1,0 +1,21 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2928,6 +2928,18 @@
+         // an IndexedAddress; all covered by the backend, exceptions reuse 3.4a.
+         case Bytecodes::_iaload:
+         case Bytecodes::_iastore:
++        // Group 1 (byte/short/char arrays): baload/saload/caload + bastore/sastore/
++        // castore. WHITELIST-ONLY -- the backend is already type-generic: the shared
++        // load_array/store_array(kind) route through the SAME array_check and
++        // load_from_array/store_to_array, which derive the element size from the Value
++        // type (IndexedAddress::index_shift = log2(byte_size): byte->0, short/char->1)
++        // and emit lb/lhu/lh / sb/sh via load_from_address/store_to_address (already
++        // implemented for the b/s/c instance fields). No object type_check (that is
++        // T_OBJECT only), so not a GC point -- same length 1 and same array_check
++        // exception path (AIOOBE/NPE) as iaload/iastore.
++        case Bytecodes::_baload:  case Bytecodes::_bastore:
++        case Bytecodes::_saload:  case Bytecodes::_sastore:
++        case Bytecodes::_caload:  case Bytecodes::_castore:
+           l = 1; break;
+         case Bytecodes::_iload:  case Bytecodes::_istore:
+         case Bytecodes::_bipush:

@@ -1068,4 +1068,21 @@ if ! grep -q 'Reference branches (firstbad #1' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-fase6-refbranches.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 65) ps2me-jit-g1-arrays-bsc (PS2ME JIT, ISA Group 1 -- byte/short/char arrays).
+#     Whitelist baload/saload/caload + bastore/sastore/castore. WHITELIST-ONLY: the array
+#     backend is already type-generic -- the shared load_array/store_array(kind) route through
+#     the SAME array_check (null + unsigned bounds, independent of element size) and
+#     load_from_array/store_to_array, which derive the type from result.type()/value.type();
+#     IndexedAddress::index_shift() = log2(byte_size) yields the element scale (byte->0,
+#     short/char->1) and load_from_address/store_to_address already emit lb/lhu/lh / sb/sh
+#     (built for the b/s/c instance fields). No object type_check (T_OBJECT only) so not a GC
+#     point -- same length 1 and same AIOOBE/NPE exception path as iaload/iastore. First group
+#     of the "implement ISA in families" plan (op-by-op cannot reach the Asphalt giants).
+#     Validated PCSX2 2026-07-20: baGet/baSet/baSum/caGet/caSet/saGet/saSet COMPILED; values
+#     verify sign-extend (baload/saload) vs zero-extend (caload). Interpreter_c.cpp is LF-only.
+#     Idempotent (guard on the block comment). See references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'Group 1 (byte/short/char arrays)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g1-arrays-bsc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
