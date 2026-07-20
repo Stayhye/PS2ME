@@ -1100,4 +1100,21 @@ if ! grep -q 'Group 2 (byte/short/char instance fields)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g2-fields-bsc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 67) ps2me-jit-g3-ldc-int (PS2ME JIT, ISA Group 3 -- int ldc, CONTENT-GATED).
+#     Whitelist ldc/ldc_w/fast_1_ldc/fast_1_ldc_w BUT only when the pooled constant is an int.
+#     ldc dispatches by cpool tag (Method::iterate -> iterate_push_constant_1): int -> push_int
+#     -> Value.set_int (materialized via mips_li, exactly like iconst/bipush) = ZERO backend
+#     change. But float -> push_float has no r5900 backend, and String -> push_obj reaches
+#     move(Value&,Oop*), which only materializes a CLASS oop GC-safely (class_list); a non-class
+#     oop would corrupt (no relocation stream on r5900). move/set_obj carry no JVM_TRAPS -> cannot
+#     bail in the backend, so we GATE HERE by the constant's tag (ConstantTag::is_int): a String/
+#     float ldc leaves the method non-whitelisted (interpreted). String ldc is a later group
+#     (a GC-safe oop-constant helper). fast_1_ldc index is 1 byte, fast_1_ldc_w is 2 bytes.
+#     Validated PCSX2 2026-07-20: ldcBig/ldcNeg/ldcMask COMPILED, values 100005/-69995/13303296;
+#     G1/G2/ref-branches/static fields unregressed. Interpreter_c.cpp is LF-only. Idempotent
+#     (guard on the block comment). See references/JIT_PLAN.md and [[jit-plan]].
+if ! grep -q 'Group 3 (ldc' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g3-ldc-int.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
