@@ -35,6 +35,23 @@ public class JitTest {
     static int ldcNeg(int x)  { return x + -70000; }    // fast_1_ldc -70000 + iadd
     static int ldcMask(int x) { return x & 0xCAFE00; }  // fast_1_ldc 0xCAFE00 + iand
 
+    // Group 4: long (64-bit) ISA. add/sub/and/or/xor/neg inline (sltu carry);
+    // mul/shl/shr/ushr via C helper (jit_l*); i2l sign-extends; l2i is free; lcmp
+    // feeds the following ifXX. lload/lstore/lconst/lreturn are two-word VSF.
+    static long addL(long a, long b) { return a + b; }   // ladd + lreturn
+    static long subL(long a, long b) { return a - b; }   // lsub
+    static long mulL(long a, long b) { return a * b; }   // lmul (C helper)
+    static long andL(long a, long b) { return a & b; }   // land
+    static long orL (long a, long b) { return a | b; }   // lor
+    static long xorL(long a, long b) { return a ^ b; }   // lxor
+    static long negL(long a)         { return -a; }      // lneg
+    static long shlL(long a, int s)  { return a << s; }  // lshl (C helper)
+    static long shrL(long a, int s)  { return a >> s; }  // lshr (C helper, arithmetic)
+    static long ushrL(long a, int s) { return a >>> s; } // lushr (C helper, logical)
+    static long i2lL(int x)          { return (long) x; }// i2l + lreturn (sign-extend)
+    static int  lowL(long a)         { return (int) a; } // l2i + ireturn
+    static int  cmpL(long a, long b) { return (a < b) ? -7 : (a > b) ? 7 : 0; } // lcmp + ifXX
+
     // Marco 3.2a: forward branches (if / if_icmp / goto) + a local store forced
     // to memory at a branch merge. Each leaf's every bytecode is on the Fase-3
     // whitelist and has only forward branch offsets, so the strict trigger arms
@@ -384,6 +401,14 @@ public class JitTest {
 
     static int fails = 0;
 
+    // Group 4: verify a long result via two int checks (LSW then MSW). Avoids
+    // depending on println(long)/Long.toString; (int)v is l2i, (int)(v>>>32) is
+    // lushr+l2i -- both run in the (interpreted) test driver, not the compiled leaf.
+    static void checkL(String name, long got, long want) {
+        check(name + ".lo", (int) got,         (int) want);
+        check(name + ".hi", (int)(got >>> 32), (int)(want >>> 32));
+    }
+
     static void check(String name, int got, int want) {
         if (got == want) {
             System.out.println("[JIT-TEST] " + name + " = " + got + " OK");
@@ -596,6 +621,13 @@ public class JitTest {
         int gbf = 0, gsf = 0, gcf = 0, sbf = 0, ssf = 0, scf = 0;
         // Group 3: int-ldc leaves (large constants materialized via mips_li).
         int lbg = 0, lng = 0, lmk = 0;
+        // Group 4 long inputs + result holders. la/lb straddle the 32-bit boundary
+        // (hi and lo both nonzero) so add carries, sub borrows, and shifts cross the
+        // word split; lc is negative so shr sign-extends and ushr does not.
+        long la = 0x00000001FFFFFFFFL, lb = 0x0000000200000001L, lc = 0xFFFFFFFE00000001L;
+        long vAdd = 0, vSub = 0, vMul = 0, vAnd = 0, vOr = 0, vXor = 0, vNeg = 0;
+        long vShl = 0, vShr = 0, vUshr = 0, vI2lN = 0, vI2lP = 0;
+        int  vLow = 0, vCmpLt = 0, vCmpGt = 0, vCmpEq = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -688,6 +720,22 @@ public class JitTest {
             lbg  = ldcBig(5);               // Group 3 fast_1_ldc 100000 -> 100005
             lng  = ldcNeg(5);               // fast_1_ldc -70000 -> -69995
             lmk  = ldcMask(0xFFFFFF);       // fast_1_ldc 0xCAFE00 -> 13303296
+            vAdd  = addL(la, lb);           // Group 4 ladd (carry) -> 0x0000000400000000
+            vSub  = subL(la, lb);           // lsub (borrow) -> -2
+            vMul  = mulL(0x100000000L, 3L); // lmul (C helper) -> 0x300000000
+            vAnd  = andL(la, lb);           // land -> 1
+            vOr   = orL (la, lb);           // lor  -> 0x00000003FFFFFFFF
+            vXor  = xorL(la, lb);           // lxor -> 0x00000003FFFFFFFE
+            vNeg  = negL(la);               // lneg -> 0xFFFFFFFE00000001
+            vShl  = shlL(la, 4);            // lshl (C helper) -> 0x0000001FFFFFFFF0
+            vShr  = shrL(lc, 4);            // lshr arithmetic -> 0xFFFFFFFFE0000000
+            vUshr = ushrL(lc, 4);           // lushr logical  -> 0x0FFFFFFFE0000000
+            vI2lN = i2lL(-5);               // i2l sign-extend -> -5
+            vI2lP = i2lL(7);                // i2l -> 7
+            vLow  = lowL(la);               // l2i -> -1
+            vCmpLt = cmpL(la, lb);          // lcmp la<lb -> -7
+            vCmpGt = cmpL(lb, la);          // lcmp lb>la -> 7
+            vCmpEq = cmpL(la, la);          // lcmp la==la -> 0
         }
 
         check("add(7,5)",      ra, 12);
@@ -1043,6 +1091,27 @@ public class JitTest {
         check("ldcBig(5)",               lbg, 100005);    // fast_1_ldc 100000
         check("ldcNeg(5)",               lng, -69995);    // fast_1_ldc -70000
         check("ldcMask(0xFFFFFF)",       lmk, 13303296);  // fast_1_ldc 0xCAFE00
+
+        // Group 4: long ISA. Cross-check [JIT-DIAG] shows addL/subL/mulL/.../cmpL
+        // COMPILED. checkL verifies both words (LSW+MSW) so carry/borrow and the
+        // cross-32-bit shifts are exercised. C-helper leaves (mul/shl/shr/ushr) and
+        // the inline ones (add/sub/and/or/xor/neg) are all covered.
+        checkL("addL",  vAdd,  0x0000000400000000L);  // low overflow -> carry into hi
+        checkL("subL",  vSub,  -2L);                   // low borrow
+        checkL("mulL",  vMul,  0x300000000L);          // 2^32 * 3
+        checkL("andL",  vAnd,  1L);
+        checkL("orL",   vOr,   0x00000003FFFFFFFFL);
+        checkL("xorL",  vXor,  0x00000003FFFFFFFEL);
+        checkL("negL",  vNeg,  0xFFFFFFFE00000001L);
+        checkL("shlL",  vShl,  0x0000001FFFFFFFF0L);   // bits cross lo->hi
+        checkL("shrL",  vShr,  0xFFFFFFFFE0000000L);   // arithmetic (sign fill)
+        checkL("ushrL", vUshr, 0x0FFFFFFFE0000000L);   // logical (zero fill)
+        checkL("i2lNeg", vI2lN, -5L);                  // sign-extend
+        checkL("i2lPos", vI2lP, 7L);
+        check("lowL",    vLow,   -1);                  // l2i of la's LSW
+        check("cmpLt",   vCmpLt, -7);
+        check("cmpGt",   vCmpGt,  7);
+        check("cmpEq",   vCmpEq,  0);
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
