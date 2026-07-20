@@ -346,6 +346,16 @@ public class JitTest {
     static final class SHolder { static int val = 77; }   // a separate holder class
     static int sGetOther()   { return SHolder.val; }      // getstatic of another class -> 77
 
+    // Reference branches (ISA next op -- firstbad #1 on the Asphalt sampler, ~35% of hot interp
+    // time): ifnull/ifnonnull compare an oop against null, if_acmpeq/if_acmpne compare two oops
+    // for identity. javac lowers the ternaries below to (respectively) ifnonnull / ifnull /
+    // if_acmpne / if_acmpeq, so the four cover all four opcodes. They lower through the SAME
+    // shared branch_if as the int forms; the backend already emits null/nonnull and reuses eq/ne.
+    static int refIsNull(Object o)         { return o == null ? 1 : 0; }    // ifnonnull
+    static int refNotNull(Object o)        { return o != null ? 1 : 0; }    // ifnull
+    static int refSame(Object a, Object b) { return a == b ? 10 : 20; }     // if_acmpne
+    static int refDiff(Object a, Object b) { return a != b ? 10 : 20; }     // if_acmpeq
+
     static int fails = 0;
 
     static void check(String name, int got, int want) {
@@ -545,6 +555,8 @@ public class JitTest {
         // image rewrote it before any class was initialized); the whitelist accepts that variant.
         int sg = 0, sp = 0, sgo = 0;
         int shInit = SHolder.val;   // ensure SHolder is initialized before sGetOther compiles
+        // Reference-branch accumulators (ifnull/ifnonnull/if_acmpeq/if_acmpne).
+        int rbn = 0, rbnn = 0, rbs = 0, rbd = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -617,6 +629,10 @@ public class JitTest {
             sg   = sGet();             // Fase 6: getstatic sReadOnly -> 100
             sp   = sPut(55);           // Fase 6: putstatic sBox=55 + getstatic -> 55
             sgo  = sGetOther();        // Fase 6: getstatic SHolder.val -> 77 (cross-class)
+            rbn  = refIsNull(boxObj);  // ref-branch ifnonnull: boxObj != null -> 0
+            rbnn = refNotNull(boxObj); // ref-branch ifnull:    boxObj != null -> 1
+            rbs  = refSame(boxObj, boxObj); // ref-branch if_acmpne: same -> 10
+            rbd  = refDiff(boxObj, strObj); // ref-branch if_acmpeq: diff -> 10
         }
 
         check("add(7,5)",      ra, 12);
@@ -932,6 +948,19 @@ public class JitTest {
         check("sGet() again",            sGet(), 100);
         check("sPut(99) fresh",          sPut(99), 99);
         check("shInit sanity",           shInit, 77);
+
+        // Reference branches (ifnull/ifnonnull/if_acmpeq/if_acmpne) compiled with the r5900
+        // backend's null/nonnull + eq/ne cond_ops. The warmed values took the non-null / distinct
+        // path; the direct calls below take the OPPOSITE path so both polarities of each emitted
+        // beq/bne run. Cross-check [JIT-DIAG] shows refIsNull/refNotNull/refSame/refDiff COMPILED.
+        check("refIsNull(box) warm",     rbn, 0);      // ifnonnull, non-null -> 0
+        check("refNotNull(box) warm",    rbnn, 1);     // ifnull, non-null -> 1
+        check("refSame(box,box) warm",   rbs, 10);     // if_acmpne, same -> 10
+        check("refDiff(box,str) warm",   rbd, 10);     // if_acmpeq, distinct -> 10
+        check("refIsNull(null)",         refIsNull(null), 1);         // null -> 1
+        check("refNotNull(null)",        refNotNull(null), 0);        // null -> 0
+        check("refSame(box,str)",        refSame(boxObj, strObj), 20);// distinct -> 20
+        check("refDiff(box,box)",        refDiff(boxObj, boxObj), 20);// same -> 20
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
