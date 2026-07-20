@@ -98,6 +98,16 @@ public class JitTest {
     static int gx(Pt p)        { return p.x; }            // field load (offset x)
     static int gy(Pt p)        { return p.y; }            // field load (offset y)
     static int sx(Pt p, int v) { p.x = v; return p.x; }  // field store + reload
+    // Group 2: byte/short/char instance fields. Getters verify sign-extend
+    // (fast_bgetfield/fast_sgetfield) vs zero-extend (fast_cgetfield); setters store via
+    // fast_bputfield/fast_sputfield (char store also uses fast_sputfield -- no fast_cputfield).
+    static final class BSC { byte bf; short sf; char cf; }
+    static int gBf(BSC o)        { return o.bf; }            // fast_bgetfield (signed)
+    static int gSf(BSC o)        { return o.sf; }            // fast_sgetfield (signed)
+    static int gCf(BSC o)        { return o.cf; }            // fast_cgetfield (zero-extend)
+    static int sBf(BSC o, int v) { o.bf = (byte)v;  return o.bf; } // fast_bputfield + reload
+    static int sSf(BSC o, int v) { o.sf = (short)v; return o.sf; } // fast_sputfield + reload
+    static int sCf(BSC o, int v) { o.cf = (char)v;  return o.cf; } // fast_sputfield store + fast_cgetfield reload
 
     // Marco 3.6b-inline: a resolved static call. addHelper is a fully-whitelisted
     // leaf; the shared compiler INLINES it into each caller (internal_compile_inlined
@@ -575,6 +585,9 @@ public class JitTest {
         short[] sarr  = { 1000, -25536, 32767 };   // sarr[1] tests saload sign-extend
         short[] sarrS = new short[3];
         int bag = 0, bas = 0, bsm = 0, cag = 0, cas = 0, sag = 0, sas = 0;
+        // Group 2: byte/short/char instance field leaves (sign vs zero extension).
+        BSC bsc = new BSC();
+        int gbf = 0, gsf = 0, gcf = 0, sbf = 0, ssf = 0, scf = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -658,6 +671,12 @@ public class JitTest {
             cas  = caSet(carrS, 1, 65535);  // castore ->(char)65535, read 65535
             sag  = saGet(sarr, 1);          // saload signed -> -25536
             sas  = saSet(sarrS, 1, 40000);  // sastore 40000->(short)-25536, read -25536
+            sbf  = sBf(bsc, 200);           // Group 2 fast_bputfield 200->(byte)-56, reload -56
+            ssf  = sSf(bsc, 40000);         // fast_sputfield 40000->(short)-25536, reload -25536
+            scf  = sCf(bsc, 65535);         // fast_sputfield (char)65535 store, fast_cgetfield reload
+            gbf  = gBf(bsc);                // fast_bgetfield sign-ext -> -56
+            gsf  = gSf(bsc);                // fast_sgetfield sign-ext -> -25536
+            gcf  = gCf(bsc);                // fast_cgetfield zero-ext -> 65535
         }
 
         check("add(7,5)",      ra, 12);
@@ -997,6 +1016,16 @@ public class JitTest {
         check("caSet(carrS,1,65535)",    cas, 65535);     // (char)65535 stored + read
         check("saGet(sarr,1) signed",    sag, -25536);    // saload sign-extend
         check("saSet(sarrS,1,40000)",    sas, -25536);    // 40000 -> (short)-25536, read back
+
+        // Group 2: byte/short/char instance fields. Cross-check [JIT-DIAG] shows gBf/gSf/gCf/
+        // sBf/sSf/sCf COMPILED. Same sign-extend (fast_bgetfield/fast_sgetfield) vs zero-extend
+        // (fast_cgetfield) distinction as Group 1, but on object fields (FieldAddress).
+        check("sBf(bsc,200)",            sbf, -56);       // fast_bputfield + reload
+        check("sSf(bsc,40000)",          ssf, -25536);    // fast_sputfield + reload
+        check("sCf(bsc,65535)",          scf, 65535);     // fast_sputfield store + fast_cgetfield reload
+        check("gBf(bsc) signed",         gbf, -56);       // fast_bgetfield sign-extend
+        check("gSf(bsc) signed",         gsf, -25536);    // fast_sgetfield sign-extend
+        check("gCf(bsc) zero-ext",       gcf, 65535);     // fast_cgetfield zero-extend
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
