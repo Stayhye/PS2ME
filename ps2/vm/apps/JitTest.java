@@ -28,6 +28,12 @@ public class JitTest {
     static int addImm(int a) { return a + 5; }       // addiu
     static int subImm(int a) { return a - 3; }       // addiu (negated)
     static int andImm(int a) { return a & 255; }     // andi
+    // Group 3: ldc of an INT constant. Values > 32767 / < -32768 do not fit sipush,
+    // so javac emits ldc (quickens to fast_1_ldc) + the int is materialized via mips_li
+    // (set_int), like iconst/bipush. A String/float ldc leaves the method non-whitelisted.
+    static int ldcBig(int x)  { return x + 100000; }    // fast_1_ldc 100000 + iadd
+    static int ldcNeg(int x)  { return x + -70000; }    // fast_1_ldc -70000 + iadd
+    static int ldcMask(int x) { return x & 0xCAFE00; }  // fast_1_ldc 0xCAFE00 + iand
 
     // Marco 3.2a: forward branches (if / if_icmp / goto) + a local store forced
     // to memory at a branch merge. Each leaf's every bytecode is on the Fase-3
@@ -588,6 +594,8 @@ public class JitTest {
         // Group 2: byte/short/char instance field leaves (sign vs zero extension).
         BSC bsc = new BSC();
         int gbf = 0, gsf = 0, gcf = 0, sbf = 0, ssf = 0, scf = 0;
+        // Group 3: int-ldc leaves (large constants materialized via mips_li).
+        int lbg = 0, lng = 0, lmk = 0;
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -677,6 +685,9 @@ public class JitTest {
             gbf  = gBf(bsc);                // fast_bgetfield sign-ext -> -56
             gsf  = gSf(bsc);                // fast_sgetfield sign-ext -> -25536
             gcf  = gCf(bsc);                // fast_cgetfield zero-ext -> 65535
+            lbg  = ldcBig(5);               // Group 3 fast_1_ldc 100000 -> 100005
+            lng  = ldcNeg(5);               // fast_1_ldc -70000 -> -69995
+            lmk  = ldcMask(0xFFFFFF);       // fast_1_ldc 0xCAFE00 -> 13303296
         }
 
         check("add(7,5)",      ra, 12);
@@ -1026,6 +1037,12 @@ public class JitTest {
         check("gBf(bsc) signed",         gbf, -56);       // fast_bgetfield sign-extend
         check("gSf(bsc) signed",         gsf, -25536);    // fast_sgetfield sign-extend
         check("gCf(bsc) zero-ext",       gcf, 65535);     // fast_cgetfield zero-extend
+
+        // Group 3: int ldc. Cross-check [JIT-DIAG] shows ldcBig/ldcNeg/ldcMask COMPILED
+        // (the pooled constant is int -> whitelisted; a String/float ldc would not be).
+        check("ldcBig(5)",               lbg, 100005);    // fast_1_ldc 100000
+        check("ldcNeg(5)",               lng, -69995);    // fast_1_ldc -70000
+        check("ldcMask(0xFFFFFF)",       lmk, 13303296);  // fast_1_ldc 0xCAFE00
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
