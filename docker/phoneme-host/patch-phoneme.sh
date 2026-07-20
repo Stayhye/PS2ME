@@ -1117,4 +1117,25 @@ if ! grep -q 'Group 3 (ldc' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g3-ldc-int.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 68) ps2me-jit-g4-long (PS2ME JIT, ISA Group 4 -- long/64-bit integer CORE). Adds the C
+#     boundary helpers (jit_return_long + jit_lmul/lshl/lshr/lushr/lcmp) and whitelists the
+#     long-core ISA (lconst/lload/lstore/ladd/lsub/lmul/lneg/lshl/lshr/lushr/land/lor/lxor/
+#     i2l/l2i/lcmp/lreturn + ldc2_w gated on ConstantTag::is_long so a double ldc2_w stays
+#     interpreted -- Fase 4). The r5900 backend (git overlay) models a long as a pair of
+#     32-bit GPRs (lo=LSW/hi=MSW): ladd/lsub/land/lor/lxor/lneg inline with sltu-synthesized
+#     carry/borrow, mul/shift/compare call these helpers, i2l sign-extends, l2i is free.
+#     ABI (root cause of the MSW bug, confirmed by ELF disassembly): the ps2dev EE toolchain
+#     is n32/n64, NOT o32 -- a jlong occupies ONE 64-bit register (a0), not a 32-bit PAIR
+#     (a0:a1). The old o32 assumption made jit_return_long read only a0=sign-extend(LSW) and
+#     ignore a1, and jit_lcmp/lshl read the wrong register; both dropped the high word. The
+#     helpers therefore take the two words as SEPARATE jint args and reassemble via
+#     jlong_accessor; the backend splits a returned (v0-packed) jlong with sll/dsra32.
+#     Validated PCSX2 2026-07-20: addL/subL/mulL/andL/orL/xorL/negL/shlL/shrL/ushrL/i2l/lcmp
+#     all correct (LSW+MSW); zero regression (compiled_ok=100). laload/lastore + long fields/
+#     statics are Grupo 4b (two-word heap addressing); div/rem are Grupo 5. Interpreter_c.cpp
+#     is LF-only. Idempotent (guard on the whitelist block comment). See references/JIT_PLAN.md.
+if ! grep -q 'Group 4 (long)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g4-long.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

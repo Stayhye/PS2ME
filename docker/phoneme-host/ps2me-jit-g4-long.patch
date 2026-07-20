@@ -1,0 +1,88 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2405,6 +2405,46 @@
+     return_internal(T_VOID);
+   }
+ 
++  // Grupo 4 (long): the two-word return helper + the long primitives the r5900
++  // backend does not do 64-bit-native in this build (this port has no jvm_l*: those
++  // live only in the ARM/i386 InterpreterRuntime, and GPSkeleton's are stubs with
++  // ENABLE_INTERPRETER_GENERATOR=false). These are plain C -- the EE gcc emits
++  // correct `long long` code, byte-for-byte the interpreter's own lmul/lshl/lshr/
++  // lushr/lcmp (shift count masked to 0x3f per JVMS).
++  //
++  // ABI (CRITICAL): the ps2dev EE toolchain is n32/n64, NOT o32 -- a jlong lives in a
++  // SINGLE 64-bit register (a0, a1, ...; return in v0), never in a 32-bit register
++  // PAIR. The r5900 JIT keeps longs as two 32-bit registers (lo/hi), so the helpers
++  // take the two words as SEPARATE jint arguments (each arriving in its own 64-bit
++  // arg register, low word only) and reassemble via jlong_accessor. Returned jlongs
++  // still come back 64-bit-packed in v0, so the backend splits v0 into lo/hi
++  // (sll/dsra32). MSW_FIRST_FOR_LONG=0 => words[0]=LSW, words[1]=MSW.
++  extern "C" void jit_return_long(jint lo, jint hi) {
++    jlong_accessor acc; acc.words[0] = lo; acc.words[1] = hi;
++    LONG_PUSH(acc.long_value);
++    return_internal(T_LONG);
++  }
++  extern "C" jlong jit_lmul (jint alo, jint ahi, jint blo, jint bhi) {
++    jlong_accessor a, b; a.words[0]=alo; a.words[1]=ahi; b.words[0]=blo; b.words[1]=bhi;
++    return a.long_value * b.long_value;
++  }
++  extern "C" jlong jit_lshl (jint alo, jint ahi, jint s) {
++    jlong_accessor a; a.words[0]=alo; a.words[1]=ahi;
++    return a.long_value << (s & 0x3f);
++  }
++  extern "C" jlong jit_lshr (jint alo, jint ahi, jint s) {   // arithmetic
++    jlong_accessor a; a.words[0]=alo; a.words[1]=ahi;
++    return a.long_value >> (s & 0x3f);
++  }
++  extern "C" jlong jit_lushr(jint alo, jint ahi, jint s) {   // logical
++    jlong_accessor a; a.words[0]=alo; a.words[1]=ahi;
++    return (jlong)((julong)a.long_value >> (s & 0x3f));
++  }
++  extern "C" jint  jit_lcmp (jint alo, jint ahi, jint blo, jint bhi) {
++    jlong_accessor a, b; a.words[0]=alo; a.words[1]=ahi; b.words[0]=blo; b.words[1]=bhi;
++    return a.long_value < b.long_value ? -1 : a.long_value == b.long_value ? 0 : 1;
++  }
++
+   // Fase 5 PASSO 2B (GC SAFEPOINT): the C-interpreter hybrid scans a COMPILED frame
+   // as if interpreted -- JavaFrame::gc_prologue takes the interpreted branch under
+   // ENABLE_C_INTERPRETER and generates the stackmap at bci(). jit_frame_enter parked
+@@ -2923,6 +2963,38 @@
+               !ConstantTag::is_int(cp().tag_value_at(cpidx))) return false;
+           l = 3; break;
+         }
++        // Group 4 (long): 64-bit integer ISA. The r5900 backend models a long as a
++        // pair of 32-bit GPRs (lo=LSW/hi=MSW); ladd/lsub/land/lor/lxor/lneg are
++        // inlined with sltu-synthesized carry, lmul/lshl/lshr/lushr/lcmp go through
++        // C helpers (jit_l*), i2l sign-extends, l2i is free (the shared layer re-
++        // types the LSW as T_INT). lload/lstore/lconst are pure VSF + two-word
++        // load/store (verified vs Interpreter_c's GET_LOCAL_LOW/HIGH). div/rem are
++        // Grupo 5 (left off). laload/lastore and long fields/statics are a later cut
++        // (two-word heap addressing). ldc2_w pushes a long OR double constant -> gate
++        // on is_long so a double ldc2_w leaves the method non-whitelisted (Fase 4).
++        case Bytecodes::_lconst_0: case Bytecodes::_lconst_1:
++        case Bytecodes::_lload_0:  case Bytecodes::_lload_1:
++        case Bytecodes::_lload_2:  case Bytecodes::_lload_3:
++        case Bytecodes::_lstore_0: case Bytecodes::_lstore_1:
++        case Bytecodes::_lstore_2: case Bytecodes::_lstore_3:
++        case Bytecodes::_ladd: case Bytecodes::_lsub: case Bytecodes::_lmul:
++        case Bytecodes::_lneg:
++        case Bytecodes::_lshl: case Bytecodes::_lshr: case Bytecodes::_lushr:
++        case Bytecodes::_land: case Bytecodes::_lor:  case Bytecodes::_lxor:
++        case Bytecodes::_i2l:  case Bytecodes::_l2i:
++        case Bytecodes::_lcmp:
++        case Bytecodes::_lreturn:
++          l = 1; break;
++        case Bytecodes::_lload:
++        case Bytecodes::_lstore:
++          l = 2; break;
++        case Bytecodes::_ldc2_w: {
++          const int cpidx = ((int)m().ubyte_at(bci + 1) << 8) | (int)m().ubyte_at(bci + 2);
++          ConstantPool::Raw cp = m().constants();
++          if (cpidx >= cp().length() ||
++              !ConstantTag::is_long(cp().tag_value_at(cpidx))) return false;
++          l = 3; break;
++        }
+         // Marco 3.7a: instance OBJECT/reference field load/store + reference local
+         // loads. getfield/putfield of a reference field quicken to the 'a' fast
+         // forms. fast_agetfield reuses load_from_object (already covered);
