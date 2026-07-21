@@ -678,17 +678,51 @@ void CodeGenerator::if_iinc(Value& result, BytecodeClosure::cond_op condition,
   Compiler::abort_active_compilation(true JVM_THROW);
 }
 
-// tableswitch / lookupswitch: dense/sparse jump tables. Not yet emitted.
+// Grupo 9 (tableswitch / lookupswitch): dense/sparse switch. The r5900 backend has
+// NO oop/address relocation stream (Compiler::oops_do is a no-op on MIPS), so an
+// inline jump table of ABSOLUTE target addresses would break when the compiled code
+// moves in the compiler-area during a GC. We therefore mirror the i386 backend's
+// CHAIN OF COMPARE-AND-BRANCH (CodeGenerator_i386.cpp:2278): for each case, compare
+// the index against the case key and branch to the target bci if equal; fall through
+// to the default at the end. This reuses cmp_values + conditional_jump -- the exact
+// path if_icmp already lowers through -- so there is ZERO new encoder, ZERO jump
+// table and NO relocation. Targets are bci-relative (bci()+jump_offset) and become
+// CompilationContinuations, identical to a normal forward branch. A backward case
+// offset (a switch used as a loop back-edge) is not modelled here: bail cleanly and
+// PERMANENTLY, same as i386. Immediate indices never reach here -- the shared
+// BytecodeCompileClosure::table_switch/lookup_switch resolves them to a plain branch.
 void CodeGenerator::table_switch(Value& index, jint table_index, jint default_dest,
                                  jint low, jint high JVM_TRAPS) {
-  (void)index; (void)table_index; (void)default_dest; (void)low; (void)high;
-  Compiler::abort_active_compilation(true JVM_THROW);
+  GUARANTEE(index.in_register(), "Immediates handled by caller");
+  for (int i = 0; i < (high - low + 1); i++) {
+    const int jump_offset = method()->get_java_switch_int(4 * i + table_index + 12);
+    if (jump_offset <= 0) {
+      // Negative/zero offset (backward branch) is not the usual case -- bail clean.
+      Compiler::abort_active_compilation(true JVM_THROW);
+    }
+    Value key(T_INT);
+    key.set_int(i + low);
+    cmp_values(index, key);
+    conditional_jump(BytecodeClosure::eq, bci() + jump_offset, false JVM_CHECK);
+  }
+  branch(default_dest JVM_NO_CHECK_AT_BOTTOM);
 }
 
 void CodeGenerator::lookup_switch(Value& index, jint table_index, jint default_dest,
                                   jint num_of_pairs JVM_TRAPS) {
-  (void)index; (void)table_index; (void)default_dest; (void)num_of_pairs;
-  Compiler::abort_active_compilation(true JVM_THROW);
+  GUARANTEE(index.in_register(), "Immediates handled by caller");
+  for (int i = 0; i < num_of_pairs; i++) {
+    const int key_val     = method()->get_java_switch_int(8 * i + table_index + 8);
+    const int jump_offset = method()->get_java_switch_int(8 * i + table_index + 12);
+    if (jump_offset <= 0) {
+      Compiler::abort_active_compilation(true JVM_THROW);
+    }
+    Value key(T_INT);
+    key.set_int(key_val);
+    cmp_values(index, key);
+    conditional_jump(BytecodeClosure::eq, bci() + jump_offset, false JVM_CHECK);
+  }
+  branch(default_dest JVM_NO_CHECK_AT_BOTTOM);
 }
 
 // ---- allocation / type checks ------------------------------------------------
