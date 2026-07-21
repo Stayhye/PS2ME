@@ -1138,4 +1138,25 @@ if ! grep -q 'Group 4 (long)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g4-long.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 69) ps2me-jit-g9-switch (PS2ME JIT, ISA Group 9 -- tableswitch/lookupswitch). WHITELIST-
+#     ONLY: the r5900 backend (git overlay CodeGenerator_mips.cpp table_switch/lookup_switch)
+#     lowers a switch to a CHAIN OF COMPARE-AND-BRANCH (mirrors i386): for each case, compare
+#     the index against the key and branch to that target if equal, else fall through to the
+#     default. No inline jump table -> no address relocation (the r5900 backend has no oops_do
+#     reloc stream), reusing the exact cmp_values + conditional_jump path if_icmp already uses.
+#     This step only widens jit_fase3_whitelisted to accept _tableswitch/_lookupswitch. Both
+#     are VARIABLE LENGTH: the operand table is 4-byte aligned after the opcode (a_bci =
+#     align4(bci+1)); tableswitch = default(4)+low(4)+high(4)+(high-low+1)*4, lookupswitch =
+#     default(4)+npairs(4)+npairs*8 (matches Bytecodes::wide_length_for and the interp
+#     handlers). Every case offset must be FORWARD: the backend bails permanently on a
+#     backward offset (a switch as a loop back-edge it does not model), so reject here to
+#     avoid arming a method that would only arm-then-bail. get_java_switch_int reads a native
+#     int from the romized aligned table, exactly like CodeGenerator::table_switch. Validated
+#     PCSX2 2026-07-21: tsw/tswNeg/lsw COMPILED, 10 values incl. default on both boundary
+#     sides + negative keys + sparse lookup; zero regression (compiled_ok=100). Interpreter_c.cpp
+#     is LF-only. Idempotent (guard on the whitelist block comment). See references/JIT_PLAN.md.
+if ! grep -q 'Group 9 (switch)' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g9-switch.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
