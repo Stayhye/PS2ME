@@ -52,6 +52,26 @@ public class JitTest {
     static int  lowL(long a)         { return (int) a; } // l2i + ireturn
     static int  cmpL(long a, long b) { return (a < b) ? -7 : (a > b) ? 7 : 0; } // lcmp + ifXX
 
+    // Group 9: switch. tableswitch (dense contiguous keys) and lookupswitch (sparse
+    // keys) both lower to a COMPARE-AND-BRANCH chain (CodeGenerator_mips.cpp): compare
+    // the index against each case key, branch to that target on equality, else fall
+    // through to default. No inline jump table -> no address relocation (the r5900
+    // backend has none). The index is a PARAMETER (never immediate), so the shared
+    // driver's constant fast-path is skipped and the real backend runs. Small bodies
+    // for the bring-up code_size cap. tswNeg exercises a negative low (cmp vs neg imm).
+    static int tsw(int x) {                   // tableswitch low=0 high=3
+        switch (x) { case 0: return 100; case 1: return 111;
+                     case 2: return 122; case 3: return 133; default: return -1; }
+    }
+    static int tswNeg(int x) {                // tableswitch low=-2 high=0 (negative keys)
+        switch (x) { case -2: return 500; case -1: return 501;
+                     case 0: return 502; default: return -7; }
+    }
+    static int lsw(int x) {                   // lookupswitch (sparse keys)
+        switch (x) { case 10: return 210; case 100: return 310;
+                     case 1000: return 410; default: return -9; }
+    }
+
     // Marco 3.2a: forward branches (if / if_icmp / goto) + a local store forced
     // to memory at a branch merge. Each leaf's every bytecode is on the Fase-3
     // whitelist and has only forward branch offsets, so the strict trigger arms
@@ -628,6 +648,10 @@ public class JitTest {
         long vAdd = 0, vSub = 0, vMul = 0, vAnd = 0, vOr = 0, vXor = 0, vNeg = 0;
         long vShl = 0, vShr = 0, vUshr = 0, vI2lN = 0, vI2lP = 0;
         int  vLow = 0, vCmpLt = 0, vCmpGt = 0, vCmpEq = 0;
+        // Group 9 switch result holders: each case key + default on both boundary sides.
+        int tA0 = 0, tA3 = 0, tAlo = 0, tAhi = 0;   // tsw: case 0, case 3, default(<0), default(>3)
+        int tN2 = 0, tN0 = 0, tNd = 0;              // tswNeg: case -2, case 0, default
+        int lS10 = 0, lS1k = 0, lSd = 0;            // lsw: case 10, case 1000, default
         // Warm the bail-out leaves FIRST, before the covered leaves fill/pressure the
         // compiler area, so they definitely reach the backend and bail. The bail is
         // PERMANENT (is_permanent=true -> impossible_to_compile), so each bails ONCE
@@ -736,6 +760,12 @@ public class JitTest {
             vCmpLt = cmpL(la, lb);          // lcmp la<lb -> -7
             vCmpGt = cmpL(lb, la);          // lcmp lb>la -> 7
             vCmpEq = cmpL(la, la);          // lcmp la==la -> 0
+            tA0  = tsw(0);    tA3  = tsw(3); // Group 9 tableswitch: case 0->100, case 3->133
+            tAlo = tsw(-1);   tAhi = tsw(4); // default below (<low) / above (>high) -> -1
+            tN2  = tswNeg(-2); tN0 = tswNeg(0); // tableswitch neg keys: -2->500, 0->502
+            tNd  = tswNeg(5);               // outside [-2,0] -> default -7
+            lS10 = lsw(10);   lS1k = lsw(1000); // lookupswitch: 10->210, 1000->410
+            lSd  = lsw(7);                  // no match -> default -9
         }
 
         check("add(7,5)",      ra, 12);
@@ -1112,6 +1142,20 @@ public class JitTest {
         check("cmpLt",   vCmpLt, -7);
         check("cmpGt",   vCmpGt,  7);
         check("cmpEq",   vCmpEq,  0);
+
+        // Group 9: switch. [JIT-DIAG] should show tsw/tswNeg/lsw COMPILED. Each case key
+        // hits its branch; both boundary sides fall through to the default. tswNeg proves
+        // a negative low compares correctly; lsw proves the sparse lookupswitch chain.
+        check("tsw(0)",     tA0,  100);
+        check("tsw(3)",     tA3,  133);
+        check("tsw(<low)",  tAlo,  -1);   // default, index below low
+        check("tsw(>high)", tAhi,  -1);   // default, index above high
+        check("tswNeg(-2)", tN2,  500);   // negative case key
+        check("tswNeg(0)",  tN0,  502);
+        check("tswNeg(def)",tNd,   -7);
+        check("lsw(10)",    lS10, 210);
+        check("lsw(1000)",  lS1k, 410);
+        check("lsw(def)",   lSd,   -9);   // no match -> default
 
         // Exercise the OTHER branch of each leaf (already compiled above), so
         // both the taken and fall-through paths of the emitted branch run.
