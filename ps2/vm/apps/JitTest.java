@@ -46,6 +46,21 @@ public class JitTest {
     static int ldcStrSame() { return ("dup" == "dup") ? 1 : 0; }  // same cpool entry -> same oop -> 1
     static int ldcStrNe()   { return ("aa"  == "bb")  ? 1 : 0; }  // distinct literals -> distinct -> 0
 
+    // Group 6: object static field. soPut stores a ref into a NON-final static via
+    // fast_a_putstatic (store_to_object emits the write barrier -- the holder mirror is
+    // heap), reads it back via fast_1_getstatic and checks identity. soFinLen reads a
+    // static FINAL String; the MIPS Value.cpp gate forces the GC-safe load-path (no
+    // embedded referent) instead of a compile-time oop immediate.
+    static Object sObjRef;
+    static final String SFIN = "finalObj";                        // 8 chars
+    static int soPut(Object o) { sObjRef = o; return (sObjRef == o) ? 1 : 0; }
+    static int soFinLen()      { return SFIN.length(); }          // static-final object get -> 8
+
+    // Group 8: wide prefix. 'a += 200' has a constant outside the iinc signed-byte range,
+    // so javac emits WIDE iinc (0xc4 0x84, 2-byte index + 2-byte const). Whitelist-only:
+    // the backend addresses the local index-width-agnostically (g_jlocals - index*4).
+    static int wideInc(int x) { int a = x; a += 200; return a; }  // wide iinc -> x + 200
+
     // Group 4: long (64-bit) ISA. add/sub/and/or/xor/neg inline (sltu carry);
     // mul/shl/shr/ushr via C helper (jit_l*); i2l sign-extends; l2i is free; lcmp
     // feeds the following ifXX. lload/lstore/lconst/lreturn are two-word VSF.
@@ -653,6 +668,7 @@ public class JitTest {
         // Group 3: int-ldc leaves (large constants materialized via mips_li).
         int lbg = 0, lng = 0, lmk = 0;
         int lStrLen = 0, lStrChar = 0, lStrSame = 0, lStrNe = 0;  // Group String-ldc
+        int soP = 0, soF = 0, wInc = 0;                          // Group 6 (static obj) + Group 8 (wide)
         // Group 4 long inputs + result holders. la/lb straddle the 32-bit boundary
         // (hi and lo both nonzero) so add carries, sub borrows, and shifts cross the
         // word split; lc is negative so shr sign-extends and ushr does not.
@@ -760,6 +776,9 @@ public class JitTest {
             lStrChar = ldcStrChar();        // ldc "abc" + charAt(1) -> 'b' = 98
             lStrSame = ldcStrSame();        // ("dup"=="dup") same oop -> 1
             lStrNe   = ldcStrNe();          // ("aa"=="bb") distinct oops -> 0
+            soP  = soPut("z");              // Group 6 fast_a_putstatic + fast_1_getstatic identity -> 1
+            soF  = soFinLen();              // static-final object get via load-path -> 8
+            wInc = wideInc(5);              // Group 8 wide iinc -> 205
             vAdd  = addL(la, lb);           // Group 4 ladd (carry) -> 0x0000000400000000
             vSub  = subL(la, lb);           // lsub (borrow) -> -2
             vMul  = mulL(0x100000000L, 3L); // lmul (C helper) -> 0x300000000
@@ -1146,6 +1165,14 @@ public class JitTest {
         check("ldcStrChar('abc',1)",     lStrChar, 98);   // ldc String + charAt -> 'b'
         check("ldcStrSame",              lStrSame, 1);    // same cpool entry -> same oop
         check("ldcStrNe",                lStrNe,   0);    // distinct literals -> distinct oops
+
+        // Group 6 (object static field) + Group 8 (wide). [JIT-DIAG] shows soPut/soFinLen/
+        // wideInc COMPILED. soPut proves fast_a_putstatic (object store + write barrier) +
+        // read-back identity; soFinLen proves a static-final object get takes the GC-safe
+        // load-path (no crash embedding the referent); wideInc proves the wide prefix.
+        check("soPut object static",     soP,  1);    // fast_a_putstatic + fast_1_getstatic
+        check("soFinLen('finalObj')",    soF,  8);    // static-final object get (load-path)
+        check("wideInc(5) wide iinc",    wInc, 205);  // wide iinc 200
 
         // Group 4: long ISA. Cross-check [JIT-DIAG] shows addL/subL/mulL/.../cmpL
         // COMPILED. checkL verifies both words (LSW+MSW) so carry/borrow and the
