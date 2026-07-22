@@ -35,6 +35,17 @@ public class JitTest {
     static int ldcNeg(int x)  { return x + -70000; }    // fast_1_ldc -70000 + iadd
     static int ldcMask(int x) { return x & 0xCAFE00; }  // fast_1_ldc 0xCAFE00 + iand
 
+    // Group String-ldc: a String constant from ldc. The r5900 backend can't embed the
+    // moveable String oop, so move(Value&,Oop*) resolves it at runtime from the frame's
+    // cpool slot (cpool[idx]), like the interpreter's fast_ldc. ldcStrLen proves the
+    // materialized oop is the RIGHT String (content); ldcStrSame proves two ldc of the
+    // SAME cpool entry return the SAME oop (identity / GC-safe consistency); ldcStrNe
+    // proves two DISTINCT literals resolve to distinct oops (correct per-index read).
+    static int ldcStrLen()  { return "PS2ME".length(); }          // ldc String + length -> 5
+    static int ldcStrChar() { return "abc".charAt(1); }           // ldc String + charAt(1) -> 'b'=98
+    static int ldcStrSame() { return ("dup" == "dup") ? 1 : 0; }  // same cpool entry -> same oop -> 1
+    static int ldcStrNe()   { return ("aa"  == "bb")  ? 1 : 0; }  // distinct literals -> distinct -> 0
+
     // Group 4: long (64-bit) ISA. add/sub/and/or/xor/neg inline (sltu carry);
     // mul/shl/shr/ushr via C helper (jit_l*); i2l sign-extends; l2i is free; lcmp
     // feeds the following ifXX. lload/lstore/lconst/lreturn are two-word VSF.
@@ -641,6 +652,7 @@ public class JitTest {
         int gbf = 0, gsf = 0, gcf = 0, sbf = 0, ssf = 0, scf = 0;
         // Group 3: int-ldc leaves (large constants materialized via mips_li).
         int lbg = 0, lng = 0, lmk = 0;
+        int lStrLen = 0, lStrChar = 0, lStrSame = 0, lStrNe = 0;  // Group String-ldc
         // Group 4 long inputs + result holders. la/lb straddle the 32-bit boundary
         // (hi and lo both nonzero) so add carries, sub borrows, and shifts cross the
         // word split; lc is negative so shr sign-extends and ushr does not.
@@ -744,6 +756,10 @@ public class JitTest {
             lbg  = ldcBig(5);               // Group 3 fast_1_ldc 100000 -> 100005
             lng  = ldcNeg(5);               // fast_1_ldc -70000 -> -69995
             lmk  = ldcMask(0xFFFFFF);       // fast_1_ldc 0xCAFE00 -> 13303296
+            lStrLen  = ldcStrLen();         // Group String-ldc: ldc "PS2ME" + length -> 5
+            lStrChar = ldcStrChar();        // ldc "abc" + charAt(1) -> 'b' = 98
+            lStrSame = ldcStrSame();        // ("dup"=="dup") same oop -> 1
+            lStrNe   = ldcStrNe();          // ("aa"=="bb") distinct oops -> 0
             vAdd  = addL(la, lb);           // Group 4 ladd (carry) -> 0x0000000400000000
             vSub  = subL(la, lb);           // lsub (borrow) -> -2
             vMul  = mulL(0x100000000L, 3L); // lmul (C helper) -> 0x300000000
@@ -1121,6 +1137,15 @@ public class JitTest {
         check("ldcBig(5)",               lbg, 100005);    // fast_1_ldc 100000
         check("ldcNeg(5)",               lng, -69995);    // fast_1_ldc -70000
         check("ldcMask(0xFFFFFF)",       lmk, 13303296);  // fast_1_ldc 0xCAFE00
+
+        // Group String-ldc. Cross-check [JIT-DIAG] shows ldcStrLen/ldcStrChar/ldcStrSame/
+        // ldcStrNe COMPILED (String ldc now whitelisted). The oop is resolved at runtime
+        // from cpool[idx] (never embedded). Len/char prove the RIGHT String; Same/Ne prove
+        // per-index identity (same entry -> same oop, distinct literals -> distinct oops).
+        check("ldcStrLen('PS2ME')",      lStrLen,  5);    // ldc String + length
+        check("ldcStrChar('abc',1)",     lStrChar, 98);   // ldc String + charAt -> 'b'
+        check("ldcStrSame",              lStrSame, 1);    // same cpool entry -> same oop
+        check("ldcStrNe",                lStrNe,   0);    // distinct literals -> distinct oops
 
         // Group 4: long ISA. Cross-check [JIT-DIAG] shows addL/subL/mulL/.../cmpL
         // COMPILED. checkL verifies both words (LSW+MSW) so carry/borrow and the
