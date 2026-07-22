@@ -497,32 +497,63 @@ void CodeGenerator::move(const Value& dst, const Value& src, const Condition con
   }
 }
 
-// Fase 6 (static fields): materialize an oop into a register. In the whitelisted set
-// this is reached ONLY for the class base of get_static/put_static
-// (BytecodeCompileClosure::get_static does klass_value.set_obj(&klass), and Value::set_obj
-// assigns a register then calls this move). The r5900 backend has NO oop-relocation
+// Materialize an oop immediate into a register. The r5900 backend has NO oop-relocation
 // stream (Compiler::oops_do is a no-op on MIPS), so we must NEVER bake a moveable oop
-// literal into native code. Resolve the class GC-safely from its class_id via the
-// class_list indirection -- byte-for-byte the interpreter's
-// get_class_by_id(id) = *(address*)(_class_list_base + id*4). A GC that moves the class
-// updates _class_list_base (a jvm_fast_globals field), so the compiled code always reads
-// the CURRENT class pointer; class_id is a stable compile-time constant, so no oop is
-// embedded. The field offset is added afterwards by FieldAddress (load/store_to_object).
-// Non-class oop immediates (e.g. a final object-static referent) would need a real
-// relocation and are kept off the whitelist -> only classes reach here (GUARANTEEd).
+// literal into native code. Two GC-safe cases reach here from the whitelisted set:
+//
+// (a) Fase 6 (static fields): the holder CLASS base of get_static/put_static
+//     (BytecodeCompileClosure::get_static does klass_value.set_obj(&klass)). Resolve it
+//     from its class_id via the class_list indirection -- byte-for-byte the interpreter's
+//     get_class_by_id(id) = *(address*)(_class_list_base + id*4). A GC that moves the class
+//     updates _class_list_base (a jvm_fast_globals field), so the code reads the CURRENT
+//     pointer; class_id is a stable compile-time constant, so no oop is embedded.
+//
+// (b) Group String-ldc: a String constant from ldc/ldc_w (push_obj -> Value::set_obj ->
+//     move). Resolve it at RUNTIME from this method's constant pool exactly like the
+//     interpreter's fast_ldc: cpool = *(g_jfp + JavaFrame::cpool_offset()) (the frame slot
+//     jit_frame_enter set), then oop = cpool[idx]. The (quickened) cpool slot already holds
+//     the RESOLVED String oop -- InterpreterRuntime::_quicken forces string_at before it
+//     rewrites to _fast_1_ldc, and Method::iterate_push_constant_1 resolves it at compile
+//     time too. idx is a compile-time constant read from the ldc bytecode at bci(); no
+//     inlining on MIPS means method()==root_method(), so the frame's cpool matches this
+//     method's pool. Reading fresh each execution is GC-safe (never caches an oop): two
+//     loads, no call, no GC point -- a pure materialization like (a).
+//
+// A non-class, non-String oop immediate (e.g. a final object-static referent) would need a
+// real relocation and is kept off the whitelist -> only (a)/(b) reach here (GUARANTEEd).
 void CodeGenerator::move(Value& dst, Oop* obj, Condition cond) {
   (void)cond;
   GUARANTEE(dst.in_register(), "set_obj assigns a register before calling move");
-  GUARANTEE(obj->is_java_class(),
-            "Fase 6: only a class oop (get_static base) is materialized on r5900");
-  JavaClass::Raw klass = obj->obj();
-  const int class_id = klass().class_id();
   const Assembler::Register d = dst.lo_register();
-  // d = &_class_list_base (a stable jvm_fast_globals field address, never an oop)
-  const juint clba = (juint)(unsigned long)(address)&_class_list_base;
-  mips_li(this, d, clba);
-  emit(Assembler::encode_lw(d, d, 0));               // d = _class_list_base (GC-current)
-  emit(Assembler::encode_lw(d, d, class_id * 4));    // d = class_list[class_id] (the class)
+
+  if (obj->is_java_class()) {                          // (a) static field holder class
+    JavaClass::Raw klass = obj->obj();
+    const int class_id = klass().class_id();
+    // d = &_class_list_base (a stable jvm_fast_globals field address, never an oop)
+    const juint clba = (juint)(unsigned long)(address)&_class_list_base;
+    mips_li(this, d, clba);
+    emit(Assembler::encode_lw(d, d, 0));               // d = _class_list_base (GC-current)
+    emit(Assembler::encode_lw(d, d, class_id * 4));    // d = class_list[class_id] (the class)
+    return;
+  }
+
+  // (b) String-ldc: read the (compile-time constant) cpool index from the ldc bytecode.
+  GUARANTEE(obj->is_string(),
+            "only a class oop (static base) or a String (ldc) is materialized on r5900");
+  const jubyte bc = method()->ubyte_at(bci());
+  int idx;
+  if (bc == Bytecodes::_ldc || bc == Bytecodes::_fast_1_ldc) {
+    idx = method()->ubyte_at(bci() + 1);               // 1-byte cpool index
+  } else {
+    GUARANTEE(bc == Bytecodes::_ldc_w || bc == Bytecodes::_fast_1_ldc_w,
+              "a String oop only reaches move() from an ldc bytecode");
+    idx = ((int)method()->ubyte_at(bci() + 1) << 8)    // 2-byte big-endian cpool index
+        |  (int)method()->ubyte_at(bci() + 2);
+  }
+  // d = *(g_jfp + cpool_offset) = this method's constant pool base (== GET_FRAME(cpool))
+  emit(Assembler::encode_lw(d, Assembler::fp, JavaFrame::cpool_offset()));
+  // d = cpool[idx] = the resolved String oop (read GC-current on every execution)
+  emit(Assembler::encode_lw(d, d, idx * 4));
 }
 
 void CodeGenerator::move(Assembler::Register dst, Assembler::Register src,
