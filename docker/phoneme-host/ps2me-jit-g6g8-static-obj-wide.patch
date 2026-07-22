@@ -1,0 +1,81 @@
+--- a/cldc/src/vm/share/compiler/Value.cpp
++++ b/cldc/src/vm/share/compiler/Value.cpp
+@@ -174,10 +174,21 @@
+             // in the TEXT block. At this point we don't know the block type of
+             // the referenced object, so for now we disable setting immediate
+             // for cross generator.
++#if defined(MIPS)
++            // PS2ME r5900 (Group 6 static objects): the backend has NO oop-relocation
++            // stream (Compiler::oops_do is a no-op on MIPS), so a moveable object
++            // referent cannot be embedded as an immediate (CodeGenerator::move only
++            // materializes a class base via class_list or a String via cpool[idx]).
++            // Leave the Value NOT-present so BytecodeCompileClosure::get_static falls
++            // back to the GC-safe load-path (resolve the holder class via class_list,
++            // then load the static slot at runtime).
++            (void)object;
++#else
+             if (!USE_AOT_COMPILATION || !GenerateROMImage) {
+-              object = ic->obj_field(offset); 
++              object = ic->obj_field(offset);
+               set_obj(&object);
+             }
++#endif
+             break;
+ #if ENABLE_FLOAT
+           case T_FLOAT   : set_float(ic->float_field(offset));   break;
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2927,14 +2927,20 @@
+         // non-init one (mirrors _fast_init_invokestatic being whitelisted next to
+         // _fast_invokestatic, below). The class BASE is materialized GC-safely via the class_list
+         // indirection (CodeGenerator::move(Value&,Oop*) = get_class_by_id) -- no moveable oop
+-        // baked into native code -- then load/store at the static field offset. NOT covered:
+-        // _fast_2_* (long/double), _fast_a_putstatic (object put, needs the write barrier), and
+-        // a final object-static get (a compile-time object immediate -> needs oop relocation the
+-        // r5900 lacks; see move(Value&,Oop*)). Length 3 (ADVANCE(3) in the interp handlers).
++        // baked into native code -- then load/store at the static field offset. Group 6 adds
++        // the OBJECT static PUT (_fast_a_putstatic/_fast_init_a_putstatic): store_to_object emits
++        // the SAME write barrier as an instance aputfield (the holder mirror is a heap object, so
++        // FieldAddress is a HeapAddress). The object static GET already uses _fast_1_getstatic (a
++        // 1-word load, covered above); a final object-static get no longer bakes a moveable
++        // referent -- Value::set_immediate_from_static_field skips the object immediate on MIPS
++        // (patch), forcing the GC-safe load-path. NOT covered: _fast_2_* (long/double static).
++        // Length 3 (ADVANCE(3) in the interp handlers).
+         case Bytecodes::_fast_1_getstatic:
+         case Bytecodes::_fast_1_putstatic:
+         case Bytecodes::_fast_init_1_getstatic:
+         case Bytecodes::_fast_init_1_putstatic:
++        case Bytecodes::_fast_a_putstatic:            // Group 6: object static put (write barrier)
++        case Bytecodes::_fast_init_a_putstatic:
+           l = 3; break;
+         // Group 3 (ldc) + String-ldc group: ldc/ldc_w quicken to fast_1_ldc/fast_1_ldc_w,
+         // which Method::iterate routes to iterate_push_constant_1 -> push_int/push_float/
+@@ -3293,6 +3299,28 @@
+           l = a_bci + (2 + 2 * npairs) * 4 - bci;
+           break;
+         }
++        // Group 8 (wide, 0xc4): the wide prefix widens the following local-access opcode's
++        // index to 2 bytes (wide iload/istore/aload/astore/lload/lstore) or the iinc index AND
++        // constant to 2 bytes each (wide iinc). Method::iterate already dispatches wide to the
++        // SAME load_local/store_local/increment_local_int closures, and the backend addresses a
++        // local as g_jlocals - index*4 regardless of index width, so this is WHITELIST-ONLY.
++        // Accept only sub-opcodes the r5900 backend covers (int/object/long local access + iinc);
++        // reject wide fload/dload/fstore/dstore (no FP backend) and wide ret (jsr/ret unsupported).
++        // Variable length via wide_length_for = 4, or 6 for wide iinc.
++        case Bytecodes::_wide: {
++          const jubyte sub = m().ubyte_at(bci + 1);
++          switch (sub) {
++            case Bytecodes::_iload:  case Bytecodes::_istore:
++            case Bytecodes::_aload:  case Bytecodes::_astore:
++            case Bytecodes::_lload:  case Bytecodes::_lstore:
++            case Bytecodes::_iinc:
++              break;                                      // covered sub-opcode
++            default:
++              return false;                               // wide float/double/ret -> interpret
++          }
++          l = Bytecodes::wide_length_for(&m(), bci, Bytecodes::_wide);
++          break;
++        }
+         default:
+           return false;                                 // not covered by Marco 3.2a
+       }

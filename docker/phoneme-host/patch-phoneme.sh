@@ -1177,4 +1177,26 @@ if ! grep -q 'String-ldc group' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-strldc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 71) ps2me-jit-g6g8-static-obj-wide (PS2ME JIT, ISA Group 6 static-object PUT + Group 8 wide).
+#     MULTI-FILE, WHITELIST-ONLY (zero new backend). (a) Value.cpp: gate the final-object-static
+#     immediate behind #if defined(MIPS) -- the r5900 backend has no oop-relocation stream, so a
+#     moveable object referent must NOT be baked as an immediate; leaving the Value not-present
+#     forces get_static's GC-safe load-path (resolve holder via class_list, load the slot at
+#     runtime). (b) Interpreter_c.cpp: whitelist +_fast_a_putstatic/_fast_init_a_putstatic in the
+#     static block (Group 6 -- store_to_object emits the SAME write barrier as an instance
+#     aputfield; object static GET already uses _fast_1_getstatic) + a new case _wide (Group 8 --
+#     Method::iterate already dispatches wide to the index-agnostic load_local/store_local/
+#     increment_local_int closures, so we just validate the covered sub-opcode and take the
+#     variable length via wide_length_for). Reject wide fload/dload/fstore/dstore (no FP backend)
+#     and wide ret. Validated PCSX2 2026-07-22: soPut=1 (object static put + barrier + read-back),
+#     soFinLen=8 (final-object-static get via load-path, proves the Value.cpp gate does not crash),
+#     wideInc(5)=205 (wide iinc, armed dump carries the c4 prefix) all COMPILED; zero regression
+#     (compiled_ok=125). Interpreter_c.cpp is LF-only; Value.cpp normalized to LF here. Applies
+#     atomically: the guard on 'Group 8 (wide' in INTERPC means both files' hunks landed together.
+#     Idempotent (guard). Preserves patch #63's 'Fase 6 (static INT fields)' and #67/#70's
+#     'Group 3 (ldc'/'String-ldc group' anchors. See references/JIT_PLAN.md.
+if ! grep -q 'Group 8 (wide' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g6g8-static-obj-wide.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"
