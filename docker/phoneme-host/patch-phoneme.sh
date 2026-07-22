@@ -1159,4 +1159,22 @@ if ! grep -q 'Group 9 (switch)' "$INTERPC"; then
   sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-g9-switch.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
 fi
 
+# 70) ps2me-jit-strldc (PS2ME JIT, String-ldc group). MODIFIES the Group 3 ldc gate (patch
+#     #67, must run AFTER it) to also whitelist a String ldc, not just an int one. ldc/ldc_w
+#     dispatch by cpool tag: int -> push_int (set_int, no backend change); String -> push_obj
+#     -> Value::set_obj -> CodeGenerator::move(Value&,Oop*). The r5900 backend can't embed the
+#     moveable String oop (no relocation stream), so the String-ldc group makes move() resolve
+#     it at RUNTIME from the frame's cpool slot (cpool[idx], read fresh every execution = GC-
+#     safe), exactly like the interpreter's fast_ldc; jit_frame_enter sets the frame cpool, and
+#     _quicken already wrote the resolved String oop into the slot before rewriting to
+#     _fast_1_ldc (the backend change is a git overlay in CodeGenerator_mips.cpp, NOT this
+#     patch). This step only widens the tag gate to is_int || is_string || is_unresolved_string
+#     (a float ldc stays interpreted -- no r5900 FP backend). Validated PCSX2 2026-07-22:
+#     ldcStrLen=5/ldcStrChar=98/ldcStrSame=1/ldcStrNe=0 all COMPILED; zero regression
+#     (compiled_ok=100). Interpreter_c.cpp is LF-only. Idempotent (guard on the block comment;
+#     it preserves the "Group 3 (ldc" substring so patch #67's own guard still matches).
+if ! grep -q 'String-ldc group' "$INTERPC"; then
+  sed 's/\r$//' "$SCRIPT_DIR/ps2me-jit-strldc.patch" | patch -p1 --ignore-whitespace -d "$PHONEME"
+fi
+
 echo "phoneME patches applied to: $PHONEME"

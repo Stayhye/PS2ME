@@ -1,0 +1,53 @@
+--- a/cldc/src/vm/cpu/c/Interpreter_c.cpp
++++ b/cldc/src/vm/cpu/c/Interpreter_c.cpp
+@@ -2936,31 +2936,36 @@
+         case Bytecodes::_fast_init_1_getstatic:
+         case Bytecodes::_fast_init_1_putstatic:
+           l = 3; break;
+-        // Group 3 (ldc -- INT constant only): ldc/ldc_w quicken to fast_1_ldc/fast_1_ldc_w,
++        // Group 3 (ldc) + String-ldc group: ldc/ldc_w quicken to fast_1_ldc/fast_1_ldc_w,
+         // which Method::iterate routes to iterate_push_constant_1 -> push_int/push_float/
+         // push_obj by the pooled tag. push_int does Value.set_int (materialized via mips_li,
+-        // exactly like iconst/bipush) = NO backend change. But push_float has no r5900 backend,
+-        // and push_obj (a String constant) reaches move(Value&,Oop*), which materializes only a
+-        // CLASS oop GC-safely (class_list) and would corrupt on a non-class oop (no relocation
+-        // stream on r5900). Since move/set_obj carry no JVM_TRAPS to bail there, we GATE HERE by
+-        // the constant's tag: whitelist the ldc ONLY when the pooled constant is an int (a
+-        // String/float ldc leaves the method non-whitelisted -> interpreted). A GC-safe oop-
+-        // constant helper (String ldc) is a later group. fast_1_ldc index is 1 byte, fast_1_ldc_w
+-        // is 2 bytes.
+-        case Bytecodes::_ldc:            // raw (quickens to _fast_1_ldc); gated for completeness
++        // exactly like iconst/bipush) = NO backend change. push_obj (a String constant) reaches
++        // move(Value&,Oop*), which the String-ldc group now handles GC-safely: it reads the oop
++        // at RUNTIME from the frame's cpool slot (cpool[idx], never embedding the moveable oop --
++        // r5900 has no relocation), exactly like the interpreter's fast_ldc. push_float still has
++        // NO r5900 backend. So we GATE HERE by the pooled tag: whitelist the ldc when the constant
++        // is an INT or a STRING (resolved or unresolved -- iterate_push_constant_1's string_at
++        // resolves it at compile time, and _quicken already wrote the resolved oop into the slot
++        // before rewriting to _fast_1_ldc). A float ldc leaves the method non-whitelisted ->
++        // interpreted. fast_1_ldc index is 1 byte, fast_1_ldc_w is 2 bytes.
++        case Bytecodes::_ldc:            // raw (quickens to _fast_1_ldc)
+         case Bytecodes::_fast_1_ldc: {
+           const int cpidx = (int)m().ubyte_at(bci + 1);
+           ConstantPool::Raw cp = m().constants();
+-          if (cpidx >= cp().length() ||
+-              !ConstantTag::is_int(cp().tag_value_at(cpidx))) return false;
++          if (cpidx >= cp().length()) return false;
++          const jubyte tag = cp().tag_value_at(cpidx);
++          if (!(ConstantTag::is_int(tag) || ConstantTag::is_string(tag) ||
++                ConstantTag::is_unresolved_string(tag))) return false;
+           l = 2; break;
+         }
+         case Bytecodes::_ldc_w:          // raw (quickens to _fast_1_ldc_w)
+         case Bytecodes::_fast_1_ldc_w: {
+           const int cpidx = ((int)m().ubyte_at(bci + 1) << 8) | (int)m().ubyte_at(bci + 2);
+           ConstantPool::Raw cp = m().constants();
+-          if (cpidx >= cp().length() ||
+-              !ConstantTag::is_int(cp().tag_value_at(cpidx))) return false;
++          if (cpidx >= cp().length()) return false;
++          const jubyte tag = cp().tag_value_at(cpidx);
++          if (!(ConstantTag::is_int(tag) || ConstantTag::is_string(tag) ||
++                ConstantTag::is_unresolved_string(tag))) return false;
+           l = 3; break;
+         }
+         // Group 4 (long): 64-bit integer ISA. The r5900 backend models a long as a
